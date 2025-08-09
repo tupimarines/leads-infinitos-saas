@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Virtual envs
+venv/
+.env/
+.venv/
+
+# Local data
+storage/
+app.db
+
+# VCS/OS noise
+.git/
+.gitignore
+.DS_Store
+Thumbs.db
+
+# Not needed in image
+*.csv
+*.xlsx
+*.xls
+
+venv
+__pycache__
+*.pyc
+.git
+.gitignore
+GMaps Data
+storage
+*.xlsx
+*.csv
+app.db
+*.log
+input.txt
+*.env
+

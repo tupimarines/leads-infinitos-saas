@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block title %}Registrar - Leads Infinitos{% endblock %}
+{% block body %}
+  <div class="hero">
+    <div class="container">
+      <h1>Crie sua conta</h1>
+      <p class="muted">Comece seu teste grátis e extraia seus primeiros 150 leads.</p>
+    </div>
+  </div>
+  <div class="section">
+    <div class="container" style="max-width: 520px;">
+      <div class="card" style="padding: 20px;">
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <div class="flash">{{ messages[0] }}</div>
+          {% endif %}
+        {% endwith %}
+        <form method="post" action="{{ url_for('register') }}" onsubmit="const b=this.querySelector('button'); b.disabled=true; b.innerText='Criando...';">
+          <div class="grid" style="gap: 14px;">
+            <div class="field">
+              <label>Email</label>
+              <input type="email" name="email" required placeholder="voce@exemplo.com">
+            </div>
+            <div class="field">
+              <label>Senha</label>
+              <input type="password" name="password" required placeholder="••••••••">
+            </div>
+            <div>
+              <button class="btn btn-primary" type="submit" style="width:100%; height:48px; font-weight:700;">Criar conta</button>
+            </div>
+          </div>
+        </form>
+        <p class="muted" style="margin-top:10px;">Já tem conta? <a href="{{ url_for('login') }}">Entrar</a></p>
+      </div>
+    </div>
+  </div>
+{% endblock %}

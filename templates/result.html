@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block title %}Resultados da Extração - Leads Infinitos{% endblock %}
+{% block body %}
+  <div class="hero">
+    <div class="container">
+      <h1>Extração concluída</h1>
+      <p class="muted">Consulta: <strong>{{ query }}</strong></p>
+    </div>
+  </div>
+  <div class="section">
+    <div class="container" style="max-width: 900px;">
+      <div class="card" style="padding: 20px;">
+        <p>Arquivos gerados com sucesso. Clique para baixar:</p>
+        <div class="grid" style="gap: 14px;">
+          {% for item in results %}
+          <div class="card" style="padding: 16px;">
+            <div style="display:flex; justify-content: space-between; align-items:center; gap:10px; flex-wrap: wrap;">
+              <div>
+                <div style="font-weight:700;">{{ item.search }}</div>
+                <div class="muted" style="font-size: 13px;">CSV: {{ item.csv_path }} · Excel: {{ item.xlsx_path }}</div>
+              </div>
+              <div style="display:flex; gap: 8px;">
+                <a class="btn" href="{{ url_for('download') }}?path={{ item.csv_path }}">Baixar CSV</a>
+                <a class="btn btn-primary" href="{{ url_for('download') }}?path={{ item.xlsx_path }}">Baixar Excel</a>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <p class="muted" style="margin-top: 12px;">Arquivos organizados por data/usuário em <code>storage/&lt;userId&gt;/GMaps Data/&lt;YYYY-MM-DD&gt;/</code>.</p>
+        <p style="margin-top: 10px;"><a href="{{ url_for('index') }}">← Nova extração</a></p>
+      </div>
+    </div>
+  </div>
+{% endblock %}
