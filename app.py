@@ -8,8 +8,11 @@ from flask_login import (
     current_user,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_mail import Mail, Message
 import sqlite3
 import os
+import secrets
+import string
 from main import run_scraper
 
 
@@ -22,15 +25,92 @@ def get_db_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
     conn = get_db_connection()
+    
+    # Tabela de usuários (já existente)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
     )
+    
+    # Tabela de licenças
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS licenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            hotmart_purchase_id TEXT UNIQUE NOT NULL,
+            hotmart_product_id TEXT NOT NULL,
+            license_type TEXT NOT NULL CHECK (license_type IN ('semestral', 'anual')),
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
+            purchase_date TIMESTAMP NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        );
+        """
+    )
+    
+    # Tabela de webhooks da Hotmart
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hotmart_webhooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            hotmart_purchase_id TEXT,
+            payload TEXT NOT NULL,
+            processed BOOLEAN DEFAULT FALSE,
+            processed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    
+    # Tabela de configurações da Hotmart
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hotmart_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id TEXT NOT NULL,
+            client_secret TEXT NOT NULL,
+            webhook_secret TEXT,
+            product_id TEXT NOT NULL,
+            sandbox_mode BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    
+    # Tabela de reset de senha
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            used BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        );
+        """
+    )
+    
+    # Inserir configuração inicial da Hotmart se não existir
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO hotmart_config 
+        (client_id, client_secret, product_id, sandbox_mode) 
+        VALUES (?, ?, ?, ?)
+        """,
+        ('cb6bcde6-24cd-464f-80f3-e4efce3f048c', '7ee4a93d-1aec-473b-a8e6-1d0a813382e2', '5974664', True)
+    )
+    
     conn.commit()
     conn.close()
 
@@ -72,10 +152,281 @@ class User(UserMixin):
         conn.close()
         return User(new_id, email, password_hash)
 
+    def has_active_license(self) -> bool:
+        """Verifica se o usuário tem uma licença ativa"""
+        conn = get_db_connection()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as count FROM licenses 
+            WHERE user_id = ? AND status = 'active' AND expires_at > datetime('now')
+            """,
+            (self.id,)
+        ).fetchone()
+        conn.close()
+        return row['count'] > 0
+
+
+class License:
+    def __init__(self, id: int, user_id: int, hotmart_purchase_id: str, hotmart_product_id: str, 
+                 license_type: str, status: str, purchase_date: str, expires_at: str):
+        self.id = id
+        self.user_id = user_id
+        self.hotmart_purchase_id = hotmart_purchase_id
+        self.hotmart_product_id = hotmart_product_id
+        self.license_type = license_type
+        self.status = status
+        self.purchase_date = purchase_date
+        self.expires_at = expires_at
+
+    @staticmethod
+    def create(user_id: int, hotmart_purchase_id: str, hotmart_product_id: str, 
+               license_type: str, purchase_date: str) -> "License":
+        # Calcular data de expiração baseada no tipo de licença
+        from datetime import datetime, timedelta
+        purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
+        
+        if license_type == 'semestral':
+            expires_at = purchase_dt + timedelta(days=180)
+        else:  # anual
+            expires_at = purchase_dt + timedelta(days=365)
+        
+        conn = get_db_connection()
+        cur = conn.execute(
+            """
+            INSERT INTO licenses 
+            (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, hotmart_purchase_id, hotmart_product_id, license_type, 
+             purchase_date, expires_at.isoformat())
+        )
+        conn.commit()
+        new_id = cur.lastrowid
+        conn.close()
+        
+        return License(new_id, user_id, hotmart_purchase_id, hotmart_product_id, 
+                      license_type, 'active', purchase_date, expires_at.isoformat())
+
+    @staticmethod
+    def get_by_user_id(user_id: int) -> list["License"]:
+        conn = get_db_connection()
+        rows = conn.execute(
+            "SELECT * FROM licenses WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        
+        return [License(row['id'], row['user_id'], row['hotmart_purchase_id'], 
+                       row['hotmart_product_id'], row['license_type'], row['status'],
+                       row['purchase_date'], row['expires_at']) for row in rows]
+
+
+class HotmartService:
+    def __init__(self):
+        self.base_url = "https://developers.hotmart.com/payments/api/v1"
+        self.config = self._get_config()
+    
+    def _get_config(self) -> dict:
+        """Obtém configuração da Hotmart do banco"""
+        conn = get_db_connection()
+        row = conn.execute("SELECT * FROM hotmart_config LIMIT 1").fetchone()
+        conn.close()
+        
+        if not row:
+            raise Exception("Configuração da Hotmart não encontrada")
+        
+        return dict(row)
+    
+    def _get_auth_header(self) -> str:
+        """Gera header de autenticação Basic"""
+        import base64
+        credentials = f"{self.config['client_id']}:{self.config['client_secret']}"
+        encoded = base64.b64encode(credentials.encode()).decode()
+        return f"Basic {encoded}"
+    
+    def verify_purchase(self, email: str) -> dict | None:
+        """
+        Verifica se o email tem uma compra válida do produto
+        Retorna dados da compra ou None se não encontrada
+        """
+        import requests
+        from datetime import datetime
+        
+        headers = {
+            'Authorization': self._get_auth_header(),
+            'Content-Type': 'application/json'
+        }
+        
+        # Parâmetros para buscar vendas
+        params = {
+            'buyer_email': email,
+            'product_id': self.config['product_id'],
+            'status': 'approved'  # Apenas vendas aprovadas
+        }
+        
+        try:
+            response = requests.get(
+                f"{self.base_url}/sales/history",
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Verificar se há vendas aprovadas
+                if data.get('items') and len(data['items']) > 0:
+                    sale = data['items'][0]  # Pegar a venda mais recente
+                    
+                    return {
+                        'purchase_id': sale.get('purchase_id'),
+                        'product_id': sale.get('product_id'),
+                        'buyer_email': sale.get('buyer_email'),
+                        'purchase_date': sale.get('purchase_date'),
+                        'status': sale.get('status'),
+                        'price': sale.get('price'),
+                        'currency': sale.get('currency')
+                    }
+            
+            return None
+            
+        except Exception as e:
+            print(f"Erro ao verificar compra na Hotmart: {e}")
+            return None
+    
+    def process_webhook(self, payload: dict, signature: str) -> bool:
+        """
+        Processa webhook da Hotmart
+        Retorna True se processado com sucesso
+        """
+        # TODO: Implementar validação de assinatura do webhook
+        # Por enquanto, apenas salva o webhook
+        
+        conn = get_db_connection()
+        conn.execute(
+            """
+            INSERT INTO hotmart_webhooks (event_type, hotmart_purchase_id, payload)
+            VALUES (?, ?, ?)
+            """,
+            (payload.get('event'), payload.get('data', {}).get('purchase_id'), str(payload))
+        )
+        conn.commit()
+        conn.close()
+        
+        # Processar evento de venda
+        if payload.get('event') == 'SALE_COMPLETED':
+            return self._process_sale_completed(payload.get('data', {}))
+        
+        return True
+    
+    def _process_sale_completed(self, sale_data: dict) -> bool:
+        """Processa evento de venda completada"""
+        try:
+            buyer_email = sale_data.get('buyer_email')
+            purchase_id = sale_data.get('purchase_id')
+            product_id = sale_data.get('product_id')
+            purchase_date = sale_data.get('purchase_date')
+            
+            if not all([buyer_email, purchase_id, product_id, purchase_date]):
+                return False
+            
+            # Verificar se já existe licença para esta compra
+            conn = get_db_connection()
+            existing = conn.execute(
+                "SELECT id FROM licenses WHERE hotmart_purchase_id = ?",
+                (purchase_id,)
+            ).fetchone()
+            conn.close()
+            
+            if existing:
+                return True  # Licença já existe
+            
+            # Determinar tipo de licença baseado no preço
+            price = float(sale_data.get('price', 0))
+            if price >= 287.00:  # Licença anual
+                license_type = 'anual'
+            else:  # Licença semestral
+                license_type = 'semestral'
+            
+            # Buscar usuário pelo email
+            user = User.get_by_email(buyer_email)
+            if user:
+                # Criar licença para usuário existente
+                License.create(user.id, purchase_id, product_id, license_type, purchase_date)
+            else:
+                # Usuário ainda não se registrou, a licença será criada quando ele se registrar
+                # Por enquanto, apenas salvar os dados para uso posterior
+                pass
+            
+            return True
+            
+        except Exception as e:
+            print(f"Erro ao processar venda completada: {e}")
+            return False
+
+
+def generate_temp_password(length=12):
+    """Gera uma senha temporária aleatória"""
+    characters = string.ascii_letters + string.digits + "!@#$%^&*"
+    return ''.join(secrets.choice(characters) for _ in range(length))
+
+
+def send_reset_email(email, temp_password):
+    """Envia email com senha temporária"""
+    try:
+        # Para testes locais, apenas mostrar a senha no console
+        if app.config['MAIL_USERNAME'] == 'seu-email@gmail.com':
+            print(f"\n" + "="*50)
+            print(f"📧 EMAIL DE RESET DE SENHA (TESTE LOCAL)")
+            print(f"Para: {email}")
+            print(f"Senha temporária: {temp_password}")
+            print(f"="*50 + "\n")
+            return True
+        
+        msg = Message(
+            'Redefinição de Senha - Leads Infinitos',
+            recipients=[email]
+        )
+        msg.html = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #4f7cff;">Redefinição de Senha</h2>
+            <p>Olá!</p>
+            <p>Você solicitou a redefinição de sua senha no Leads Infinitos.</p>
+            <p>Sua senha temporária é:</p>
+            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="margin: 0; color: #333; font-family: monospace;">{temp_password}</h3>
+            </div>
+            <p><strong>Importante:</strong></p>
+            <ul>
+                <li>Esta senha é temporária e deve ser alterada após o login</li>
+                <li>Use esta senha para fazer login no sistema</li>
+                <li>Após o login, você poderá definir uma nova senha</li>
+            </ul>
+            <p>Se você não solicitou esta redefinição, ignore este email.</p>
+            <p>Atenciosamente,<br>Equipe Leads Infinitos</p>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Erro ao enviar email: {e}")
+        return False
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 STORAGE_ROOT = os.environ.get("STORAGE_DIR", "storage")
+
+# Configuração do Flask-Mail
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', 'seu-email@gmail.com')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', 'sua-senha-de-app')
+app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_USERNAME', 'seu-email@gmail.com')
+
+mail = Mail(app)
 
 login_manager = LoginManager()
 login_manager.login_view = "login"
@@ -113,9 +464,42 @@ def register():
         if User.get_by_email(email):
             flash("Email já registrado.")
             return redirect(url_for("register"))
-        user = User.create(email, password)
-        login_user(user)
-        return redirect(url_for("index"))
+        
+        # Verificar se o email tem uma compra válida na Hotmart
+        try:
+            hotmart_service = HotmartService()
+            purchase_data = hotmart_service.verify_purchase(email)
+            
+            if not purchase_data:
+                flash("Email não encontrado em nossas vendas. Verifique se você comprou o produto Leads Infinitos na Hotmart.")
+                return redirect(url_for("register"))
+            
+            # Criar usuário
+            user = User.create(email, password)
+            
+            # Criar licença baseada na compra
+            price = float(purchase_data.get('price', 0))
+            if price >= 287.00:  # Licença anual
+                license_type = 'anual'
+            else:  # Licença semestral
+                license_type = 'semestral'
+            
+            License.create(
+                user.id, 
+                purchase_data['purchase_id'], 
+                purchase_data['product_id'], 
+                license_type, 
+                purchase_data['purchase_date']
+            )
+            
+            login_user(user)
+            flash(f"Conta criada com sucesso! Sua licença {license_type} está ativa.")
+            return redirect(url_for("index"))
+            
+        except Exception as e:
+            flash(f"Erro ao verificar compra: {str(e)}. Entre em contato com o suporte.")
+            return redirect(url_for("register"))
+    
     return render_template("register.html")
 
 
@@ -150,6 +534,11 @@ def healthz():
 @app.route("/scrape", methods=["POST"]) 
 @login_required
 def scrape():
+    # Verificar se usuário tem licença ativa
+    if not current_user.has_active_license():
+        flash("Sua licença expirou ou não está ativa. Entre em contato com o suporte para renovar.")
+        return redirect(url_for("index"))
+    
     palavra_chave = request.form.get("palavra_chave", "").strip()
     localizacao = request.form.get("localizacao", "").strip()
     total_raw = request.form.get("total", "").strip() or "100"
@@ -198,6 +587,125 @@ def download():
         return redirect(url_for("index"))
     filename = os.path.basename(path)
     return send_file(path, as_attachment=True, download_name=filename)
+
+
+@app.route("/webhook/hotmart", methods=["POST"])
+def hotmart_webhook():
+    """Endpoint para receber webhooks da Hotmart"""
+    try:
+        payload = request.get_json()
+        signature = request.headers.get('X-Hotmart-Signature', '')
+        
+        hotmart_service = HotmartService()
+        success = hotmart_service.process_webhook(payload, signature)
+        
+        if success:
+            return {"status": "success"}, 200
+        else:
+            return {"status": "error", "message": "Failed to process webhook"}, 400
+            
+    except Exception as e:
+        print(f"Erro no webhook da Hotmart: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
+
+@app.route("/licenses")
+@login_required
+def licenses():
+    """Página para visualizar licenças do usuário"""
+    user_licenses = License.get_by_user_id(current_user.id)
+    return render_template("licenses.html", licenses=user_licenses)
+
+
+@app.route("/api/verify-license")
+@login_required
+def verify_license():
+    """API para verificar status da licença (usado por JavaScript)"""
+    has_license = current_user.has_active_license()
+    return {"has_active_license": has_license}
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    """Página para solicitar reset de senha"""
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        
+        if not email:
+            flash("Por favor, informe seu email.")
+            return redirect(url_for("forgot_password"))
+        
+        # Verificar se o usuário existe
+        user = User.get_by_email(email)
+        if not user:
+            flash("Email não encontrado em nossa base de dados.")
+            return redirect(url_for("forgot_password"))
+        
+        # Gerar senha temporária
+        temp_password = generate_temp_password()
+        
+        # Atualizar senha do usuário
+        conn = get_db_connection()
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(temp_password), user.id)
+        )
+        conn.commit()
+        conn.close()
+        
+        # Enviar email
+        if send_reset_email(email, temp_password):
+            flash("Senha temporária enviada para seu email. Verifique sua caixa de entrada.")
+        else:
+            flash("Erro ao enviar email. Entre em contato com o suporte.")
+        
+        return redirect(url_for("login"))
+    
+    return render_template("forgot_password.html")
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    """Página para alterar senha"""
+    if request.method == "POST":
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        
+        if not all([current_password, new_password, confirm_password]):
+            flash("Por favor, preencha todos os campos.")
+            return redirect(url_for("change_password"))
+        
+        if new_password != confirm_password:
+            flash("As senhas não coincidem.")
+            return redirect(url_for("change_password"))
+        
+        if len(new_password) < 6:
+            flash("A nova senha deve ter pelo menos 6 caracteres.")
+            return redirect(url_for("change_password"))
+        
+        # Verificar senha atual
+        if not check_password_hash(current_user.password_hash, current_password):
+            flash("Senha atual incorreta.")
+            return redirect(url_for("change_password"))
+        
+        # Atualizar senha
+        conn = get_db_connection()
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(new_password), current_user.id)
+        )
+        conn.commit()
+        conn.close()
+        
+        flash("Senha alterada com sucesso!")
+        return redirect(url_for("index"))
+    
+    return render_template("change_password.html")
 
 
 if __name__ == "__main__":

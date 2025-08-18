@@ -95,6 +95,8 @@
       </div>
       <div class="nav-cta">
         {% if current_user.is_authenticated %}
+          <a class="btn" href="{{ url_for('licenses') }}">Minhas Licenças</a>
+          <a class="btn" href="{{ url_for('change_password') }}">Alterar Senha</a>
           <a class="btn" href="{{ url_for('logout') }}">Sair</a>
         {% else %}
           <a class="btn" href="{{ url_for('login') }}">Entrar</a>

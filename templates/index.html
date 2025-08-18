@@ -5,6 +5,11 @@
     <div class="container">
       <h1 style="margin-top: 8px;">A próxima geração de prospecção</h1>
       <p>Extração de leads do Google Maps com padrão de produto global. Rápido, preciso e elegante.</p>
+      {% if current_user.is_authenticated %}
+        <div id="license-status" style="margin-top: 16px;">
+          <!-- Status da licença será carregado via JavaScript -->
+        </div>
+      {% endif %}
     </div>
   </div>
   <div class="section">
@@ -51,4 +56,23 @@
       </div>
     </div>
   </div>
+
+  {% if current_user.is_authenticated %}
+  <script>
+    // Verificar status da licença
+    fetch('/api/verify-license')
+      .then(response => response.json())
+      .then(data => {
+        const statusDiv = document.getElementById('license-status');
+        if (data.has_active_license) {
+          statusDiv.innerHTML = '<div class="badge" style="background: rgba(25,195,125,.18); border-color: rgba(25,195,125,.35); color: #19c37d;">✓ Licença Ativa</div>';
+        } else {
+          statusDiv.innerHTML = '<div class="badge" style="background: rgba(255,93,93,.18); border-color: rgba(255,93,93,.35); color: #ff5d5d;">⚠ Licença Expirada</div>';
+        }
+      })
+      .catch(error => {
+        console.error('Erro ao verificar licença:', error);
+      });
+  </script>
+  {% endif %}
 {% endblock %}

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Minhas Licenças - Leads Infinitos{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-12">
+            <h2 class="mb-4">Minhas Licenças</h2>
+            
+            {% if licenses %}
+                <div class="row">
+                    {% for license in licenses %}
+                    <div class="col-md-6 mb-3">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">
+                                    Licença {{ license.license_type.title() }}
+                                    {% if license.status == 'active' %}
+                                        <span class="badge bg-success">Ativa</span>
+                                    {% elif license.status == 'expired' %}
+                                        <span class="badge bg-danger">Expirada</span>
+                                    {% else %}
+                                        <span class="badge bg-warning">{{ license.status.title() }}</span>
+                                    {% endif %}
+                                </h5>
+                                
+                                <div class="row">
+                                    <div class="col-6">
+                                        <small class="text-muted">Data de Compra:</small>
+                                        <p class="mb-1">{{ license.purchase_date[:10] }}</p>
+                                    </div>
+                                    <div class="col-6">
+                                        <small class="text-muted">Expira em:</small>
+                                        <p class="mb-1">{{ license.expires_at[:10] }}</p>
+                                    </div>
+                                </div>
+                                
+                                <div class="mt-2">
+                                    <small class="text-muted">ID da Compra:</small>
+                                    <p class="mb-0 small">{{ license.hotmart_purchase_id }}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="alert alert-info">
+                    <h5>Nenhuma licença encontrada</h5>
+                    <p>Você ainda não possui licenças ativas. Para usar o Leads Infinitos, você precisa comprar uma licença na Hotmart.</p>
+                    <a href="https://hotmart.com/pt-br/marketplace/produtos/leads-infinitos" class="btn btn-primary" target="_blank">
+                        Comprar Licença
+                    </a>
+                </div>
+            {% endif %}
+            
+            <div class="mt-4">
+                <a href="{{ url_for('index') }}" class="btn btn-secondary">
+                    <i class="fas fa-arrow-left"></i> Voltar
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
