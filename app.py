@@ -641,8 +641,37 @@ def forgot_password():
         # Verificar se o usuário existe
         user = User.get_by_email(email)
         if not user:
-            flash("Email não encontrado em nossa base de dados.")
-            return redirect(url_for("forgot_password"))
+            # Em desenvolvimento, criar usuário automaticamente para facilitar testes
+            if app.config.get('DEBUG', False):
+                try:
+                    user = User.create(email, "temp123456")
+                    # Criar licença vitalícia para o usuário de teste
+                    expires_at = datetime.now() + timedelta(days=365*50)
+                    conn = get_db_connection()
+                    conn.execute(
+                        """
+                        INSERT INTO licenses 
+                        (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user.id,
+                            f"DEV-TEST-{datetime.now().strftime('%Y%m%d')}",
+                            '5974664',
+                            'anual',
+                            datetime.now().isoformat(),
+                            expires_at.isoformat()
+                        )
+                    )
+                    conn.commit()
+                    conn.close()
+                    flash("Usuário criado automaticamente para teste (modo desenvolvimento).")
+                except Exception as e:
+                    flash("Erro ao criar usuário de teste.")
+                    return redirect(url_for("forgot_password"))
+            else:
+                flash("Email não encontrado em nossa base de dados.")
+                return redirect(url_for("forgot_password"))
         
         # Gerar senha temporária
         temp_password = generate_temp_password()
