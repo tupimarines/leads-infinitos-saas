@@ -13,6 +13,7 @@ import sqlite3
 import os
 import secrets
 import string
+import json
 from main import run_scraper
 
 
@@ -303,19 +304,24 @@ class HotmartService:
         # TODO: Implementar validação de assinatura do webhook
         # Por enquanto, apenas salva o webhook
         
+        # Extrair purchase_id do formato real da Hotmart
+        purchase_id = None
+        if payload.get('data', {}).get('purchase', {}).get('transaction'):
+            purchase_id = payload.get('data', {}).get('purchase', {}).get('transaction')
+        
         conn = get_db_connection()
         conn.execute(
             """
             INSERT INTO hotmart_webhooks (event_type, hotmart_purchase_id, payload)
             VALUES (?, ?, ?)
             """,
-            (payload.get('event'), payload.get('data', {}).get('purchase_id'), str(payload))
+            (payload.get('event'), purchase_id, json.dumps(payload))
         )
         conn.commit()
         conn.close()
         
-        # Processar evento de venda
-        if payload.get('event') == 'SALE_COMPLETED':
+        # Processar evento de venda (Hotmart usa PURCHASE_COMPLETE)
+        if payload.get('event') == 'PURCHASE_COMPLETE':
             return self._process_sale_completed(payload.get('data', {}))
         
         return True
@@ -323,12 +329,19 @@ class HotmartService:
     def _process_sale_completed(self, sale_data: dict) -> bool:
         """Processa evento de venda completada"""
         try:
-            buyer_email = sale_data.get('buyer_email')
-            purchase_id = sale_data.get('purchase_id')
-            product_id = sale_data.get('product_id')
-            purchase_date = sale_data.get('purchase_date')
+            # Extrair dados do formato real da Hotmart
+            buyer_email = sale_data.get('buyer', {}).get('email')
+            purchase_id = sale_data.get('purchase', {}).get('transaction')
+            product_id = str(sale_data.get('product', {}).get('id', ''))
+            purchase_date = sale_data.get('purchase', {}).get('approved_date')
+            
+            # Converter timestamp para ISO string
+            if purchase_date:
+                from datetime import datetime
+                purchase_date = datetime.fromtimestamp(purchase_date / 1000).isoformat()
             
             if not all([buyer_email, purchase_id, product_id, purchase_date]):
+                print(f"Dados insuficientes: email={buyer_email}, purchase_id={purchase_id}, product_id={product_id}, date={purchase_date}")
                 return False
             
             # Verificar se já existe licença para esta compra
@@ -343,7 +356,7 @@ class HotmartService:
                 return True  # Licença já existe
             
             # Determinar tipo de licença baseado no preço
-            price = float(sale_data.get('price', 0))
+            price = float(sale_data.get('purchase', {}).get('price', {}).get('value', 0))
             if price >= 287.00:  # Licença anual
                 license_type = 'anual'
             else:  # Licença semestral
@@ -354,9 +367,10 @@ class HotmartService:
             if user:
                 # Criar licença para usuário existente
                 License.create(user.id, purchase_id, product_id, license_type, purchase_date)
+                print(f"Licença criada para {buyer_email}: {license_type} - {purchase_id}")
             else:
                 # Usuário ainda não se registrou, a licença será criada quando ele se registrar
-                # Por enquanto, apenas salvar os dados para uso posterior
+                print(f"Usuário {buyer_email} não encontrado. Licença será criada no registro.")
                 pass
             
             return True
