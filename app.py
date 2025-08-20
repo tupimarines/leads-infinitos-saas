@@ -487,11 +487,11 @@ class HublaService:
         conn.close()
         
         # v2: Membro > Acesso concedido → criar usuário automaticamente
-        if event_type in ('customer.member_added', 'subscription.activated'):
+        if event_type == 'customer.member_added':
             evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
             return self._process_member_added_v2(evt_obj)
 
-        # v2: eventos que representam confirmação financeira → criar licença
+        # v2: confirmação financeira → criar licença
         if event_type in ('subscription.activated', 'invoice.paid'):
             evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
             return self._create_license_from_v2(evt_obj)
