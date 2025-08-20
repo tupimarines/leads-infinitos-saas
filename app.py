@@ -612,16 +612,23 @@ class HublaService:
     def _create_license_from_v2(self, event_data: dict) -> bool:
         """Cria licença a partir de eventos v2 (subscription.activated, invoice.paid)."""
         try:
-            # Extrair email (priorizar subscription.payer.email)
+            # Extrair email (ordem de prioridade v2): invoice.payer.email > subscription.payer.email > event.payer.email > user.email
             buyer_email = None
             if isinstance(event_data, dict):
-                sub = event_data.get('subscription', {}) or {}
-                payer = sub.get('payer', {}) or {}
-                buyer_email = payer.get('email') or None
+                invoice = event_data.get('invoice', {}) or {}
+                inv_payer = invoice.get('payer', {}) if isinstance(invoice, dict) else {}
+                buyer_email = (inv_payer or {}).get('email') or None
+
+                if not buyer_email:
+                    sub = event_data.get('subscription', {}) or {}
+                    payer = sub.get('payer', {}) or {}
+                    buyer_email = payer.get('email') or None
+
                 if not buyer_email:
                     # Fallback: payer no nível do evento
                     evt_payer = event_data.get('payer', {}) or {}
                     buyer_email = evt_payer.get('email') or None
+
                 if not buyer_email:
                     user = event_data.get('user', {}) or {}
                     buyer_email = user.get('email') or None
