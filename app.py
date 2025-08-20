@@ -87,6 +87,34 @@ def init_db() -> None:
         """
     )
     
+    # Tabela de webhooks da Hubla
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hubla_webhooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            hubla_purchase_id TEXT,
+            payload TEXT NOT NULL,
+            processed BOOLEAN DEFAULT FALSE,
+            processed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    
+    # Tabela de configurações da Hubla
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hubla_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            webhook_token TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            sandbox_mode BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    
     # Tabela de reset de senha
     conn.execute(
         """
@@ -110,6 +138,16 @@ def init_db() -> None:
         VALUES (?, ?, ?, ?)
         """,
         ('cb6bcde6-24cd-464f-80f3-e4efce3f048c', '7ee4a93d-1aec-473b-a8e6-1d0a813382e2', '5974664', True)
+    )
+    
+    # Inserir configuração inicial da Hubla se não existir
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO hubla_config 
+        (webhook_token, product_id, sandbox_mode) 
+        VALUES (?, ?, ?)
+        """,
+        ('your-hubla-webhook-token', 'your-hubla-product-id', True)
     )
     
     conn.commit()
@@ -380,6 +418,185 @@ class HotmartService:
             return False
 
 
+class HublaService:
+    def __init__(self):
+        self.config = self._get_config()
+    
+    def _get_config(self) -> dict:
+        """Obtém configuração da Hubla do banco"""
+        conn = get_db_connection()
+        row = conn.execute("SELECT * FROM hubla_config LIMIT 1").fetchone()
+        conn.close()
+        
+        if not row:
+            raise Exception("Configuração da Hubla não encontrada")
+        
+        return dict(row)
+    
+    def verify_webhook_signature(self, payload: str, signature: str) -> bool:
+        """
+        Verifica a assinatura do webhook da Hubla
+        Baseado na documentação da Hubla, eles usam um token de autenticação
+        """
+        # TODO: Implementar validação de assinatura específica da Hubla
+        # Por enquanto, apenas verifica se o token está presente
+        expected_token = self.config.get('webhook_token')
+        if not expected_token or expected_token == 'your-hubla-webhook-token':
+            print("⚠️ Token da Hubla não configurado, aceitando webhook sem validação")
+            return True
+        
+        # Aqui você pode implementar a validação específica da Hubla
+        # Por exemplo, verificar se o signature contém o token
+        return signature == expected_token or expected_token in signature
+    
+    def process_webhook(self, payload: dict, signature: str) -> bool:
+        """
+        Processa webhook da Hubla
+        Retorna True se processado com sucesso
+        """
+        # Verificar assinatura
+        if not self.verify_webhook_signature(json.dumps(payload), signature):
+            print("❌ Assinatura do webhook da Hubla inválida")
+            return False
+        
+        # Normalizar tipo de evento (v1 usa 'event', v2 usa 'type')
+        raw_event_type = payload.get('event') or payload.get('type') or ''
+        event_type = str(raw_event_type).lower()
+
+        # Extrair identificador (purchase.id em v1; subscription.id em v2)
+        purchase_id = None
+        if payload.get('data', {}).get('purchase', {}).get('id'):
+            purchase_id = payload.get('data', {}).get('purchase', {}).get('id')
+        elif payload.get('purchase', {}).get('id'):
+            purchase_id = payload.get('purchase', {}).get('id')
+        else:
+            evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
+            if evt_obj.get('subscription', {}) and evt_obj.get('subscription', {}).get('id'):
+                purchase_id = evt_obj.get('subscription', {}).get('id')
+        
+        # Salvar webhook no banco
+        conn = get_db_connection()
+        conn.execute(
+            """
+            INSERT INTO hubla_webhooks (event_type, hubla_purchase_id, payload)
+            VALUES (?, ?, ?)
+            """,
+            (event_type, purchase_id, json.dumps(payload))
+        )
+        conn.commit()
+        conn.close()
+        
+        # v2: Membro > Acesso concedido → criar usuário automaticamente
+        if event_type == 'customer.member_added':
+            evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
+            return self._process_member_added_v2(evt_obj)
+
+        # v1/várias integrações: eventos de compra com completed/approved
+        if 'purchase' in event_type and ('completed' in event_type or 'approved' in event_type):
+            return self._process_sale_completed(payload.get('data', {}))
+        
+        return True
+    
+    def _process_sale_completed(self, sale_data: dict) -> bool:
+        """Processa evento de venda completada da Hubla"""
+        try:
+            # Extrair dados do formato da Hubla
+            # A estrutura pode variar, então vamos ser flexíveis
+            buyer_email = None
+            purchase_id = None
+            product_id = None
+            purchase_date = None
+            
+            # Tentar diferentes estruturas possíveis
+            if sale_data.get('buyer', {}).get('email'):
+                buyer_email = sale_data.get('buyer', {}).get('email')
+            elif sale_data.get('customer', {}).get('email'):
+                buyer_email = sale_data.get('customer', {}).get('email')
+            elif sale_data.get('user', {}).get('email'):
+                buyer_email = sale_data.get('user', {}).get('email')
+            
+            if sale_data.get('purchase', {}).get('id'):
+                purchase_id = sale_data.get('purchase', {}).get('id')
+            
+            if sale_data.get('product', {}).get('id'):
+                product_id = str(sale_data.get('product', {}).get('id', ''))
+            
+            if sale_data.get('purchase', {}).get('created_at'):
+                purchase_date = sale_data.get('purchase', {}).get('created_at')
+            elif sale_data.get('purchase', {}).get('approved_at'):
+                purchase_date = sale_data.get('purchase', {}).get('approved_at')
+            
+            if not all([buyer_email, purchase_id, product_id, purchase_date]):
+                print(f"Dados insuficientes da Hubla: email={buyer_email}, purchase_id={purchase_id}, product_id={product_id}, date={purchase_date}")
+                return False
+            
+            # Verificar se já existe licença para esta compra
+            conn = get_db_connection()
+            existing = conn.execute(
+                "SELECT id FROM licenses WHERE hotmart_purchase_id = ?",
+                (purchase_id,)
+            ).fetchone()
+            conn.close()
+            
+            if existing:
+                return True  # Licença já existe
+            
+            # Determinar tipo de licença baseado no preço
+            price = float(sale_data.get('purchase', {}).get('price', {}).get('value', 0))
+            if price >= 287.00:  # Licença anual
+                license_type = 'anual'
+            else:  # Licença semestral
+                license_type = 'semestral'
+            
+            # Buscar usuário pelo email
+            user = User.get_by_email(buyer_email)
+            if user:
+                # Criar licença para usuário existente
+                License.create(user.id, purchase_id, product_id, license_type, purchase_date)
+                print(f"Licença Hubla criada para {buyer_email}: {license_type} - {purchase_id}")
+            else:
+                # Usuário ainda não se registrou, a licença será criada quando ele se registrar
+                print(f"Usuário Hubla {buyer_email} não encontrado. Licença será criada no registro.")
+                pass
+            
+            return True
+            
+        except Exception as e:
+            print(f"Erro ao processar venda completada da Hubla: {e}")
+            return False
+
+    def _process_member_added_v2(self, event_data: dict) -> bool:
+        """Cria o usuário (se não existir) ao receber Hubla v2 customer.member_added.
+        Espera payload no formato: { "type": "customer.member_added", "event": { "user": {"email": ...}, ... } }
+        """
+        try:
+            # Extrair email do usuário (preferir event.user.email)
+            user_email = None
+            if isinstance(event_data, dict):
+                if event_data.get('user', {}) and event_data.get('user', {}).get('email'):
+                    user_email = event_data.get('user', {}).get('email')
+                elif event_data.get('customer', {}) and event_data.get('customer', {}).get('email'):
+                    user_email = event_data.get('customer', {}).get('email')
+
+            if not user_email:
+                print('Evento customer.member_added sem email do usuário')
+                return False
+
+            user_email = user_email.strip().lower()
+            existing = User.get_by_email(user_email)
+            if existing:
+                return True
+
+            # Criar usuário com senha temporária aleatória
+            temp_password = generate_temp_password()
+            User.create(user_email, temp_password)
+            print(f"Usuário criado via Hubla member_added: {user_email}")
+            return True
+        except Exception as e:
+            print(f"Erro ao processar member_added v2: {e}")
+            return False
+
+
 def generate_temp_password(length=12):
     """Gera uma senha temporária aleatória"""
     characters = string.ascii_letters + string.digits + "!@#$%^&*"
@@ -620,6 +837,26 @@ def hotmart_webhook():
             
     except Exception as e:
         print(f"Erro no webhook da Hotmart: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
+
+@app.route("/webhook/hubla", methods=["POST"])
+def hubla_webhook():
+    """Endpoint para receber webhooks da Hubla"""
+    try:
+        payload = request.get_json()
+        signature = request.headers.get('Authorization', '')
+        
+        hubla_service = HublaService()
+        success = hubla_service.process_webhook(payload, signature)
+        
+        if success:
+            return {"status": "success"}, 200
+        else:
+            return {"status": "error", "message": "Failed to process webhook"}, 400
+            
+    except Exception as e:
+        print(f"Erro no webhook da Hubla: {e}")
         return {"status": "error", "message": str(e)}, 500
 
 
