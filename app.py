@@ -487,7 +487,7 @@ class HublaService:
         conn.close()
         
         # v2: Membro > Acesso concedido → criar usuário automaticamente
-        if event_type == 'customer.member_added':
+        if event_type in ('customer.member_added', 'subscription.activated'):
             evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
             return self._process_member_added_v2(evt_obj)
 
