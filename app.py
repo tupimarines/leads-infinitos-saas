@@ -491,6 +491,11 @@ class HublaService:
             evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
             return self._process_member_added_v2(evt_obj)
 
+        # v2: eventos que representam confirmação financeira → criar licença
+        if event_type in ('subscription.activated', 'invoice.paid'):
+            evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
+            return self._create_license_from_v2(evt_obj)
+
         # v1/várias integrações: eventos de compra com completed/approved
         if 'purchase' in event_type and ('completed' in event_type or 'approved' in event_type):
             return self._process_sale_completed(payload.get('data', {}))
@@ -597,6 +602,87 @@ class HublaService:
             return True
         except Exception as e:
             print(f"Erro ao processar member_added v2: {e}")
+            return False
+
+    def _create_license_from_v2(self, event_data: dict) -> bool:
+        """Cria licença a partir de eventos v2 (subscription.activated, invoice.paid)."""
+        try:
+            # Extrair email (priorizar subscription.payer.email)
+            buyer_email = None
+            if isinstance(event_data, dict):
+                sub = event_data.get('subscription', {}) or {}
+                payer = sub.get('payer', {}) or {}
+                buyer_email = payer.get('email') or None
+                if not buyer_email:
+                    user = event_data.get('user', {}) or {}
+                    buyer_email = user.get('email') or None
+
+            if not buyer_email:
+                print('Evento v2 sem email do comprador')
+                return False
+
+            buyer_email = buyer_email.strip().lower()
+
+            # Extrair identificadores
+            product_id = str((event_data.get('product', {}) or {}).get('id', '') or '')
+            invoice = event_data.get('invoice', {}) or {}
+            subscription = event_data.get('subscription', {}) or {}
+            purchase_id = invoice.get('id') or subscription.get('id') or None
+
+            # Datas
+            purchase_date = (
+                subscription.get('activatedAt')
+                or invoice.get('createdAt')
+                or invoice.get('paidAt')
+                or subscription.get('modifiedAt')
+            )
+
+            # Preço (para determinar tipo de licença)
+            price = None
+            amount = (invoice.get('amount') or {}) if isinstance(invoice, dict) else {}
+            total_cents = amount.get('totalCents') or amount.get('totalcents')
+            if total_cents is not None:
+                try:
+                    price = float(total_cents) / 100.0
+                except Exception:
+                    price = None
+
+            if price is None:
+                price = 297.00  # fallback seguro para anual
+
+            if not all([buyer_email, purchase_id, product_id]):
+                print(f"Dados insuficientes v2: email={buyer_email}, purchase_id={purchase_id}, product_id={product_id}, date={purchase_date}")
+                return False
+
+            # Definir tipo de licença
+            license_type = 'anual' if float(price) >= 287.00 else 'semestral'
+
+            # Verificar se já existe licença para esta compra
+            conn = get_db_connection()
+            existing = conn.execute(
+                "SELECT id FROM licenses WHERE hotmart_purchase_id = ?",
+                (purchase_id,)
+            ).fetchone()
+            conn.close()
+            if existing:
+                return True
+
+            # Garantir usuário
+            user = User.get_by_email(buyer_email)
+            if not user:
+                temp_password = generate_temp_password()
+                user = User.create(buyer_email, temp_password)
+
+            # Normalizar purchase_date
+            from datetime import datetime
+            if not purchase_date:
+                purchase_date = datetime.utcnow().isoformat() + 'Z'
+
+            License.create(user.id, purchase_id, product_id, license_type, purchase_date)
+            print(f"Licença v2 criada para {buyer_email}: {license_type} - {purchase_id}")
+            return True
+        except Exception as e:
+            print(f"Erro ao criar licença v2: {e}")
             return False
 
 
