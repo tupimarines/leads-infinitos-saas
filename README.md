@@ -58,10 +58,63 @@ Os arquivos gerados são salvos em `storage/<userId>/<YYYY-MM-DD>/...` e os down
 2. No Dokploy: New App → Dockerfile → selecione este repo.
 3. Porta: 8000. Healthcheck: `/healthz`.
 4. Variáveis de ambiente: `FLASK_SECRET_KEY`, `STORAGE_DIR=/app/storage`.
-5. Volumes: monte um volume persistente em `/app/storage`.
+5. Volumes: monte volumes persistentes em `/app/app.db` (SQLite) e `/app/storage` (arquivos por usuário).
 6. Opcional: ajuste workers Gunicorn via `WEB_CONCURRENCY`.
 
 ---
+
+## 🛠️ Admin scripts (Python)
+
+### Criar/atualizar usuário (`create_user.py`)
+
+Criar usuário simples:
+```bash
+python create_user.py --email "cliente@exemplo.com" --password "senha123456"
+```
+
+Criar usuário e licença anual:
+```bash
+python create_user.py --email "cliente@exemplo.com" --password "senha123456" --create-license --license-type anual
+```
+
+Criar usuário e licença "vitalícia" (anual com expiração de 50 anos):
+```bash
+python create_user.py --email "cliente@exemplo.com" --password "senha123456" --create-license --lifetime
+```
+
+Atualizar senha de usuário existente:
+```bash
+python create_user.py --email "cliente@exemplo.com" --password "novaSenha" --update-password
+```
+
+### Criar licenças anuais para todos os usuários (`create_annual_licenses.py`)
+
+Apenas para quem ainda não tem nenhuma licença:
+```bash
+python create_annual_licenses.py --yes
+```
+
+Forçar criação para todos (mesmo que já tenham licença):
+```bash
+python create_annual_licenses.py --yes --force
+```
+
+Personalizar dias até expiração (padrão: 365):
+```bash
+python create_annual_licenses.py --yes --expires-days 365
+```
+
+### Outros utilitários
+
+Inicializar banco (primeiro uso):
+```bash
+python init_db.py
+```
+
+Listar usuários e licenças:
+```bash
+python list_all_users.py
+```
 
 ### Option 1: Single Search  
 ```bash
