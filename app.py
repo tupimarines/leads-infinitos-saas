@@ -459,9 +459,9 @@ class HublaService:
             print("❌ Assinatura do webhook da Hubla inválida")
             return False
         
-        # Normalizar tipo de evento (v1 usa 'event', v2 usa 'type')
-        raw_event_type = payload.get('event') or payload.get('type') or ''
-        event_type = str(raw_event_type).lower()
+        # Normalizar tipo de evento: v2 usa 'type' (string); v1 pode usar 'event' (string)
+        raw_event_type = payload.get('type') or payload.get('event') or ''
+        event_type = raw_event_type.lower() if isinstance(raw_event_type, str) else ''
 
         # Extrair identificador (purchase.id em v1; subscription.id em v2)
         purchase_id = None
