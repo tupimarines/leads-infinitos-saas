@@ -570,16 +570,16 @@ class HublaService:
         Espera payload no formato: { "type": "customer.member_added", "event": { "user": {"email": ...}, ... } }
         """
         try:
-            # Extrair email do usuário (preferir event.user.email)
+            # Extrair email do usuário. Preferir subscription.payer.email
+            # pois o teste da Hubla muitas vezes popula apenas esse campo.
             user_email = None
             if isinstance(event_data, dict):
-                if event_data.get('user', {}) and event_data.get('user', {}).get('email'):
+                if event_data.get('subscription', {}) and event_data.get('subscription', {}).get('payer', {}) and event_data.get('subscription', {}).get('payer', {}).get('email'):
+                    user_email = event_data.get('subscription', {}).get('payer', {}).get('email')
+                elif event_data.get('user', {}) and event_data.get('user', {}).get('email'):
                     user_email = event_data.get('user', {}).get('email')
                 elif event_data.get('customer', {}) and event_data.get('customer', {}).get('email'):
                     user_email = event_data.get('customer', {}).get('email')
-                elif event_data.get('subscription', {}) and event_data.get('subscription', {}).get('payer', {}) and event_data.get('subscription', {}).get('payer', {}).get('email'):
-                    # Fallback: alguns envios trazem o email apenas em subscription.payer.email
-                    user_email = event_data.get('subscription', {}).get('payer', {}).get('email')
 
             if not user_email:
                 print('Evento customer.member_added sem email do usuário')
