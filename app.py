@@ -845,7 +845,13 @@ def hubla_webhook():
     """Endpoint para receber webhooks da Hubla"""
     try:
         payload = request.get_json()
-        signature = request.headers.get('Authorization', '')
+        # Hubla envia o token no header 'x-hubla-token' na UI. Mantemos compatibilidade com 'Authorization'.
+        signature = (
+            request.headers.get('Authorization')
+            or request.headers.get('x-hubla-token')
+            or request.headers.get('X-Hubla-Token')
+            or ''
+        )
         
         hubla_service = HublaService()
         success = hubla_service.process_webhook(payload, signature)
