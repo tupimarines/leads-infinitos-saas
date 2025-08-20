@@ -492,7 +492,12 @@ class HublaService:
             return self._process_member_added_v2(evt_obj)
 
         # v2: confirmação financeira → criar licença
-        if event_type in ('subscription.activated', 'invoice.paid'):
+        if event_type in (
+            'subscription.activated',
+            'invoice.paid',
+            'invoice.payment_succeeded',  # variação v2 observada na UI
+            'payment_succeeded',          # fallback defensivo
+        ):
             evt_obj = payload.get('event') if isinstance(payload.get('event'), dict) else {}
             return self._create_license_from_v2(evt_obj)
 
@@ -614,6 +619,10 @@ class HublaService:
                 payer = sub.get('payer', {}) or {}
                 buyer_email = payer.get('email') or None
                 if not buyer_email:
+                    # Fallback: payer no nível do evento
+                    evt_payer = event_data.get('payer', {}) or {}
+                    buyer_email = evt_payer.get('email') or None
+                if not buyer_email:
                     user = event_data.get('user', {}) or {}
                     buyer_email = user.get('email') or None
 
@@ -632,18 +641,30 @@ class HublaService:
             # Datas
             purchase_date = (
                 subscription.get('activatedAt')
-                or invoice.get('createdAt')
                 or invoice.get('paidAt')
+                or invoice.get('createdAt')
+                or invoice.get('updatedAt')
+                or invoice.get('completedAt')
                 or subscription.get('modifiedAt')
             )
 
             # Preço (para determinar tipo de licença)
             price = None
             amount = (invoice.get('amount') or {}) if isinstance(invoice, dict) else {}
-            total_cents = amount.get('totalCents') or amount.get('totalcents')
+            total_cents = (
+                amount.get('totalCents')
+                or amount.get('totalcents')
+                or amount.get('valueCents')
+            )
             if total_cents is not None:
                 try:
                     price = float(total_cents) / 100.0
+                except Exception:
+                    price = None
+            # Outros formatos possíveis
+            if price is None:
+                try:
+                    price = float((invoice.get('price') or {}).get('value'))
                 except Exception:
                     price = None
 
