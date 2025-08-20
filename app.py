@@ -577,6 +577,9 @@ class HublaService:
                     user_email = event_data.get('user', {}).get('email')
                 elif event_data.get('customer', {}) and event_data.get('customer', {}).get('email'):
                     user_email = event_data.get('customer', {}).get('email')
+                elif event_data.get('subscription', {}) and event_data.get('subscription', {}).get('payer', {}) and event_data.get('subscription', {}).get('payer', {}).get('email'):
+                    # Fallback: alguns envios trazem o email apenas em subscription.payer.email
+                    user_email = event_data.get('subscription', {}).get('payer', {}).get('email')
 
             if not user_email:
                 print('Evento customer.member_added sem email do usuário')
