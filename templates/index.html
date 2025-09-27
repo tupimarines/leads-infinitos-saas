@@ -23,25 +23,56 @@
               <div class="flash" style="margin-top:12px;">{{ messages[0] }}</div>
             {% endif %}
           {% endwith %}
-          <form method="post" action="{{ url_for('scrape') }}" onsubmit="const btn=this.querySelector('button[type=submit]'); btn.disabled=true; btn.innerText='Extraindo...';">
+          <form method="post" action="{{ url_for('scrape') }}" id="scrape-form">
             <div class="grid" style="gap:14px;">
               <div class="field">
                 <label>Palavra‑chave</label>
                 <input type="text" name="palavra_chave" required placeholder="Ex.: Veterinária, Dentista, Barbearia">
               </div>
               <div class="field">
-                <label>Localização</label>
-                <input type="text" name="localizacao" required placeholder="Ex.: Campinas, SP">
+                <label>Localizações <span class="muted">(máximo 15)</span></label>
+                <div id="locations-container">
+                  <div class="location-field">
+                    <div class="field" style="display: flex; gap: 8px; align-items: end;">
+                      <input type="text" name="localizacoes[]" required 
+                             placeholder="Ex.: Portão, Curitiba" style="flex: 1;">
+                      <button type="button" onclick="removeLocationField(this)" 
+                              style="background: #ff5d5d; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <button type="button" onclick="addLocationField()" 
+                        style="margin-top: 8px; background: #4f7cff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                  + Adicionar Localização
+                </button>
               </div>
               <div class="field">
                 <label>Total de resultados <span class="muted">(opcional)</span></label>
                 <input type="number" name="total" min="1" max="500" placeholder="100">
               </div>
               <div>
-                <button class="btn btn-primary" type="submit" style="width:100%; height:48px; font-weight:700;">Iniciar Extração</button>
+                <button class="btn btn-primary" type="submit" id="submit-btn" style="width:100%; height:48px; font-weight:700;">Iniciar Extração</button>
               </div>
             </div>
           </form>
+          
+          <!-- Loading Indicator -->
+          <div id="loading-container" style="display: none; margin-top: 20px;">
+            <div style="text-align: center; padding: 40px 20px;">
+              <div class="loading-spinner"></div>
+              <h4 style="margin: 24px 0 12px; color: #4f7cff;">Processando Extração...</h4>
+              <p style="color: #666; font-size: 16px; margin: 0; line-height: 1.5;">
+                Agora é só esperar. Vá tomar um café enquanto isso... ☕
+              </p>
+              <div style="margin-top: 20px; padding: 16px; background: rgba(79, 124, 255, 0.1); border-radius: 8px; border: 1px solid rgba(79, 124, 255, 0.2);">
+                <p style="margin: 0; color: #4f7cff; font-size: 14px;">
+                  <strong>💡 Dica:</strong> O processo pode levar alguns minutos dependendo do número de localizações.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="grid" style="gap: 14px;">
           <div class="card" style="padding: 16px;">
@@ -75,4 +106,89 @@
       });
   </script>
   {% endif %}
+
+  <style>
+    .loading-spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #4f7cff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+  </style>
+
+  <script>
+    let locationCount = 1;
+
+    function addLocationField() {
+      if (locationCount >= 15) {
+        alert('Máximo de 15 localizações permitidas');
+        return;
+      }
+      
+      const container = document.getElementById('locations-container');
+      const newField = document.createElement('div');
+      newField.className = 'location-field';
+      newField.innerHTML = `
+        <div class="field" style="display: flex; gap: 8px; align-items: end;">
+          <input type="text" name="localizacoes[]" required 
+                 placeholder="Ex.: Portão, Curitiba" style="flex: 1;">
+          <button type="button" onclick="removeLocationField(this)" 
+                  style="background: #ff5d5d; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">
+            ×
+          </button>
+        </div>
+      `;
+      container.appendChild(newField);
+      locationCount++;
+    }
+
+    function removeLocationField(button) {
+      if (locationCount <= 1) return;
+      button.parentElement.parentElement.remove();
+      locationCount--;
+    }
+
+    // Validação no submit do formulário
+    document.querySelector('form').addEventListener('submit', function(e) {
+      const locations = document.querySelectorAll('input[name="localizacoes[]"]');
+      if (locations.length === 0) {
+        e.preventDefault();
+        alert('Adicione pelo menos uma localização');
+        return;
+      }
+      
+      // Verificar se todos os campos estão preenchidos
+      for (let input of locations) {
+        if (!input.value.trim()) {
+          e.preventDefault();
+          alert('Preencha todas as localizações');
+          return;
+        }
+      }
+      
+      // Mostrar loading
+      showLoading();
+    });
+    
+    function showLoading() {
+      const form = document.getElementById('scrape-form');
+      const loadingContainer = document.getElementById('loading-container');
+      const submitBtn = document.getElementById('submit-btn');
+      
+      // Esconder formulário e mostrar loading
+      form.style.display = 'none';
+      loadingContainer.style.display = 'block';
+      submitBtn.disabled = true;
+      submitBtn.innerText = 'Processando...';
+    }
+  </script>
 {% endblock %}

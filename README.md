@@ -1,23 +1,41 @@
-# Google Maps Scraper  
+# Leads Infinitos - Google Maps Scraper SaaS  
 
-A lightweight, customizable web scraper built with **Playwright** to extract business listings from Google Maps. Perfect for gathering contact details, addresses, ratings, and more.  
+A powerful, multi-location web scraper built with **Playwright** to extract business listings from Google Maps. Features user authentication, license management, and intelligent data concatenation across multiple locations.
+
+**Features:**
+- 🔐 **User Authentication** - Secure login system with license management
+- 🌍 **Multiple Locations** - Scrape across multiple cities/regions simultaneously  
+- 📊 **Smart Concatenation** - Automatic deduplication and data merging
+- 📈 **Status Column** - Ready-to-import data with status indicators
+- 💼 **SaaS Ready** - Production-ready with user isolation and file management
 
 **Note:** This project is for **educational purposes only**. Always respect Google's Terms of Service and scraping policies.  
 
 ---
 
 ## 📂 Output Examples  
+
+### Single Location Mode
 The data is saved in a folder named `GMaps Data` in a folder of the date the script was executed.
 Check the generated files to understand the data structure:  
 - **`niche in place.csv`**  
 - **`niche in place.xlsx`**  
-As you specified in either the command or the txt file (niche and place).
+
+### Multiple Locations Mode (NEW!)
+When scraping multiple locations, the system automatically:
+- **Concatenates all results** into a single file
+- **Removes duplicates** across different locations  
+- **Adds status column** (value: 1) for CRM import
+- **Generates unified filename**: `{keyword}_múltiplos_bairros.xlsx`
+
+**Example:** Scraping "veterinária" in "Curitiba", "São Paulo", "Rio de Janeiro" → `veterinária_múltiplos_bairros.xlsx`
 
 Each entry includes:  
 - Business name  
 - Rating (avg. and count)  
-- Contact info (phone, website)  
+- Contact info (phone, website, WhatsApp links)  
 - Address & location details  
+- **Status column** (for CRM import)
 - Additional metadata (reviews, features, etc.)  
 
 ---
