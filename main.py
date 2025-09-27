@@ -64,14 +64,23 @@ class BusinessList:
             self.business_list.append(business)
             self._seen_businesses.add(business_hash)
     
-    def dataframe(self):
+    def dataframe(self, add_status_column: bool = False):
         """transform business_list to pandas dataframe
+
+        Args:
+            add_status_column: Se True, adiciona coluna 'status' com valor 1
 
         Returns: pandas dataframe
         """
-        return pd.json_normalize(
+        df = pd.json_normalize(
             (asdict(business) for business in self.business_list), sep="_"
         )
+        
+        # Adicionar coluna status se solicitado
+        if add_status_column:
+            df['status'] = 1
+        
+        return df
 
     def save_to_excel(self, filename):
         """saves pandas dataframe to excel (xlsx) file
@@ -113,6 +122,64 @@ class BusinessList:
         """
         self.dataframe().to_csv(f"{self.save_at}/{filename}.csv", index=False)
 
+    def save_to_excel_with_status(self, filename):
+        """
+        Salva dataframe com coluna status adicionada
+
+        Args:
+            filename (str): filename
+        """
+        try:
+            df = self.dataframe(add_status_column=True)
+            out_path = f"{self.save_at}/{filename}.xlsx"
+            # Write with openpyxl engine so we can post-process hyperlinks
+            with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+                try:
+                    from openpyxl.utils import get_column_letter
+                    ws = writer.book.active
+                    if "whatsapp_link" in df.columns:
+                        col_idx = df.columns.get_loc("whatsapp_link") + 1  # 1-based
+                        col_letter = get_column_letter(col_idx)
+                        for row_idx in range(2, len(df) + 1):  # skip header
+                            cell = ws[f"{col_letter}{row_idx}"]
+                            link = cell.value
+                            if link:
+                                cell.hyperlink = link
+                                cell.style = "Hyperlink"
+                except Exception:
+                    # If anything goes wrong, keep the plain values without hyperlinks
+                    pass
+        except ImportError:
+            print("openpyxl not installed; skipping Excel export and continuing with CSV...")
+        except Exception as e:
+            print(f"Failed to write Excel: {e}; continuing with CSV...")
+
+    def save_to_csv_with_status(self, filename):
+        """saves pandas dataframe to csv file with status column
+
+        Args:
+            filename (str): filename
+        """
+        self.dataframe(add_status_column=True).to_csv(f"{self.save_at}/{filename}.csv", index=False)
+
+def concatenate_business_lists(business_lists: List[BusinessList]) -> BusinessList:
+    """
+    Concatena múltiplas BusinessList em uma única, com deduplicação automática
+    """
+    if not business_lists:
+        return BusinessList()
+    
+    # Usar a primeira BusinessList como base
+    result = business_lists[0]
+    
+    # Adicionar businesses das outras listas
+    for business_list in business_lists[1:]:
+        for business in business_list.business_list:
+            result.add_business(business)  # Deduplicação automática
+    
+    return result
+
 def extract_coordinates_from_url(url: str) -> tuple[float, float]:
     """helper function to extract coordinates from url"""
     coordinates = url.split('/@')[-1].split('/')[0]
@@ -140,12 +207,21 @@ def run_scraper(
     total: int,
     headless: bool = True,
     save_base_dir: str | None = None,
+    concatenate_results: bool = False,  # Nova opção
 ) -> List[Dict[str, str]]:
     """Run scraping for one or more searches.
+
+    Args:
+        search_list: Lista de queries para buscar
+        total: Número máximo de resultados por busca
+        headless: Executar browser em modo headless
+        save_base_dir: Diretório base para salvar arquivos
+        concatenate_results: Se True, concatena todos os resultados em um arquivo único
 
     Returns a list of dicts with keys: search, csv_path, xlsx_path
     """
     results: List[Dict[str, str]] = []
+    all_business_lists: List[BusinessList] = []
     with sync_playwright() as p:
         # Browser launch with fallbacks
         try:
@@ -160,7 +236,7 @@ def run_scraper(
         page.goto("https://www.google.com/maps", timeout=20000)
 
         for search_for_index, search_for in enumerate(search_list):
-            print(f"-----\n{search_for_index} - {search_for}".strip())
+            print(f"-----\n{search_for_index + 1}/{len(search_list)} - {search_for}".strip())
 
             page.locator('//input[@id="searchboxinput"]').fill(search_for)
             page.wait_for_timeout(3000)
@@ -272,17 +348,41 @@ def run_scraper(
                 except Exception as e:
                     print(f'Error occurred: {e}', end='\r')
 
-            # output
-            safe_filename = f"{search_for}".replace(' ', '_')
-            business_list.save_to_excel(safe_filename)
-            business_list.save_to_csv(safe_filename)
-            results.append({
-                "search": search_for,
-                "csv_path": os.path.join(business_list.save_at, f"{safe_filename}.csv"),
-                "xlsx_path": os.path.join(business_list.save_at, f"{safe_filename}.xlsx"),
-            })
+            # Armazenar business_list para concatenação posterior
+            all_business_lists.append(business_list)
+            
+            # Se não for para concatenar, salvar individualmente
+            if not concatenate_results:
+                safe_filename = f"{search_for}".replace(' ', '_')
+                business_list.save_to_excel(safe_filename)
+                business_list.save_to_csv(safe_filename)
+                results.append({
+                    "search": search_for,
+                    "csv_path": os.path.join(business_list.save_at, f"{safe_filename}.csv"),
+                    "xlsx_path": os.path.join(business_list.save_at, f"{safe_filename}.xlsx"),
+                })
 
         browser.close()
+    
+    # Se for para concatenar, criar arquivo único
+    if concatenate_results and all_business_lists:
+        concatenated = concatenate_business_lists(all_business_lists)
+        
+        # Nome do arquivo baseado na primeira busca
+        first_search = search_list[0] if search_list else "multiple_locations"
+        base_keyword = first_search.split(' in ')[0].strip()
+        safe_filename = f"{base_keyword}_múltiplos_bairros"
+        
+        # Salvar com coluna status adicionada
+        concatenated.save_to_excel_with_status(safe_filename)
+        concatenated.save_to_csv_with_status(safe_filename)
+        
+        results.append({
+            "search": f"{base_keyword} em {len(search_list)} localizações",
+            "csv_path": os.path.join(concatenated.save_at, f"{safe_filename}.csv"),
+            "xlsx_path": os.path.join(concatenated.save_at, f"{safe_filename}.xlsx"),
+        })
+    
     return results
 
 

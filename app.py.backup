@@ -888,38 +888,28 @@ def scrape():
         return redirect(url_for("index"))
     
     palavra_chave = request.form.get("palavra_chave", "").strip()
-    localizacoes = request.form.getlist("localizacoes[]")  # Lista de localizações
+    localizacao = request.form.get("localizacao", "").strip()
     total_raw = request.form.get("total", "").strip() or "100"
-    
     try:
         total = int(total_raw)
     except Exception:
         total = 100
-    
-    # Guardrails: clamp total and inputs
+    # Guardrails: clamp total and inputs to keep synchronous job reasonable
     total = max(1, min(total, 500))
     if len(palavra_chave) > 100:
         palavra_chave = palavra_chave[:100]
-    
-    # Validar entrada
-    if not palavra_chave:
-        flash("Por favor, preencha 'Palavra-chave'.")
-        return redirect(url_for("index"))
-    
-    if not localizacoes or not any(loc.strip() for loc in localizacoes):
-        flash("Por favor, adicione pelo menos uma localização.")
-        return redirect(url_for("index"))
-    
-    # Limitar a 15 localizações
-    localizacoes = [loc.strip() for loc in localizacoes if loc.strip()][:15]
-    
-    # Criar queries para cada localização
-    queries = [f"{palavra_chave} in {loc}" for loc in localizacoes]
-    
-    user_base_dir = os.path.join(STORAGE_ROOT, str(current_user.id), "GMaps Data")
-    results = run_scraper(queries, total=total, headless=True, save_base_dir=user_base_dir, concatenate_results=True)
+    if len(localizacao) > 100:
+        localizacao = localizacao[:100]
 
-    return render_template("result.html", results=results, query=f"{palavra_chave} em {len(localizacoes)} localizações")
+    if not palavra_chave or not localizacao:
+        flash("Por favor, preencha 'Palavra-chave' e 'Localização'.")
+        return redirect(url_for("index"))
+
+    query = f"{palavra_chave} in {localizacao}"
+    user_base_dir = os.path.join(STORAGE_ROOT, str(current_user.id), "GMaps Data")
+    results = run_scraper([query], total=total, headless=True, save_base_dir=user_base_dir)
+
+    return render_template("result.html", results=results, query=query)
 
 
 def _is_path_owned_by_current_user(path: str) -> bool:
