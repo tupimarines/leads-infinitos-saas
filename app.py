@@ -17,7 +17,7 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
-from main import run_scraper
+from main import run_scraper, run_scraper_with_progress
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -1305,7 +1305,20 @@ def change_password():
 def jobs():
     """Página para visualizar jobs de scraping"""
     user_jobs = ScrapingJob.get_by_user_id(current_user.id, limit=20)
-    return render_template("jobs.html", jobs=user_jobs)
+    
+    # Processar jobs para o template
+    processed_jobs = []
+    for job in user_jobs:
+        job_dict = dict(job)
+        # Parse locations JSON
+        try:
+            locations = json.loads(job['locations']) if job['locations'] else []
+            job_dict['locations_count'] = len(locations)
+        except:
+            job_dict['locations_count'] = 0
+        processed_jobs.append(job_dict)
+    
+    return render_template("jobs.html", jobs=processed_jobs)
 
 
 @app.route("/api/job/<int:job_id>")

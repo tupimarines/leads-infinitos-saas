@@ -30,8 +30,7 @@
                             <td>{{ job.id }}</td>
                             <td>{{ job.keyword }}</td>
                             <td>
-                                {% set locations = job.locations|from_json %}
-                                {{ locations|length }} localização(ões)
+                                {{ job.locations_count }} localização(ões)
                             </td>
                             <td>
                                 {% if job.status == 'pending' %}
