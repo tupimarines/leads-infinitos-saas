@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+
+{% block title %}Jobs de Scraping{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-12">
+            <h2>Jobs de Scraping</h2>
+            <p class="text-muted">Acompanhe o progresso dos seus jobs de scraping.</p>
+            
+            {% if jobs %}
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Palavra-chave</th>
+                            <th>Localizações</th>
+                            <th>Status</th>
+                            <th>Progresso</th>
+                            <th>Localização Atual</th>
+                            <th>Criado em</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for job in jobs %}
+                        <tr>
+                            <td>{{ job.id }}</td>
+                            <td>{{ job.keyword }}</td>
+                            <td>
+                                {% set locations = job.locations|from_json %}
+                                {{ locations|length }} localização(ões)
+                            </td>
+                            <td>
+                                {% if job.status == 'pending' %}
+                                    <span class="badge bg-warning">Pendente</span>
+                                {% elif job.status == 'running' %}
+                                    <span class="badge bg-primary">Executando</span>
+                                {% elif job.status == 'completed' %}
+                                    <span class="badge bg-success">Concluído</span>
+                                {% elif job.status == 'failed' %}
+                                    <span class="badge bg-danger">Falhou</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if job.status == 'running' %}
+                                    <div class="progress" style="width: 100px;">
+                                        <div class="progress-bar" role="progressbar" 
+                                             style="width: {{ job.progress }}%" 
+                                             aria-valuenow="{{ job.progress }}" 
+                                             aria-valuemin="0" aria-valuemax="100">
+                                            {{ job.progress }}%
+                                        </div>
+                                    </div>
+                                {% else %}
+                                    {{ job.progress }}%
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if job.current_location %}
+                                    {{ job.current_location }}
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </td>
+                            <td>{{ job.created_at }}</td>
+                            <td>
+                                {% if job.status == 'completed' and job.results_path %}
+                                    <a href="/download?path={{ job.results_path }}" class="btn btn-sm btn-success">
+                                        <i class="fas fa-download"></i> Download
+                                    </a>
+                                {% elif job.status == 'failed' and job.error_message %}
+                                    <button class="btn btn-sm btn-outline-danger" 
+                                            data-bs-toggle="tooltip" 
+                                            title="{{ job.error_message }}">
+                                        <i class="fas fa-exclamation-triangle"></i>
+                                    </button>
+                                {% elif job.status == 'running' %}
+                                    <button class="btn btn-sm btn-outline-primary" 
+                                            onclick="refreshJob({{ job.id }})">
+                                        <i class="fas fa-sync"></i> Atualizar
+                                    </button>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                Nenhum job de scraping encontrado. 
+                <a href="/" class="alert-link">Inicie um novo scraping</a>.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+function refreshJob(jobId) {
+    fetch(`/api/job/${jobId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'completed') {
+                location.reload();
+            } else if (data.status === 'failed') {
+                alert('Job falhou: ' + (data.error_message || 'Erro desconhecido'));
+                location.reload();
+            } else {
+                // Update progress bar
+                const progressBar = document.querySelector(`tr:has(td:contains("${jobId}")) .progress-bar`);
+                if (progressBar) {
+                    progressBar.style.width = data.progress + '%';
+                    progressBar.setAttribute('aria-valuenow', data.progress);
+                    progressBar.textContent = data.progress + '%';
+                }
+            }
+        })
+        .catch(error => {
+            console.error('Erro ao atualizar job:', error);
+        });
+}
+
+// Auto-refresh running jobs every 5 seconds
+document.addEventListener('DOMContentLoaded', function() {
+    const runningJobs = document.querySelectorAll('tr:has(.badge.bg-primary)');
+    if (runningJobs.length > 0) {
+        setInterval(() => {
+            runningJobs.forEach(row => {
+                const jobId = row.querySelector('td:first-child').textContent;
+                refreshJob(parseInt(jobId));
+            });
+        }, 5000);
+    }
+});
+</script>
+{% endblock %}

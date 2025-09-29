@@ -386,6 +386,206 @@ def run_scraper(
     return results
 
 
+def run_scraper_with_progress(
+    search_list: List[str],
+    total: int,
+    headless: bool = True,
+    save_base_dir: str | None = None,
+    concatenate_results: bool = False,
+    progress_callback = None,  # Callback function for progress updates
+) -> List[Dict[str, str]]:
+    """Run scraping with progress tracking and better memory management.
+    
+    Args:
+        search_list: Lista de queries para buscar
+        total: Número máximo de resultados por busca
+        headless: Executar browser em modo headless
+        save_base_dir: Diretório base para salvar arquivos
+        concatenate_results: Se True, concatena todos os resultados em um arquivo único
+        progress_callback: Function to call with progress updates (progress, current_location)
+    
+    Returns a list of dicts with keys: search, csv_path, xlsx_path
+    """
+    results: List[Dict[str, str]] = []
+    all_business_lists: List[BusinessList] = []
+    
+    with sync_playwright() as p:
+        # Browser launch with fallbacks
+        try:
+            browser = p.chromium.launch(headless=headless)
+        except Exception:
+            try:
+                browser = p.chromium.launch(channel="chrome", headless=headless)
+            except Exception:
+                browser = p.chromium.launch(channel="msedge", headless=headless)
+        page = browser.new_page(locale="en-GB")
+
+        page.goto("https://www.google.com/maps", timeout=20000)
+
+        for search_for_index, search_for in enumerate(search_list):
+            print(f"-----\n{search_for_index + 1}/{len(search_list)} - {search_for}".strip())
+            
+            # Update progress
+            if progress_callback:
+                progress = int((search_for_index / len(search_list)) * 100)
+                progress_callback(progress, search_for)
+
+            page.locator('//input[@id="searchboxinput"]').fill(search_for)
+            page.wait_for_timeout(3000)
+
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(5000)
+
+            # scrolling
+            page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
+
+            previously_counted = 0
+            while True:
+                page.mouse.wheel(0, 10000)
+                page.wait_for_timeout(3000)
+
+                if (
+                    page.locator(
+                        '//a[contains(@href, "https://www.google.com/maps/place")]'
+                    ).count()
+                    >= total
+                ):
+                    listings = page.locator(
+                        '//a[contains(@href, "https://www.google.com/maps/place")]'
+                    ).all()[:total]
+                    listings = [listing.locator("xpath=..") for listing in listings]
+                    print(f"Total Scraped: {len(listings)}")
+                    break
+                else:
+                    if (
+                        page.locator(
+                            '//a[contains(@href, "https://www.google.com/maps/place")]'
+                        ).count()
+                        == previously_counted
+                    ):
+                        listings = page.locator(
+                            '//a[contains(@href, "https://www.google.com/maps/place")]'
+                        ).all()
+                        print(f"Arrived at all available\nTotal Scraped: {len(listings)}")
+                        break
+                    else:
+                        previously_counted = page.locator(
+                            '//a[contains(@href, "https://www.google.com/maps/place")]'
+                        ).count()
+                        print(
+                            f"Currently Scraped: ",
+                            page.locator(
+                                '//a[contains(@href, "https://www.google.com/maps/place")]'
+                            ).count(), end='\r'
+                        )
+
+            business_list = BusinessList(
+                save_base_dir=save_base_dir or 'GMaps Data'
+            )
+
+            # scraping with memory management
+            for listing_index, listing in enumerate(listings):
+                try:
+                    listing.click()
+                    page.wait_for_timeout(2000)
+
+                    name_attribute = 'h1.DUwDvf'
+                    address_xpath = '//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]'
+                    website_xpath = '//a[@data-item-id="authority"]//div[contains(@class, "fontBodyMedium")]'
+                    phone_number_xpath = '//button[contains(@data-item-id, "phone:tel:")]//div[contains(@class, "fontBodyMedium")]'
+                    review_count_xpath = '//div[@jsaction="pane.reviewChart.moreReviews"]//span'
+                    reviews_average_xpath = '//div[@jsaction="pane.reviewChart.moreReviews"]//div[@role="img"]'
+
+                    business = Business()
+
+                    if name_value := page.locator(name_attribute).inner_text():
+                        business.name = name_value.strip()
+                    else:
+                        business.name = ""
+
+                    if page.locator(address_xpath).count() > 0:
+                        business.address = page.locator(address_xpath).all()[0].inner_text()
+                    else:
+                        business.address = ""
+
+                    if page.locator(website_xpath).count() > 0:
+                        business.domain = page.locator(website_xpath).all()[0].inner_text()
+                        business.website = f"https://www.{page.locator(website_xpath).all()[0].inner_text()}"
+                    else:
+                        business.website = ""
+
+                    if page.locator(phone_number_xpath).count() > 0:
+                        raw_phone = page.locator(phone_number_xpath).all()[0].inner_text()
+                        business.phone_number = raw_phone
+                        business.whatsapp_link = format_whatsapp_link_br(raw_phone)
+                    else:
+                        business.phone_number = ""
+                        business.whatsapp_link = ""
+
+                    if page.locator(review_count_xpath).count() > 0:
+                        business.reviews_count = int(page.locator(review_count_xpath).inner_text().split()[0].replace(',', '').strip())
+                    else:
+                        business.reviews_count = ""
+
+                    if page.locator(reviews_average_xpath).count() > 0:
+                        business.reviews_average = float(page.locator(reviews_average_xpath).get_attribute('aria-label').split()[0].replace(',', '.').strip())
+                    else:
+                        business.reviews_average = ""
+
+                    business.category = search_for.split(' in ')[0].strip()
+                    business.location = search_for.split(' in ')[-1].strip()
+                    business.latitude, business.longitude = extract_coordinates_from_url(page.url)
+
+                    business_list.add_business(business)
+                    
+                    # Memory management: periodically clear browser cache
+                    if listing_index % 50 == 0 and listing_index > 0:
+                        try:
+                            page.evaluate("() => { if (window.gc) window.gc(); }")
+                        except:
+                            pass
+                            
+                except Exception as e:
+                    print(f'Error occurred: {e}', end='\r')
+
+            # Armazenar business_list para concatenação posterior
+            all_business_lists.append(business_list)
+            
+            # Se não for para concatenar, salvar individualmente
+            if not concatenate_results:
+                safe_filename = f"{search_for}".replace(' ', '_')
+                business_list.save_to_excel(safe_filename)
+                business_list.save_to_csv(safe_filename)
+                results.append({
+                    "search": search_for,
+                    "csv_path": os.path.join(business_list.save_at, f"{safe_filename}.csv"),
+                    "xlsx_path": os.path.join(business_list.save_at, f"{safe_filename}.xlsx"),
+                })
+
+        browser.close()
+    
+    # Se for para concatenar, criar arquivo único
+    if concatenate_results and all_business_lists:
+        concatenated = concatenate_business_lists(all_business_lists)
+        
+        # Nome do arquivo baseado na primeira busca
+        first_search = search_list[0] if search_list else "multiple_locations"
+        base_keyword = first_search.split(' in ')[0].strip()
+        safe_filename = f"{base_keyword}_múltiplos_bairros"
+        
+        # Salvar com coluna status adicionada
+        concatenated.save_to_excel_with_status(safe_filename)
+        concatenated.save_to_csv_with_status(safe_filename)
+        
+        results.append({
+            "search": f"{base_keyword} em {len(search_list)} localizações",
+            "csv_path": os.path.join(concatenated.save_at, f"{safe_filename}.csv"),
+            "xlsx_path": os.path.join(concatenated.save_at, f"{safe_filename}.xlsx"),
+        })
+    
+    return results
+
+
 def main():
     # read search from arguments
     parser = argparse.ArgumentParser()
