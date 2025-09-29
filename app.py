@@ -14,6 +14,9 @@ import os
 import secrets
 import string
 import json
+import threading
+import time
+from datetime import datetime, timedelta
 from main import run_scraper
 
 
@@ -124,6 +127,28 @@ def init_db() -> None:
             token TEXT UNIQUE NOT NULL,
             expires_at TIMESTAMP NOT NULL,
             used BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        );
+        """
+    )
+    
+    # Tabela de jobs de scraping
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scraping_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            keyword TEXT NOT NULL,
+            locations TEXT NOT NULL,  -- JSON array of locations
+            total_results INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+            progress INTEGER DEFAULT 0,  -- 0-100
+            current_location TEXT,
+            results_path TEXT,  -- Path to results file
+            error_message TEXT,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         );
@@ -720,6 +745,154 @@ def generate_temp_password(length=12):
     return ''.join(secrets.choice(characters) for _ in range(length))
 
 
+class ScrapingJob:
+    """Manages scraping jobs in the database"""
+    
+    @staticmethod
+    def create(user_id: int, keyword: str, locations: list, total_results: int) -> int:
+        """Create a new scraping job"""
+        conn = get_db_connection()
+        cur = conn.execute(
+            """
+            INSERT INTO scraping_jobs (user_id, keyword, locations, total_results)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, keyword, json.dumps(locations), total_results)
+        )
+        job_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return job_id
+    
+    @staticmethod
+    def update_status(job_id: int, status: str, progress: int = None, 
+                     current_location: str = None, error_message: str = None):
+        """Update job status and progress"""
+        conn = get_db_connection()
+        
+        update_fields = ["status = ?"]
+        params = [status]
+        
+        if progress is not None:
+            update_fields.append("progress = ?")
+            params.append(progress)
+        
+        if current_location is not None:
+            update_fields.append("current_location = ?")
+            params.append(current_location)
+        
+        if error_message is not None:
+            update_fields.append("error_message = ?")
+            params.append(error_message)
+        
+        if status == 'running' and 'started_at' not in [f.split(' = ')[0] for f in update_fields]:
+            update_fields.append("started_at = ?")
+            params.append(datetime.now().isoformat())
+        
+        if status in ['completed', 'failed']:
+            update_fields.append("completed_at = ?")
+            params.append(datetime.now().isoformat())
+        
+        params.append(job_id)
+        
+        conn.execute(
+            f"UPDATE scraping_jobs SET {', '.join(update_fields)} WHERE id = ?",
+            params
+        )
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def set_results(job_id: int, results_path: str):
+        """Set the results file path for a completed job"""
+        conn = get_db_connection()
+        conn.execute(
+            "UPDATE scraping_jobs SET results_path = ? WHERE id = ?",
+            (results_path, job_id)
+        )
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def get_by_id(job_id: int) -> dict:
+        """Get job by ID"""
+        conn = get_db_connection()
+        row = conn.execute(
+            "SELECT * FROM scraping_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    
+    @staticmethod
+    def get_by_user_id(user_id: int, limit: int = 10) -> list:
+        """Get recent jobs for a user"""
+        conn = get_db_connection()
+        rows = conn.execute(
+            """
+            SELECT * FROM scraping_jobs 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ?
+            """,
+            (user_id, limit)
+        ).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+
+def run_scraping_job(job_id: int):
+    """Run scraping job in background thread"""
+    try:
+        job = ScrapingJob.get_by_id(job_id)
+        if not job:
+            return
+        
+        ScrapingJob.update_status(job_id, 'running', 0)
+        
+        # Parse job data
+        locations = json.loads(job['locations'])
+        keyword = job['keyword']
+        total_results = job['total_results']
+        user_id = job['user_id']
+        
+        # Create queries for each location
+        queries = [f"{keyword} in {loc}" for loc in locations]
+        
+        # Set up user directory
+        user_base_dir = os.path.join(STORAGE_ROOT, str(user_id), "GMaps Data")
+        
+        # Run scraper with progress tracking
+        results = run_scraper_with_progress(
+            queries, 
+            total=total_results, 
+            headless=True, 
+            save_base_dir=user_base_dir, 
+            concatenate_results=True,
+            progress_callback=lambda progress, current_loc: ScrapingJob.update_status(
+                job_id, 'running', progress, current_loc
+            )
+        )
+        
+        if results and len(results) > 0:
+            # Set results path
+            results_path = results[0].get('csv_path', '')
+            ScrapingJob.set_results(job_id, results_path)
+            ScrapingJob.update_status(job_id, 'completed', 100)
+        else:
+            ScrapingJob.update_status(job_id, 'failed', error_message="No results generated")
+            
+    except Exception as e:
+        ScrapingJob.update_status(job_id, 'failed', error_message=str(e))
+        print(f"Scraping job {job_id} failed: {e}")
+
+
+def run_scraping_job_async(job_id: int):
+    """Start scraping job in background thread"""
+    thread = threading.Thread(target=run_scraping_job, args=(job_id,))
+    thread.daemon = True
+    thread.start()
+
+
 def send_reset_email(email, temp_password):
     """Envia email com senha temporária"""
     try:
@@ -913,13 +1086,19 @@ def scrape():
     # Limitar a 15 localizações
     localizacoes = [loc.strip() for loc in localizacoes if loc.strip()][:15]
     
-    # Criar queries para cada localização
-    queries = [f"{palavra_chave} in {loc}" for loc in localizacoes]
+    # Create background job
+    job_id = ScrapingJob.create(
+        user_id=current_user.id,
+        keyword=palavra_chave,
+        locations=localizacoes,
+        total_results=total
+    )
     
-    user_base_dir = os.path.join(STORAGE_ROOT, str(current_user.id), "GMaps Data")
-    results = run_scraper(queries, total=total, headless=True, save_base_dir=user_base_dir, concatenate_results=True)
-
-    return render_template("result.html", results=results, query=f"{palavra_chave} em {len(localizacoes)} localizações")
+    # Start job in background
+    run_scraping_job_async(job_id)
+    
+    flash(f"Scraping iniciado! Job ID: {job_id}. Você pode acompanhar o progresso na página de jobs.")
+    return redirect(url_for("jobs"))
 
 
 def _is_path_owned_by_current_user(path: str) -> bool:
@@ -1119,6 +1298,35 @@ def change_password():
         return redirect(url_for("index"))
     
     return render_template("change_password.html")
+
+
+@app.route("/jobs")
+@login_required
+def jobs():
+    """Página para visualizar jobs de scraping"""
+    user_jobs = ScrapingJob.get_by_user_id(current_user.id, limit=20)
+    return render_template("jobs.html", jobs=user_jobs)
+
+
+@app.route("/api/job/<int:job_id>")
+@login_required
+def get_job_status(job_id):
+    """API para obter status de um job"""
+    job = ScrapingJob.get_by_id(job_id)
+    if not job or job['user_id'] != current_user.id:
+        return {"error": "Job not found"}, 404
+    
+    return {
+        "id": job['id'],
+        "status": job['status'],
+        "progress": job['progress'],
+        "current_location": job['current_location'],
+        "error_message": job['error_message'],
+        "results_path": job['results_path'],
+        "created_at": job['created_at'],
+        "started_at": job['started_at'],
+        "completed_at": job['completed_at']
+    }
 
 
 if __name__ == "__main__":
