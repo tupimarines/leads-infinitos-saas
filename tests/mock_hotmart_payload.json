@@ -1,0 +1,26 @@
+{
+    "id": "evt_123456789",
+    "creation_date": 1706030000000,
+    "event": "PURCHASE_APPROVED",
+    "version": "2.0.0",
+    "data": {
+        "product": {
+            "id": 5974664,
+            "name": "Leads Infinitos"
+        },
+        "purchase": {
+            "transaction": "HP000TEST123",
+            "status": "APPROVED",
+            "approved_date": 1706030000000,
+            "price": {
+                "value": 297.00,
+                "currency_code": "BRL"
+            }
+        },
+        "buyer": {
+            "email": "test.webhook@example.com",
+            "name": "Test User",
+            "checkout_phone": "5511999999999"
+        }
+    }
+}

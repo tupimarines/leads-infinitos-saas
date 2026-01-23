@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+
+{% block title %}WhatsApp - Leads Infinitos{% endblock %}
+
+{% block body %}
+<div class="section">
+    <div class="container">
+        <div class="hero" style="text-align: left; padding: 0 0 40px;">
+            <h1>Configuração do WhatsApp</h1>
+            <p>Conecte sua instância para disparar mensagens automáticas.</p>
+        </div>
+
+        <div class="grid grid-2">
+            <!-- Configuration Card -->
+            <div class="card" style="padding: 30px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px;">
+                    <h3 style="margin: 0; font-size: 20px;">Sua Instância</h3>
+                    <div id="status-badge" class="badge"
+                        style="background: rgba(255, 93, 93, 0.12); color: #ff5d5d; border-color: rgba(255, 93, 93, 0.35);">
+                        Desconectado
+                    </div>
+                </div>
+
+                <div class="field" style="margin-bottom: 20px;">
+                    <label>Nome da Instância</label>
+                    <input type="text" id="instance_name" placeholder="Ex: minha-loja-01"
+                        value="{{ instance.name if instance else '' }}" {% if instance and instance.status=='connected'
+                        %}readonly{% endif %}>
+                    <p class="muted" style="font-size: 12px; margin-top: 4px;">Um nome único para identificar sua
+                        conexão.</p>
+                </div>
+
+                <div class="field" style="margin-bottom: 20px;">
+                    <label>Chave da API (Gerada Automaticamente)</label>
+                    <input type="text" id="instance_key" value="{{ instance.apikey if instance else '' }}" readonly
+                        placeholder="Será gerada após criar a instância" style="opacity: 0.7; cursor: not-allowed;">
+                </div>
+
+                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                    <button id="btn-create" class="btn btn-primary" onclick="createInstance()" {% if instance and
+                        instance.status=='connected' %}disabled style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
+                        {% if instance %}Reconfigurar Instância{% else %}Criar Instância{% endif %}
+                    </button>
+                    <button id="btn-qr" class="btn" onclick="getQrCode()" {% if not instance %}disabled
+                        style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
+                        Gerar QR Code
+                    </button>
+                    <button id="btn-status" class="btn" onclick="checkStatus()" {% if not instance %}disabled
+                        style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
+                        Verificar Status
+                    </button>
+                </div>
+
+                <div id="message-area" style="margin-top: 20px; display: none;"></div>
+            </div>
+
+            <!-- QR Code Display -->
+            <div class="card"
+                style="padding: 30px; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px;">
+                <h3 style="margin-top: 0;">QR Code de Conexão</h3>
+                <p class="muted" style="text-align: center; margin-bottom: 24px;">Escaneie o código abaixo com o seu
+                    WhatsApp para conectar.</p>
+
+                <div id="qr-container"
+                    style="background: white; padding: 20px; border-radius: 12px; width: 250px; height: 250px; display: flex; align-items: center; justify-content: center;">
+                    <span class="muted" style="color: #ccc;">Aguardando...</span>
+                </div>
+
+                <div id="loading" style="display: none; margin-top: 20px; color: var(--primary);">
+                    Carregando...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const statusBadge = document.getElementById('status-badge');
+    const qrContainer = document.getElementById('qr-container');
+    const msgArea = document.getElementById('message-area');
+
+    // Initial State from Server
+    const currentStatus = "{{ instance.status if instance else 'disconnected' }}";
+    updateStatusUI(currentStatus);
+
+    function showMessage(msg, type = 'info') {
+        msgArea.style.display = 'block';
+        msgArea.className = type === 'error' ? 'flash' : 'flash'; // Reuse flash style
+        msgArea.style.borderColor = type === 'error' ? 'rgba(255,93,93,.35)' : 'rgba(25, 195, 125, 0.35)';
+        msgArea.style.background = type === 'error' ? 'rgba(255,93,93,.12)' : 'rgba(25, 195, 125, 0.12)';
+        msgArea.style.color = type === 'error' ? '#ffd4d4' : '#d4ffeb';
+        msgArea.innerText = msg;
+    }
+
+    function updateStatusUI(status) {
+        if (status === 'connected' || status === 'open') {
+            statusBadge.innerText = "Conectado";
+            statusBadge.style.background = "rgba(25, 195, 125, 0.12)";
+            statusBadge.style.color = "#19c37d";
+            statusBadge.style.borderColor = "rgba(25, 195, 125, 0.35)";
+        } else {
+            statusBadge.innerText = "Desconectado";
+            statusBadge.style.background = "rgba(255, 93, 93, 0.12)";
+            statusBadge.style.color = "#ff5d5d";
+            statusBadge.style.borderColor = "rgba(255, 93, 93, 0.35)";
+        }
+    }
+
+    async function createInstance() {
+        const name = document.getElementById('instance_name').value;
+        if (!name) return showMessage('Digite um nome para a instância.', 'error');
+
+        document.getElementById('btn-create').disabled = true;
+        document.getElementById('loading').style.display = 'block';
+
+        try {
+            const res = await fetch('/api/whatsapp/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instance_name: name })
+            });
+            const data = await res.json();
+
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
+            showMessage('Instância criada com sucesso! Agora gere o QR Code.', 'success');
+            document.getElementById('instance_key').value = data.key;
+
+            // Enable other buttons
+            document.getElementById('btn-qr').disabled = false;
+            document.getElementById('btn-status').disabled = false;
+
+            // Refresh page to hardlock inputs (optional, or just update UI)
+            setTimeout(() => location.reload(), 1500);
+
+        } catch (e) {
+            showMessage(e.message, 'error');
+            document.getElementById('btn-create').disabled = false;
+        } finally {
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    async function getQrCode() {
+        const key = document.getElementById('instance_key').value;
+        if (!key) return showMessage('Instância não configurada.', 'error');
+
+        document.getElementById('loading').style.display = 'block';
+        qrContainer.innerHTML = '';
+
+        try {
+            const res = await fetch(`/api/whatsapp/qr/${key}`);
+            const data = await res.json();
+
+            if (data.error) throw new Error(data.error);
+
+            // Mega API returns base64 in 'base64' field usually
+            // Check data structure
+            let base64Img = data.base64 || data.qrcode;
+
+            if (base64Img) {
+                // Remove prefix if present to avoid double prefix
+                base64Img = base64Img.replace('data:image/png;base64,', '');
+
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${base64Img}`;
+                img.style.width = '100%';
+                img.style.height = '100%';
+                img.style.objectFit = 'contain';
+                qrContainer.appendChild(img);
+            } else {
+                throw new Error('QR Code não recebido da API.');
+            }
+
+        } catch (e) {
+            showMessage(e.message, 'error');
+            qrContainer.innerHTML = '<span class="muted">Erro ao carregar</span>';
+        } finally {
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    async function checkStatus() {
+        const key = document.getElementById('instance_key').value;
+        if (!key) return;
+
+        try {
+            const res = await fetch(`/api/whatsapp/status/${key}`);
+            const data = await res.json();
+
+            console.log(data); // Debug
+
+            // Check connection status logic
+            // Structure from backend (normalized or raw MegaAPI): 
+            // { "instance": { "status": "connected", ... } } 
+
+            let isConnected = false;
+
+            // Check possible paths
+            if (data.instance && data.instance.status === 'connected') {
+                isConnected = true;
+            } else if (data.instance_data && (data.instance_data.phone_connected || data.instance_data.status === 'open')) {
+                // Compatibility with other versions/Evolution
+                isConnected = true;
+            }
+
+            updateStatusUI(isConnected ? 'connected' : 'disconnected');
+
+            if (isConnected) {
+                showMessage('Conexão ativa!', 'success');
+                qrContainer.innerHTML = '<div style="color: #19c37d; font-size: 40px;">✓</div>';
+            } else {
+                showMessage('Instância desconectada.', 'error');
+            }
+
+        } catch (e) {
+            console.error(e);
+            showMessage('Erro ao verificar status.', 'error');
+        }
+    }
+</script>
+{% endblock %}

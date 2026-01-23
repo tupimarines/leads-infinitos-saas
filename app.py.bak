@@ -9,7 +9,7 @@ from flask_login import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_mail import Mail, Message
-
+import sqlite3
 import os
 import secrets
 import string
@@ -17,44 +17,24 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
-import redis
-from rq import Queue
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
 from main import run_scraper, run_scraper_with_progress
-import requests
-import re
 
 
-load_dotenv()
-
-# Configuração Redis
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
-redis_conn = redis.from_url(REDIS_URL)
-q = Queue(connection=redis_conn)
-
-
-def get_db_connection():
-    conn = psycopg2.connect(
-        host=os.environ.get('DB_HOST', 'localhost'),
-        database=os.environ.get('DB_NAME', 'leads_infinitos'),
-        user=os.environ.get('DB_USER', 'postgres'),
-        password=os.environ.get('DB_PASSWORD', 'devpassword'),
-        port=os.environ.get('DB_PORT', '5432')
-    )
+def get_db_connection() -> sqlite3.Connection:
+    db_path = os.path.join(os.getcwd(), "app.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db() -> None:
     conn = get_db_connection()
-    cur = conn.cursor()
     
-    # Tabela de usuários
-    cur.execute(
+    # Tabela de usuários (já existente)
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -63,27 +43,28 @@ def init_db() -> None:
     )
     
     # Tabela de licenças
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS licenses (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             hotmart_purchase_id TEXT UNIQUE NOT NULL,
             hotmart_product_id TEXT NOT NULL,
             license_type TEXT NOT NULL CHECK (license_type IN ('semestral', 'anual')),
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
             purchase_date TIMESTAMP NOT NULL,
             expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
         );
         """
     )
     
     # Tabela de webhooks da Hotmart
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS hotmart_webhooks (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
             hotmart_purchase_id TEXT,
             payload TEXT NOT NULL,
@@ -95,10 +76,10 @@ def init_db() -> None:
     )
     
     # Tabela de configurações da Hotmart
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS hotmart_config (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id TEXT NOT NULL,
             client_secret TEXT NOT NULL,
             webhook_secret TEXT,
@@ -110,10 +91,10 @@ def init_db() -> None:
     )
     
     # Tabela de webhooks da Hubla
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS hubla_webhooks (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
             hubla_purchase_id TEXT,
             payload TEXT NOT NULL,
@@ -125,10 +106,10 @@ def init_db() -> None:
     )
     
     # Tabela de configurações da Hubla
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS hubla_config (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             webhook_token TEXT NOT NULL,
             product_id TEXT NOT NULL,
             sandbox_mode BOOLEAN DEFAULT FALSE,
@@ -138,102 +119,58 @@ def init_db() -> None:
     )
     
     # Tabela de reset de senha
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS password_resets (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             token TEXT UNIQUE NOT NULL,
             expires_at TIMESTAMP NOT NULL,
             used BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
         );
         """
     )
     
     # Tabela de jobs de scraping
-    cur.execute(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scraping_jobs (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             keyword TEXT NOT NULL,
-            locations TEXT NOT NULL,
+            locations TEXT NOT NULL,  -- JSON array of locations
             total_results INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
-            progress INTEGER DEFAULT 0,
+            progress INTEGER DEFAULT 0,  -- 0-100
             current_location TEXT,
-            results_path TEXT,
+            results_path TEXT,  -- Path to results file
             error_message TEXT,
             started_at TIMESTAMP,
             completed_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
         );
         """
     )
-
-    # Tabela de instâncias do WhatsApp
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS instances (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            name TEXT NOT NULL,
-            server_url TEXT,
-            apikey TEXT,
-            status TEXT DEFAULT 'disconnected',
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-
-    # Tabela de campanhas
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaigns (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            name TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            message_template TEXT,
-            daily_limit INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    
-    # Tabela de leads da campanha (Fila de Envio)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaign_leads (
-            id SERIAL PRIMARY KEY,
-            campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
-            phone TEXT NOT NULL,
-            name TEXT,
-            status TEXT DEFAULT 'pending',
-            sent_at TIMESTAMP,
-            log TEXT
-        );
-        """
-    )
-
     
     # Inserir configuração inicial da Hotmart se não existir
-    cur.execute(
+    conn.execute(
         """
-        INSERT INTO hotmart_config 
+        INSERT OR IGNORE INTO hotmart_config 
         (client_id, client_secret, product_id, sandbox_mode) 
-        VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+        VALUES (?, ?, ?, ?)
         """,
         ('cb6bcde6-24cd-464f-80f3-e4efce3f048c', '7ee4a93d-1aec-473b-a8e6-1d0a813382e2', '5974664', True)
     )
     
     # Inserir configuração inicial da Hubla se não existir
-    cur.execute(
+    conn.execute(
         """
-        INSERT INTO hubla_config 
+        INSERT OR IGNORE INTO hubla_config 
         (webhook_token, product_id, sandbox_mode) 
-        VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+        VALUES (?, ?, ?)
         """,
         ('your-hubla-webhook-token', 'your-hubla-product-id', True)
     )
@@ -251,9 +188,7 @@ class User(UserMixin):
     @staticmethod
     def get_by_id(user_id: int) -> "User | None":
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, email, password_hash FROM users WHERE id = %s", (user_id,))
-            row = cur.fetchone()
+        row = conn.execute("SELECT id, email, password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
         conn.close()
         if row:
             return User(row[0], row[1], row[2])
@@ -262,9 +197,7 @@ class User(UserMixin):
     @staticmethod
     def get_by_email(email: str) -> "User | None":
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, email, password_hash FROM users WHERE email = %s", (email,))
-            row = cur.fetchone()
+        row = conn.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
         conn.close()
         if row:
             return User(row[0], row[1], row[2])
@@ -274,28 +207,25 @@ class User(UserMixin):
     def create(email: str, password: str) -> "User":
         password_hash = generate_password_hash(password)
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id",
-                (email, password_hash),
-            )
-            new_id = cur.fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+            (email, password_hash),
+        )
         conn.commit()
+        new_id = cur.lastrowid
         conn.close()
         return User(new_id, email, password_hash)
 
     def has_active_license(self) -> bool:
         """Verifica se o usuário tem uma licença ativa"""
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT COUNT(*) as count FROM licenses 
-                WHERE user_id = %s AND status = 'active' AND expires_at > NOW()
-                """,
-                (self.id,)
-            )
-            row = cur.fetchone()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as count FROM licenses 
+            WHERE user_id = ? AND status = 'active' AND expires_at > datetime('now')
+            """,
+            (self.id,)
+        ).fetchone()
         conn.close()
         return row['count'] > 0
 
@@ -312,14 +242,6 @@ class License:
         self.purchase_date = purchase_date
         self.expires_at = expires_at
 
-    @property
-    def daily_limit(self) -> int:
-        if self.license_type == 'anual':
-            return 30  # Scale
-        elif self.license_type == 'semestral':
-            return 20  # Pro
-        return 10  # Fallback/Starter
-
     @staticmethod
     def create(user_id: int, hotmart_purchase_id: str, hotmart_product_id: str, 
                license_type: str, purchase_date: str) -> "License":
@@ -333,18 +255,17 @@ class License:
             expires_at = purchase_dt + timedelta(days=365)
         
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO licenses 
-                (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-                """,
-                (user_id, hotmart_purchase_id, hotmart_product_id, license_type, 
-                 purchase_date, expires_at.isoformat())
-            )
-            new_id = cur.fetchone()[0]
+        cur = conn.execute(
+            """
+            INSERT INTO licenses 
+            (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, hotmart_purchase_id, hotmart_product_id, license_type, 
+             purchase_date, expires_at.isoformat())
+        )
         conn.commit()
+        new_id = cur.lastrowid
         conn.close()
         
         return License(new_id, user_id, hotmart_purchase_id, hotmart_product_id, 
@@ -353,12 +274,10 @@ class License:
     @staticmethod
     def get_by_user_id(user_id: int) -> list["License"]:
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM licenses WHERE user_id = %s ORDER BY created_at DESC",
-                (user_id,)
-            )
-            rows = cur.fetchall()
+        rows = conn.execute(
+            "SELECT * FROM licenses WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        ).fetchall()
         conn.close()
         
         return [License(row['id'], row['user_id'], row['hotmart_purchase_id'], 
@@ -374,9 +293,7 @@ class HotmartService:
     def _get_config(self) -> dict:
         """Obtém configuração da Hotmart do banco"""
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM hotmart_config LIMIT 1")
-            row = cur.fetchone()
+        row = conn.execute("SELECT * FROM hotmart_config LIMIT 1").fetchone()
         conn.close()
         
         if not row:
@@ -442,115 +359,88 @@ class HotmartService:
             print(f"Erro ao verificar compra na Hotmart: {e}")
             return None
     
-    
     def process_webhook(self, payload: dict, signature: str) -> bool:
         """
-        Processa webhook da Hotmart v2.0.0
+        Processa webhook da Hotmart
         Retorna True se processado com sucesso
         """
-        # Validação de Segurança (Hottok)
-        expected_hottok = os.environ.get('HOTMART_HOTTOK')
-        if not expected_hottok:
-            print("⚠️ HOTMART_HOTTOK não configurado no .env")
-            # Em dev/test, talvez permitir passar? Não, segurança primeiro.
-            # Mas se não estiver configurado, não temos como validar.
-            pass 
-        elif signature != expected_hottok:
-            print(f"❌ Assinatura inválida: Recebido={signature}, Esperado={expected_hottok}")
-            return False
-
-        # Extrair dados do Payload v2.0.0
-        event = payload.get('event')
-        data = payload.get('data', {})
+        # TODO: Implementar validação de assinatura do webhook
+        # Por enquanto, apenas salva o webhook
         
-        # Identificadores para Log
-        purchase_id = data.get('purchase', {}).get('transaction')
-        product_id = str(data.get('product', {}).get('id', ''))
+        # Extrair purchase_id do formato real da Hotmart
+        purchase_id = None
+        if payload.get('data', {}).get('purchase', {}).get('transaction'):
+            purchase_id = payload.get('data', {}).get('purchase', {}).get('transaction')
         
-        # Salvar webhook (Audit Log)
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO hotmart_webhooks (event_type, hotmart_purchase_id, payload)
-                VALUES (%s, %s, %s)
-                """,
-                (event, purchase_id, json.dumps(payload))
-            )
+        conn.execute(
+            """
+            INSERT INTO hotmart_webhooks (event_type, hotmart_purchase_id, payload)
+            VALUES (?, ?, ?)
+            """,
+            (payload.get('event'), purchase_id, json.dumps(payload))
+        )
         conn.commit()
         conn.close()
         
-        # Eventos de Interesse: PURCHASE_APPROVED ou PURCHASE_COMPLETE
-        if event in ['PURCHASE_APPROVED', 'PURCHASE_COMPLETE']:
-            return self._process_sale_approved(data)
+        # Processar evento de venda (Hotmart usa PURCHASE_COMPLETE)
+        if payload.get('event') == 'PURCHASE_COMPLETE':
+            return self._process_sale_completed(payload.get('data', {}))
         
-        print(f"⚠️ Evento Hotmart ignorado: {event}")
         return True
     
-    def _process_sale_approved(self, data: dict) -> bool:
-        """
-        Processa venda aprovada: 
-        1. Cria usuário se não existir
-        2. Cria/Atualiza licença
-        """
+    def _process_sale_completed(self, sale_data: dict) -> bool:
+        """Processa evento de venda completada"""
         try:
-            buyer = data.get('buyer', {})
-            email = buyer.get('email')
-            purchase = data.get('purchase', {})
-            purchase_id = purchase.get('transaction')
-            product = data.get('product', {})
-            product_id = str(product.get('id', ''))
+            # Extrair dados do formato real da Hotmart
+            buyer_email = sale_data.get('buyer', {}).get('email')
+            purchase_id = sale_data.get('purchase', {}).get('transaction')
+            product_id = str(sale_data.get('product', {}).get('id', ''))
+            purchase_date = sale_data.get('purchase', {}).get('approved_date')
             
-            # Data de Aprovação
-            approved_date_ms = purchase.get('approved_date')
-            if approved_date_ms:
-                purchase_date = datetime.fromtimestamp(approved_date_ms / 1000).isoformat()
-            else:
-                purchase_date = datetime.utcnow().isoformat()
-
-            if not email or not purchase_id:
-                print("❌ Dados insuficientes no payload da Hotmart")
+            # Converter timestamp para ISO string
+            if purchase_date:
+                from datetime import datetime
+                purchase_date = datetime.fromtimestamp(purchase_date / 1000).isoformat()
+            
+            if not all([buyer_email, purchase_id, product_id, purchase_date]):
+                print(f"Dados insuficientes: email={buyer_email}, purchase_id={purchase_id}, product_id={product_id}, date={purchase_date}")
                 return False
-                
-            email = email.lower().strip()
             
-            # 1. Verificar/Criar Usuário
-            user = User.get_by_email(email)
-            if not user:
-                # Gerar senha temporária segura
-                temp_password = secrets.token_urlsafe(8)
-                print(f"🆕 Criando usuário para {email} (Senha: {temp_password})")
-                
-                user = User.create(email, temp_password)
-                
-                # TODO: Enviar email com a senha (se SMTP estiver configurado)
-                # Por enquanto apenas logamos, pois o foco é a integração funcionar
+            # Verificar se já existe licença para esta compra
+            conn = get_db_connection()
+            existing = conn.execute(
+                "SELECT id FROM licenses WHERE hotmart_purchase_id = ?",
+                (purchase_id,)
+            ).fetchone()
+            conn.close()
             
-            # 2. Determinar Tipo de Licença (Preço)
-            price_value = purchase.get('price', {}).get('value', 0)
-            if price_value >= 287.00:
+            if existing:
+                return True  # Licença já existe
+            
+            # Determinar tipo de licença baseado no preço
+            price = float(sale_data.get('purchase', {}).get('price', {}).get('value', 0))
+            if price >= 287.00:  # Licença anual
                 license_type = 'anual'
-            else:
+            else:  # Licença semestral
                 license_type = 'semestral'
-                
-            # 3. Verificar se licença já existe (Idempotência)
-            existing_licenses = License.get_by_user_id(user.id)
-            for lic in existing_licenses:
-                if lic.hotmart_purchase_id == purchase_id:
-                    print(f"ℹ️ Licença já existe para {email} (Purchase: {purchase_id})")
-                    return True
             
-            # 4. Criar Licença
-            License.create(user.id, purchase_id, product_id, license_type, purchase_date)
-            print(f"✅ Licença {license_type} criada com sucesso para {email}!")
+            # Buscar usuário pelo email
+            user = User.get_by_email(buyer_email)
+            if user:
+                # Criar licença para usuário existente
+                License.create(user.id, purchase_id, product_id, license_type, purchase_date)
+                print(f"Licença criada para {buyer_email}: {license_type} - {purchase_id}")
+            else:
+                # Usuário ainda não se registrou, a licença será criada quando ele se registrar
+                print(f"Usuário {buyer_email} não encontrado. Licença será criada no registro.")
+                pass
             
             return True
-
+            
         except Exception as e:
-            print(f"❌ Erro ao processar venda aprovada: {e}")
+            print(f"Erro ao processar venda completada: {e}")
             return False
-
-
 
 
 class HublaService:
@@ -560,9 +450,7 @@ class HublaService:
     def _get_config(self) -> dict:
         """Obtém configuração da Hubla do banco"""
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM hubla_config LIMIT 1")
-            row = cur.fetchone()
+        row = conn.execute("SELECT * FROM hubla_config LIMIT 1").fetchone()
         conn.close()
         
         if not row:
@@ -613,14 +501,13 @@ class HublaService:
         
         # Salvar webhook no banco
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO hubla_webhooks (event_type, hubla_purchase_id, payload)
-                VALUES (%s, %s, %s)
-                """,
-                (event_type, purchase_id, json.dumps(payload))
-            )
+        conn.execute(
+            """
+            INSERT INTO hubla_webhooks (event_type, hubla_purchase_id, payload)
+            VALUES (?, ?, ?)
+            """,
+            (event_type, purchase_id, json.dumps(payload))
+        )
         conn.commit()
         conn.close()
         
@@ -865,15 +752,14 @@ class ScrapingJob:
     def create(user_id: int, keyword: str, locations: list, total_results: int) -> int:
         """Create a new scraping job"""
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO scraping_jobs (user_id, keyword, locations, total_results)
-                VALUES (%s, %s, %s, %s) RETURNING id
-                """,
-                (user_id, keyword, json.dumps(locations), total_results)
-            )
-            job_id = cur.fetchone()[0]
+        cur = conn.execute(
+            """
+            INSERT INTO scraping_jobs (user_id, keyword, locations, total_results)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, keyword, json.dumps(locations), total_results)
+        )
+        job_id = cur.lastrowid
         conn.commit()
         conn.close()
         return job_id
@@ -884,36 +770,35 @@ class ScrapingJob:
         """Update job status and progress"""
         conn = get_db_connection()
         
-        update_fields = ["status = %s"]
+        update_fields = ["status = ?"]
         params = [status]
         
         if progress is not None:
-            update_fields.append("progress = %s")
+            update_fields.append("progress = ?")
             params.append(progress)
         
         if current_location is not None:
-            update_fields.append("current_location = %s")
+            update_fields.append("current_location = ?")
             params.append(current_location)
         
         if error_message is not None:
-            update_fields.append("error_message = %s")
+            update_fields.append("error_message = ?")
             params.append(error_message)
         
         if status == 'running' and 'started_at' not in [f.split(' = ')[0] for f in update_fields]:
-            update_fields.append("started_at = %s")
+            update_fields.append("started_at = ?")
             params.append(datetime.now().isoformat())
         
         if status in ['completed', 'failed']:
-            update_fields.append("completed_at = %s")
+            update_fields.append("completed_at = ?")
             params.append(datetime.now().isoformat())
         
         params.append(job_id)
         
-        with conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE scraping_jobs SET {', '.join(update_fields)} WHERE id = %s",
-                tuple(params)
-            )
+        conn.execute(
+            f"UPDATE scraping_jobs SET {', '.join(update_fields)} WHERE id = ?",
+            params
+        )
         conn.commit()
         conn.close()
     
@@ -921,37 +806,36 @@ class ScrapingJob:
     def set_results(job_id: int, results_path: str):
         """Set the results file path for a completed job"""
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE scraping_jobs SET results_path = %s WHERE id = %s",
-                (results_path, job_id)
-            )
+        conn.execute(
+            "UPDATE scraping_jobs SET results_path = ? WHERE id = ?",
+            (results_path, job_id)
+        )
         conn.commit()
         conn.close()
     
+    @staticmethod
     def get_by_id(job_id: int) -> dict:
         """Get job by ID"""
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM scraping_jobs WHERE id = %s", (job_id,))
-            row = cur.fetchone()
+        row = conn.execute(
+            "SELECT * FROM scraping_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
         conn.close()
         return dict(row) if row else None
     
+    @staticmethod
     def get_by_user_id(user_id: int, limit: int = 10) -> list:
         """Get recent jobs for a user"""
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT * FROM scraping_jobs 
-                WHERE user_id = %s 
-                ORDER BY created_at DESC 
-                LIMIT %s
-                """,
-                (user_id, limit)
-            )
-            rows = cur.fetchall()
+        rows = conn.execute(
+            """
+            SELECT * FROM scraping_jobs 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ?
+            """,
+            (user_id, limit)
+        ).fetchall()
         conn.close()
         return [dict(row) for row in rows]
 
@@ -1009,36 +893,45 @@ def run_scraping_job_async(job_id: int):
     thread.start()
 
 
-def send_reset_email(email, token):
-    """Enfileira o envio de email com link de redefinição de senha"""
+def send_reset_email(email, temp_password):
+    """Envia email com senha temporária"""
     try:
-        reset_url = url_for('reset_password', token=token, _external=True)
+        # Para testes locais, apenas mostrar a senha no console
+        if app.config['MAIL_USERNAME'] == 'seu-email@gmail.com':
+            print(f"\n" + "="*50)
+            print(f"📧 EMAIL DE RESET DE SENHA (TESTE LOCAL)")
+            print(f"Para: {email}")
+            print(f"Senha temporária: {temp_password}")
+            print(f"="*50 + "\n")
+            return True
         
-        # HTML Body
-        html_body = f"""
+        msg = Message(
+            'Redefinição de Senha - Leads Infinitos',
+            recipients=[email]
+        )
+        msg.html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #4f7cff;">Redefinição de Senha</h2>
             <p>Olá!</p>
             <p>Você solicitou a redefinição de sua senha no Leads Infinitos.</p>
-            <p>Clique no botão abaixo para criar uma nova senha:</p>
-            <div style="text-align: center; margin: 30px 0;">
-                <a href="{reset_url}" style="background-color: #4f7cff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Redefinir Minha Senha</a>
+            <p>Sua senha temporária é:</p>
+            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="margin: 0; color: #333; font-family: monospace;">{temp_password}</h3>
             </div>
-            <p>Ou copie e cole o link abaixo no seu navegador:</p>
-            <p style="background-color: #f5f5f5; padding: 10px; font-family: monospace; word-break: break-all;">{reset_url}</p>
-            <p><strong>Importante:</strong> Este link expira em 1 hora.</p>
+            <p><strong>Importante:</strong></p>
+            <ul>
+                <li>Esta senha é temporária e deve ser alterada após o login</li>
+                <li>Use esta senha para fazer login no sistema</li>
+                <li>Após o login, você poderá definir uma nova senha</li>
+            </ul>
             <p>Se você não solicitou esta redefinição, ignore este email.</p>
             <p>Atenciosamente,<br>Equipe Leads Infinitos</p>
         </div>
         """
-        
-        # Enfileirar tarefa no RQ
-        from worker_email import send_email_task
-        q.enqueue(send_email_task, email, 'Redefinição de Senha - Leads Infinitos', html_body)
-        
+        mail.send(msg)
         return True
     except Exception as e:
-        print(f"Erro ao enfileirar email: {e}")
+        print(f"Erro ao enviar email: {e}")
         return False
 
 
@@ -1050,9 +943,9 @@ STORAGE_ROOT = os.environ.get("STORAGE_DIR", "storage")
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
-app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_USERNAME')
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', 'seu-email@gmail.com')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', 'sua-senha-de-app')
+app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_USERNAME', 'seu-email@gmail.com')
 
 mail = Mail(app)
 
@@ -1070,7 +963,7 @@ def load_user(user_id: str):
 
 
 # Inicializa o banco na carga da aplicação (Flask 3 removeu before_first_request)
-# init_db()
+init_db()
 
 
 @app.route("/", methods=["GET"]) 
@@ -1201,11 +1094,10 @@ def scrape():
         total_results=total
     )
     
-    # Start job in background (Queue)
-    from worker_scraper import run_scraper_task
-    q.enqueue(run_scraper_task, job_id)
+    # Start job in background
+    run_scraping_job_async(job_id)
     
-    flash(f"Scraping enfileirado! Job ID: {job_id}. Você pode acompanhar o progresso na página de jobs.")
+    flash(f"Scraping iniciado! Job ID: {job_id}. Você pode acompanhar o progresso na página de jobs.")
     return redirect(url_for("jobs"))
 
 
@@ -1234,6 +1126,24 @@ def download():
     return send_file(path, as_attachment=True, download_name=filename)
 
 
+@app.route("/webhook/hotmart", methods=["POST"])
+def hotmart_webhook():
+    """Endpoint para receber webhooks da Hotmart"""
+    try:
+        payload = request.get_json()
+        signature = request.headers.get('X-Hotmart-Signature', '')
+        
+        hotmart_service = HotmartService()
+        success = hotmart_service.process_webhook(payload, signature)
+        
+        if success:
+            return {"status": "success"}, 200
+        else:
+            return {"status": "error", "message": "Failed to process webhook"}, 400
+            
+    except Exception as e:
+        print(f"Erro no webhook da Hotmart: {e}")
+        return {"status": "error", "message": str(e)}, 500
 
 
 @app.route("/webhook/hubla", methods=["POST"])
@@ -1293,106 +1203,60 @@ def forgot_password():
         
         # Verificar se o usuário existe
         user = User.get_by_email(email)
+        if not user:
+            # Em desenvolvimento, criar usuário automaticamente para facilitar testes
+            if app.config.get('DEBUG', False):
+                try:
+                    user = User.create(email, "temp123456")
+                    # Criar licença vitalícia para o usuário de teste
+                    expires_at = datetime.now() + timedelta(days=365*50)
+                    conn = get_db_connection()
+                    conn.execute(
+                        """
+                        INSERT INTO licenses 
+                        (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user.id,
+                            f"DEV-TEST-{datetime.now().strftime('%Y%m%d')}",
+                            '5974664',
+                            'anual',
+                            datetime.now().isoformat(),
+                            expires_at.isoformat()
+                        )
+                    )
+                    conn.commit()
+                    conn.close()
+                    flash("Usuário criado automaticamente para teste (modo desenvolvimento).")
+                except Exception as e:
+                    flash("Erro ao criar usuário de teste.")
+                    return redirect(url_for("forgot_password"))
+            else:
+                flash("Email não encontrado em nossa base de dados.")
+                return redirect(url_for("forgot_password"))
         
-        if user:
-            # Gerar token único
-            token = secrets.token_urlsafe(32)
-            expires_at = datetime.now() + timedelta(hours=1)
-            
-            # Salvar token no banco
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                # Invalidar tokens anteriores
-                cur.execute("UPDATE password_resets SET used = TRUE WHERE user_id = %s", (user.id,))
-                # Criar novo token
-                cur.execute(
-                    """
-                    INSERT INTO password_resets (user_id, token, expires_at)
-                    VALUES (%s, %s, %s)
-                    """,
-                    (user.id, token, expires_at)
-                )
-            conn.commit()
-            conn.close()
-            
-            # Enviar email (agora assíncrono)
-            send_reset_email(email, token)
-            
-        # SEMPRE retornar mensagem de sucesso para evitar enumeração de usuários
-        flash("Se o email informado estiver cadastrado, você receberá um link para redefinir sua senha em instantes.")
-        return redirect(url_for("login"))
-    
-    return render_template("forgot_password.html")
-
-
-@app.route("/reset-password/<token>", methods=["GET", "POST"])
-def reset_password(token):
-    """Página para definir nova senha usando token"""
-    if current_user.is_authenticated:
-        return redirect(url_for("index"))
-    
-    # Verificar token
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT user_id, expires_at, used 
-            FROM password_resets 
-            WHERE token = %s
-            """, 
-            (token,)
-        )
-        reset_data = cur.fetchone()
-    conn.close()
-    
-    if not reset_data:
-        flash("Link inválido ou inexistente.")
-        return redirect(url_for("login"))
-    
-    user_id, expires_at, used = reset_data
-    
-    if used:
-        flash("Este link já foi utilizado.")
-        return redirect(url_for("login"))
+        # Gerar senha temporária
+        temp_password = generate_temp_password()
         
-    if datetime.now() > expires_at:
-        flash("Este link expirou. Solicite um novo.")
-        return redirect(url_for("forgot_password"))
-    
-    if request.method == "POST":
-        password = request.form.get("password", "")
-        confirm_password = request.form.get("confirm_password", "")
-        
-        if not password or not confirm_password:
-            flash("Preencha todos os campos.")
-            return render_template("reset_password.html", token=token)
-            
-        if password != confirm_password:
-            flash("As senhas não coincidem.")
-            return render_template("reset_password.html", token=token)
-            
-        if len(password) < 6:
-            flash("A senha deve ter pelo menos 6 caracteres.")
-            return render_template("reset_password.html", token=token)
-        
-        # Atualizar senha e invalidar token
+        # Atualizar senha do usuário
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE users SET password_hash = %s WHERE id = %s",
-                (generate_password_hash(password), user_id)
-            )
-            cur.execute(
-                "UPDATE password_resets SET used = TRUE WHERE token = %s",
-                (token,)
-            )
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(temp_password), user.id)
+        )
         conn.commit()
         conn.close()
         
-        flash("Senha alterada com sucesso! Faça login com sua nova senha.")
-        return redirect(url_for("login"))
+        # Enviar email
+        if send_reset_email(email, temp_password):
+            flash("Senha temporária enviada para seu email. Verifique sua caixa de entrada.")
+        else:
+            flash("Erro ao enviar email. Entre em contato com o suporte.")
         
-    return render_template("reset_password.html", token=token)
+        return redirect(url_for("login"))
+    
+    return render_template("forgot_password.html")
 
 
 @app.route("/change-password", methods=["GET", "POST"])
@@ -1423,11 +1287,10 @@ def change_password():
         
         # Atualizar senha
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE users SET password_hash = %s WHERE id = %s",
-                (generate_password_hash(new_password), current_user.id)
-            )
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(new_password), current_user.id)
+        )
         conn.commit()
         conn.close()
         
@@ -1479,290 +1342,6 @@ def get_job_status(job_id):
     }
 
 
-class WhatsappService:
-    def __init__(self):
-        self.base_url = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
-        self.token = os.environ.get('MEGA_API_TOKEN', '')
-        self.headers = {
-            'Authorization': self.token,
-            'Content-Type': 'application/json'
-        }
-
-    def create_instance(self, instance_name: str = None) -> dict:
-        """Creates a new WhatsApp instance on Mega API"""
-        url = f"{self.base_url}/rest/instance/init"
-        params = {}
-        if instance_name:
-            params['instance_key'] = instance_name
-        
-        # Payload from user validation
-        payload = {
-            "messageData": {
-                "webhookUrl": "",
-                "webhookEnabled": True
-            }
-        }
-
-        try:
-            response = requests.post(url, params=params, json=payload, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            
-            # Debug
-            print(f"Mega API Response: {response.text}")
-            
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error creating instance: {e}")
-            if e.response:
-                print(f"Response: {e.response.text}")
-            return None
-
-    def get_qr_code(self, instance_key: str) -> dict:
-        """Gets QR Code for the instance"""
-        url = f"{self.base_url}/rest/instance/qrcode/{instance_key}"
-        try:
-            response = requests.get(url, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            try:
-                return response.json()
-            except requests.exceptions.JSONDecodeError:
-                # Some endpoints return raw strings or HTML
-                return {"data": response.text}
-        except requests.exceptions.RequestException as e:
-            print(f"Error getting QR code: {e}")
-            return None
-
-    def get_status(self, instance_key: str) -> dict:
-        """Gets instance connection status"""
-        url = f"{self.base_url}/rest/instance/{instance_key}"
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            # API might return a list [ {InstanceObject} ]
-            if isinstance(data, list) and len(data) > 0:
-                return data[0]
-            return data
-        except requests.exceptions.RequestException as e:
-            print(f"Error getting status: {e}")
-            return None
-
-
-@app.route("/whatsapp")
-@login_required
-def whatsapp_config():
-    """Page to configure WhatsApp instance"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM instances WHERE user_id = %s", (current_user.id,))
-        instance = cur.fetchone()
-    conn.close()
-    
-    return render_template("whatsapp_config.html", instance=instance)
-
-
-@app.route("/api/whatsapp/init", methods=["POST"])
-@login_required
-def init_whatsapp():
-    """API to initialize a WhatsApp instance"""
-    instance_name = request.json.get("instance_name") or ""
-    
-    # Check if user already has an instance
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT name, apikey FROM instances WHERE user_id = %s", (current_user.id,))
-        existing_instance = cur.fetchone()
-    conn.close()
-
-    if existing_instance:
-        # User already has an instance.
-        # If the goal is to limit to 1, we should block creation of a new one unless they delete/disconnect.
-        # However, "Reconfigurar Instancia" button in UI calls this same endpoint.
-        # If the user is reconfiguring, they might be sending the SAME name or a NEW name.
-        # Validating request intent might be complex without a flag.
-        # But if the user simply clicked "Criar" (or in this case "Reconfigurar" which hits /init), 
-        # and we want to prevent creating a *duplicate* or losing the old one unintentionally?
-        
-        # User request: "return a message of 'instance already created. Instance Name: XYZ'"
-        # This implies stopping the action.
-        
-        # But wait, if I block this, the "Reconfigurar" button won't work if it hits this endpoint 
-        # to Create a new instance (which overwrites the old one in DB due to UPSERT logic below).
-        
-        # If the UI button says "Reconfigurar", maybe we destroy the old one first? 
-        # Current UI logic: 
-        # <button ... onclick="createInstance()"> ... </button>
-        # createInstance() calls /api/whatsapp/init.
-        
-        # If I return error here, reconfiguring becomes impossible without deleting first.
-        # Maybe I should only check if the connection to Mega API implies existence? 
-        
-        # Interpretation: The User wants to avoid ACCIDENTAL creation or abuse.
-        # But since we support "Reconfigurar", maybe we only block if the instance name is DIFFERENT?
-        # Or maybe we explicitly require a "force" flag?
-        
-        # User said: "limit only one instance created per user... if user tries to create... return message"
-        # I will implement the check. If the user wants to reconfigure, they might need to use a different flow 
-        # or I'll assume for now this blocks it. 
-        # NOTE: This WILL BREAK "Reconfigurar" unless we handle it. 
-        # But user asked for this limitation. I will implement as requested. 
-        # If they complain "I can't reconfigure", we can add a "force=true" param later.
-        
-        return {
-            "error": f"Você já possui uma instância criada. Nome: {existing_instance[0]} ({existing_instance[1]})"
-        }, 400
-
-    
-    # Sanitize if provided
-    safe_name = ""
-    if instance_name:
-        safe_name = "".join(c for c in instance_name if c.isalnum() or c in ('-', '_'))
-    
-    service = WhatsappService()
-    result = service.create_instance(safe_name if safe_name else None)
-    
-    if result:
-        # Check API level error
-        if result.get('error') is True:
-             # Even if 200 OK, logic error might exist
-             # But usually 'error': false means success.
-             # Note: User json shows "error": false.
-             pass
-
-        # Save to DB
-        # Extract key from data object
-        # structure: { ..., "data": { "instance_key": "..." }, ... }
-        instance_key = result.get('data', {}).get('instance_key')
-        
-        # Fallback 1: Top level (sometimes APIs vary)
-        if not instance_key:
-            instance_key = result.get('instance_key')
-            
-        # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
-        if not instance_key and safe_name:
-             # Check if response implies success
-             if result.get('message') == 'Instance created' or result.get('error') is False:
-                 instance_key = safe_name
-
-        if not instance_key:
-             print(f"Warning: No key returned from Mega API. Result: {result}")
-             return {"error": "Falha ao obter ID da instância. Resposta da API inválida."}, 500
-
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            # Upsert instance for user (assuming 1 instance per user for MVP)
-            cur.execute(
-                """
-                INSERT INTO instances (user_id, name, apikey, status)
-                VALUES (%s, %s, %s, 'disconnected')
-                ON CONFLICT (id) DO UPDATE 
-                SET name = EXCLUDED.name, apikey = EXCLUDED.apikey, status = 'disconnected', updated_at = CURRENT_TIMESTAMP
-                """,
-                (current_user.id, instance_name, instance_key)
-            )
-            # If there's a constraint on user_id, we might want to check existence first or add unique constraint.
-            # detailed implementation: Check if user already has an instance
-            cur.execute("SELECT id FROM instances WHERE user_id = %s", (current_user.id,))
-            existing = cur.fetchone()
-            if existing:
-                 cur.execute(
-                    "UPDATE instances SET name = %s, apikey = %s, status = 'disconnected', updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                    (instance_name, instance_key, existing[0])
-                )
-            else:
-                 cur.execute(
-                    "INSERT INTO instances (user_id, name, apikey, status) VALUES (%s, %s, %s, 'disconnected')",
-                    (current_user.id, instance_name, instance_key)
-                )
-
-        conn.commit()
-        conn.close()
-        
-        return {"status": "success", "key": instance_key, "data": result}
-    
-    return {"error": "Failed to create instance at provider"}, 500
-
-
-@app.route("/api/whatsapp/qr/<instance_key>")
-@login_required
-def get_whatsapp_qr(instance_key):
-    """API to get QR code"""
-    # Verify ownership
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT user_id FROM instances WHERE apikey = %s", (instance_key,))
-        row = cur.fetchone()
-    conn.close()
-    
-    if not row or row[0] != current_user.id:
-        return {"error": "Unauthorized"}, 403
-        
-    service = WhatsappService()
-    result = service.get_qr_code(instance_key)
-    
-    if result:
-        # Check if we received HTML in 'data' field (Mega API behavior seen in logs)
-        # Format: {"data": "<!DOCTYPE html>... <img src=\"data:image/png;base64,...\"> ..."}
-        html_data = result.get('data')
-        if html_data and isinstance(html_data, str) and '<img' in html_data:
-            # Extract base64 src
-            match = re.search(r'src=["\']data:image/png;base64,([^"\']+)["\']', html_data)
-            if match:
-                return {"base64": match.group(1)}
-        
-        # Fallback: return result as is if it follows another format
-        return result
-    return {"error": "Failed to get QR code"}, 500
-
-
-@app.route("/api/whatsapp/status/<instance_key>")
-@login_required
-def get_whatsapp_status(instance_key):
-    """API to get status"""
-    # Verify ownership
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id, user_id FROM instances WHERE apikey = %s", (instance_key,))
-        row = cur.fetchone()
-    conn.close()
-    
-    if not row or row[1] != current_user.id:
-        return {"error": "Unauthorized"}, 403
-        
-    service = WhatsappService()
-    result = service.get_status(instance_key)
-    
-    if result:
-        # Update DB status if possible
-        # Mega API result like: {"instance_key": "...", "phone_connected": true/false, "user": {...}}
-        # We can try to infer status
-        is_connected = result.get('instance_data', {}).get('phone_connected') 
-        # Note: Structure might vary, trusting 'phone_connected' or analyzing payload.
-        # Fallback: check if result has 'error' or 'status' field.
-        
-        new_status = 'connected' if is_connected else 'disconnected'
-        
-        # Also Update DB
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("UPDATE instances SET status = %s WHERE id = %s", (new_status, row[0]))
-        conn.commit()
-        conn.close()
-        
-        return result
-    return {"error": "Failed to get status"}, 500
-
-
-@app.route("/api/webhooks/hotmart", methods=["POST"])
-def hotmart_webhook():
-    """Recebe webhooks da Hotmart"""
-    hottok = request.headers.get('X-Hotmart-Hottok')
-    payload = request.json
-    
-    service = HotmartService()
-    success = service.process_webhook(payload, hottok)
-    
-    if success:
-        return {"status": "success"}, 200
-    else:
-        return {"status": "error"}, 400
+if __name__ == "__main__":
+    # Em produção, use um servidor WSGI (Gunicorn/Waitress). Traefik no Dokploy fará o proxy.
+    app.run(host="0.0.0.0", port=8000, debug=True)

@@ -1,12 +1,14 @@
 <!doctype html>
 <html lang="pt-BR">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Leads Infinitos{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet">
   <style>
     :root {
       --bg: #0b1020;
@@ -17,75 +19,249 @@
       --primary: #4f7cff;
       --primary-600: #3d6bff;
       --accent: #8b5cf6;
-      --ring: rgba(79,124,255,.45);
+      --ring: rgba(79, 124, 255, .45);
       --success: #19c37d;
       --danger: #ff5d5d;
-      --shadow: 0 10px 25px rgba(0,0,0,.35);
+      --shadow: 0 10px 25px rgba(0, 0, 0, .35);
       --radius: 14px;
       --radius-sm: 10px;
       --radius-lg: 18px;
     }
-    * { box-sizing: border-box; }
-    html, body { height: 100%; }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
     body {
       margin: 0;
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji';
       color: var(--text);
       background:
-        radial-gradient(1200px 800px at 10% -10%, rgba(139,92,246,.12), transparent 50%),
-        radial-gradient(1000px 700px at 90% -20%, rgba(79,124,255,.12), transparent 50%),
+        radial-gradient(1200px 800px at 10% -10%, rgba(139, 92, 246, .12), transparent 50%),
+        radial-gradient(1000px 700px at 90% -20%, rgba(79, 124, 255, .12), transparent 50%),
         linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
     }
-    a { color: var(--primary); text-decoration: none; }
-    a:hover { color: var(--primary-600); }
-    .container { width: 100%; max-width: 1100px; margin: 0 auto; padding: 0 20px; }
-    .nav {
-      position: sticky; top: 0; z-index: 20;
-      background: linear-gradient(180deg, rgba(11,16,32,.9), rgba(11,16,32,.7));
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid rgba(255,255,255,.05);
+
+    a {
+      color: var(--primary);
+      text-decoration: none;
     }
-    .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 64px; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
-    .brand-badge { width: 28px; height: 28px; border-radius: 7px; background: linear-gradient(135deg, var(--primary), var(--accent)); box-shadow: 0 8px 20px rgba(79,124,255,.35); }
-    .nav-cta { display: flex; gap: 10px; align-items: center; }
+
+    a:hover {
+      color: var(--primary-600);
+    }
+
+    .container {
+      width: 100%;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: linear-gradient(180deg, rgba(11, 16, 32, .9), rgba(11, 16, 32, .7));
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(255, 255, 255, .05);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 64px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      letter-spacing: .2px;
+    }
+
+    .brand-badge {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      box-shadow: 0 8px 20px rgba(79, 124, 255, .35);
+    }
+
+    .nav-cta {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
     .btn {
-      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-      height: 42px; padding: 0 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,.08);
-      color: var(--text); background: rgba(255,255,255,.04);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      height: 42px;
+      padding: 0 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, .08);
+      color: var(--text);
+      background: rgba(255, 255, 255, .04);
       cursor: pointer;
     }
-    .btn:hover { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.08); }
-    .btn-primary { background: linear-gradient(135deg, var(--primary), var(--accent)); border: none; box-shadow: 0 10px 25px rgba(79,124,255,.35); }
-    .btn-primary:hover { filter: brightness(1.05); }
-    .hero { padding: 56px 0 24px; text-align: center; }
-    .hero h1 { font-size: 40px; line-height: 1.1; margin: 8px 0 10px; letter-spacing: -0.02em; }
-    .hero p { color: var(--muted); font-size: 18px; margin: 0 auto 18px; max-width: 760px; }
-    .badge { display: inline-block; font-weight: 600; color: #dbe2ff; background: rgba(79,124,255,.18); border: 1px solid rgba(79,124,255,.35); padding: 6px 10px; border-radius: 999px; font-size: 13px; }
-    .card { background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02)); border: 1px solid rgba(255,255,255,.08); border-radius: var(--radius); box-shadow: var(--shadow); }
-    .section { padding: 28px 0; }
-    .grid { display: grid; gap: 18px; }
-    .grid-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
-    .grid-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+
+    .btn:hover {
+      border-color: rgba(255, 255, 255, .18);
+      background: rgba(255, 255, 255, .08);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      border: none;
+      box-shadow: 0 10px 25px rgba(79, 124, 255, .35);
+    }
+
+    .btn-primary:hover {
+      filter: brightness(1.05);
+    }
+
+    .hero {
+      padding: 56px 0 24px;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.1;
+      margin: 8px 0 10px;
+      letter-spacing: -0.02em;
+    }
+
+    .hero p {
+      color: var(--muted);
+      font-size: 18px;
+      margin: 0 auto 18px;
+      max-width: 760px;
+    }
+
+    .badge {
+      display: inline-block;
+      font-weight: 600;
+      color: #dbe2ff;
+      background: rgba(79, 124, 255, .18);
+      border: 1px solid rgba(79, 124, 255, .35);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(255, 255, 255, .03), rgba(255, 255, 255, .02));
+      border: 1px solid rgba(255, 255, 255, .08);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .section {
+      padding: 28px 0;
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
     @media (max-width: 900px) {
-      .grid-2, .grid-3 { grid-template-columns: 1fr; }
-      .hero h1 { font-size: 32px; }
+
+      .grid-2,
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+
+      .hero h1 {
+        font-size: 32px;
+      }
     }
-    .field { display: grid; gap: 8px; text-align: left; }
-    label { color: var(--muted); font-weight: 600; font-size: 14px; }
-    input[type="text"], input[type="email"], input[type="password"], input[type="number"] {
-      width: 100%; height: 44px; padding: 0 14px; color: var(--text);
-      background: #0c1430; border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
-      outline: none; box-shadow: 0 0 0 0 var(--ring);
+
+    .field {
+      display: grid;
+      gap: 8px;
+      text-align: left;
     }
-    input::placeholder { color: #8e98b5; }
-    input:focus { border-color: rgba(79,124,255,.5); box-shadow: 0 0 0 4px var(--ring); }
-    .flash { color: #ffd4d4; background: rgba(255,93,93,.12); border: 1px solid rgba(255,93,93,.35); border-radius: 12px; padding: 10px 12px; margin-bottom: 14px; text-align: left; }
-    .muted { color: var(--muted); }
-    .footer { padding: 28px 0; color: var(--muted); font-size: 14px; border-top: 1px solid rgba(255,255,255,.06); margin-top: 36px; }
-    .countdown { font-variant-numeric: tabular-nums; font-weight: 700; color: #ffd166; }
+
+    label {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    input[type="text"],
+    input[type="email"],
+    input[type="password"],
+    input[type="number"] {
+      width: 100%;
+      height: 44px;
+      padding: 0 14px;
+      color: var(--text);
+      background: #0c1430;
+      border: 1px solid rgba(255, 255, 255, .08);
+      border-radius: 12px;
+      outline: none;
+      box-shadow: 0 0 0 0 var(--ring);
+    }
+
+    input::placeholder {
+      color: #8e98b5;
+    }
+
+    input:focus {
+      border-color: rgba(79, 124, 255, .5);
+      box-shadow: 0 0 0 4px var(--ring);
+    }
+
+    .flash {
+      color: #ffd4d4;
+      background: rgba(255, 93, 93, .12);
+      border: 1px solid rgba(255, 93, 93, .35);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      text-align: left;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .footer {
+      padding: 28px 0;
+      color: var(--muted);
+      font-size: 14px;
+      border-top: 1px solid rgba(255, 255, 255, .06);
+      margin-top: 36px;
+    }
+
+    .countdown {
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      color: #ffd166;
+    }
   </style>
 </head>
+
 <body>
   <div class="nav">
     <div class="container nav-inner">
@@ -95,13 +271,14 @@
       </div>
       <div class="nav-cta">
         {% if current_user.is_authenticated %}
-          <a class="btn" href="{{ url_for('jobs') }}">Jobs</a>
-          <a class="btn" href="{{ url_for('licenses') }}">Minhas Licenças</a>
-          <a class="btn" href="{{ url_for('change_password') }}">Alterar Senha</a>
-          <a class="btn" href="{{ url_for('logout') }}">Sair</a>
+        <a class="btn" href="{{ url_for('jobs') }}">Jobs</a>
+        <a class="btn" href="{{ url_for('whatsapp_config') }}">WhatsApp</a>
+        <a class="btn" href="{{ url_for('licenses') }}">Minhas Licenças</a>
+        <a class="btn" href="{{ url_for('change_password') }}">Alterar Senha</a>
+        <a class="btn" href="{{ url_for('logout') }}">Sair</a>
         {% else %}
-          <a class="btn" href="{{ url_for('login') }}">Entrar</a>
-          <a class="btn btn-primary" href="{{ url_for('register') }}">Criar conta</a>
+        <a class="btn" href="{{ url_for('login') }}">Entrar</a>
+        <a class="btn btn-primary" href="{{ url_for('register') }}">Criar conta</a>
         {% endif %}
       </div>
     </div>
@@ -113,6 +290,5 @@
     <div class="container">© 2025 Leads Infinitos. Todos os direitos reservados.</div>
   </div>
 </body>
+
 </html>
-
-
