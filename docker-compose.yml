@@ -76,6 +76,29 @@ services:
         condition: service_healthy
     restart: always
 
+  sender:
+    build: .
+    container_name: "leads_infinitos_sender"
+    command: python worker_sender.py
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=devpassword
+      - MEGA_API_URL=${MEGA_API_URL}
+      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: always
+
 volumes:
   redis_data:
   postgres_data:

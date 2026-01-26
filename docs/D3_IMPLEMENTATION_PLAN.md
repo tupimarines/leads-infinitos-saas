@@ -21,37 +21,37 @@ Temos o backend de disparos pronto (D2). Agora precisamos fechar o ciclo de vend
     - **Versão:** 2.0.0.
 
 **Passos de Implementação:**
-- [ ] **Data Model & Env:**
-    - [ ] Adicionar `HOTMART_HOTTOK` no `.env`.
-- [ ] **Webhook Route (`app.py`):**
-    - [ ] Criar endpoint `POST /api/webhooks/hotmart`.
-    - [ ] Validar `X-Hotmart-Hottok`.
-    - [ ] Implementar lógica de **Criação Automática de Usuário** (se email não existir, criar com senha temporária).
-    - [ ] Criar/Atualizar Licença (`licenses` table) garantindo idempotência.
-- [ ] **Testes:**
-    - [ ] Criar script de Mock (simular payload JSON da Hotmart localmente).
-    - [ ] Validar criação de registros no banco.
+- [x] **Data Model & Env:**
+    - [x] Adicionar `HOTMART_HOTTOK` no `.env`.
+- [x] **Webhook Route (`app.py`):**
+    - [x] Criar endpoint `POST /api/webhooks/hotmart`.
+    - [x] Validar `X-Hotmart-Hottok`.
+    - [x] Implementar lógica de **Criação Automática de Usuário** (se email não existir, criar com senha temporária).
+    - [x] Criar/Atualizar Licença (`licenses` table) garantindo idempotência.
+- [x] **Testes:**
+    - [x] Criar script de Mock (simular payload JSON da Hotmart localmente).
+    - [x] Validar criação de registros no banco.
 
 ### 2. UI de Campanhas (Frontend)
 Criar a interface onde o usuário define *para quem* e *o que* vai enviar.
 
 **Passos:**
-- [ ] **Seleção de Leads:**
-    - [ ] Criar endpoint `GET /api/scraping-jobs` para listar extrações anteriores.
-    - [ ] Adicionar `<select>` na tela de campanha para escolher uma lista extraída.
-    - [ ] Adicionar opção de **Upload CSV** (Fallback) com validação de colunas (Nome, Telefone).
-- [ ] **Visualização:** Mostrar prévia da quantidade de contatos na lista selecionada.
+- [x] **Seleção de Leads:**
+    - [x] Criar endpoint `GET /api/scraping-jobs` para listar extrações anteriores.
+    - [x] Adicionar `<select>` na tela de campanha para escolher uma lista extraída.
+    - [x] Adicionar opção de **Upload CSV** (Fallback) com validação de colunas (Nome, Telefone).
+- [x] **Visualização:** Mostrar prévia da quantidade de contatos na lista selecionada.
 
 ### 3. Configuração de Disparo
 Configurar os parâmetros finais antes de iniciar a campanha.
 
 **Passos:**
-- [ ] **Inputs de Agendamento:**
-    - [ ] Campos de Data/Hora de início (opcional, default = agora).
-- [ ] **Botão "Iniciar Campanha":**
-    - [ ] Postar dados para `POST /api/campaigns`.
-    - [ ] Backend: Criar registro em `campaigns` e popular `campaign_leads`.
-    - [ ] Feedback visual (Toast/Redirect) para o usuário.
+- [x] **Inputs de Agendamento:**
+    - [x] Campos de Data/Hora de início (opcional, default = agora).
+- [x] **Botão "Iniciar Campanha":**
+    - [x] Postar dados para `POST /api/campaigns`.
+    - [x] Backend: Criar registro em `campaigns` e popular `campaign_leads`.
+    - [x] Feedback visual (Toast/Redirect) para o usuário.
 
 ---
 

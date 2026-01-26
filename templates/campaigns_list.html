@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+
+{% block title %}Minhas Campanhas - Leads Infinitos{% endblock %}
+
+{% block extra_head %}
+<!-- Tailwind CSS (via CDN) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    bg: '#0b1020',
+                    card: '#0f1630',
+                    primary: '#4f7cff',
+                    accent: '#8b5cf6',
+                }
+            }
+        }
+    }
+</script>
+<style>
+    /* Glass card styling */
+    .campaign-card {
+        background: rgba(15, 22, 48, 0.6);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 16px;
+        transition: all 0.3s ease;
+    }
+
+    .campaign-card:hover {
+        border-color: rgba(79, 124, 255, 0.3);
+        transform: translateY(-2px);
+        box-shadow: 0 8px 24px rgba(79, 124, 255, 0.1);
+    }
+
+    /* Progress bar */
+    .progressbar {
+        width: 100%;
+        height: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        transition: width 0.5s ease;
+        border-radius: 4px;
+    }
+
+    /* Deal tracker buttons */
+    .btn-deal {
+        background: rgba(79, 124, 255, 0.15);
+        border: 1px solid rgba(79, 124, 255, 0.3);
+        color: #4f7cff;
+        padding: 4px 12px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .btn-deal:hover {
+        background: rgba(79, 124, 255, 0.25);
+        border-color: rgba(79, 124, 255, 0.5);
+    }
+
+    .deals-tracker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px;
+        background: rgba(139, 92, 246, 0.05);
+        border-radius: 8px;
+        margin-top: 12px;
+    }
+
+    h1 {
+        color: #e8ecf6;
+    }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="container mx-auto px-4 py-8">
+
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">
+                Minhas Campanhas
+            </h1>
+            <p class="text-gray-400 mt-1">Gerencie seus disparos e acompanhe resultados em tempo real.</p>
+        </div>
+        <a href="{{ url_for('new_campaign') }}" class="btn-cyber-sm shadow-lg shadow-purple-500/20"
+            style="background: linear-gradient(90deg, #4f7cff, #8b5cf6); padding: 12px 24px; border-radius: 8px; color: white; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px;">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd"
+                    d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
+                    clip-rule="evenodd" />
+            </svg>
+            Nova Campanha
+        </a>
+    </div>
+
+    {% if campaigns %}
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {% for campaign in campaigns %}
+        <div class="campaign-card p-6" data-campaign-id="{{ campaign.id }}" data-status="{{ campaign.status }}">
+            <!-- Campaign Header -->
+            <div class="flex justify-between items-start mb-4">
+                <div class="flex-1">
+                    <h3 class="text-xl font-bold text-white mb-2">{{ campaign.name }}</h3>
+                    <p class="text-xs text-gray-500 truncate">{{ campaign.message_template[:50] }}...</p>
+                </div>
+
+                <!-- Status Badge -->
+                {% if campaign.status == 'pending' %}
+                <span
+                    class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-yellow-400/10 text-yellow-400 border border-yellow-400/20">
+                    Pendente
+                </span>
+                {% elif campaign.status == 'running' %}
+                <span
+                    class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-blue-400/10 text-blue-400 border border-blue-400/20">
+                    <span class="w-1.5 h-1.5 bg-blue-400 rounded-full mr-1.5 animate-pulse"></span>
+                    Enviando
+                </span>
+                {% elif campaign.status == 'completed' %}
+                <span
+                    class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-400/10 text-green-400 border border-green-400/20">
+                    Concluída
+                </span>
+                {% else %}
+                <span
+                    class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-gray-400/10 text-gray-400 border border-gray-400/20">
+                    {{ campaign.status }}
+                </span>
+                {% endif %}
+
+
+                <!-- Delete Button -->
+                <form action="{{ url_for('delete_campaign', campaign_id=campaign.id) }}" method="POST"
+                    onsubmit="return confirm('Tem certeza que deseja excluir esta campanha? Esta ação não pode ser desfeita e todos os leads serão apagados.');"
+                    class="ml-2">
+                    <button type="submit" class="text-gray-500 hover:text-red-500 transition-colors p-1"
+                        title="Excluir Campanha">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                            stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                    </button>
+                </form>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-2 gap-3 mb-4">
+                <div class="bg-white/5 rounded-lg p-3">
+                    <div class="text-xs text-gray-400">Total</div>
+                    <div class="text-2xl font-bold text-white" id="total-{{ campaign.id }}">-</div>
+                </div>
+                <div class="bg-white/5 rounded-lg p-3">
+                    <div class="text-xs text-gray-400">Enviados</div>
+                    <div class="text-2xl font-bold text-green-400" id="sent-{{ campaign.id }}">-</div>
+                </div>
+                <div class="bg-white/5 rounded-lg p-3">
+                    <div class="text-xs text-gray-400">Pendentes</div>
+                    <div class="text-2xl font-bold text-yellow-400" id="pending-{{ campaign.id }}">-</div>
+                </div>
+                <div class="bg-white/5 rounded-lg p-3">
+                    <div class="text-xs text-gray-400">Falhas</div>
+                    <div class="text-2xl font-bold text-red-400" id="failed-{{ campaign.id }}">-</div>
+                </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="mb-4">
+                <div class="flex justify-between text-xs text-gray-400 mb-2">
+                    <span>Progresso</span>
+                    <span id="progress-percent-{{ campaign.id }}">0%</span>
+                </div>
+                <div class="progressbar">
+                    <div class="progress-fill" id="progress-bar-{{ campaign.id }}" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Success Rate -->
+            <div class="text-sm text-gray-300 mb-3">
+                Taxa de Sucesso: <span class="font-bold text-green-400" id="success-rate-{{ campaign.id }}">-</span>
+            </div>
+
+            <!-- Deal Tracker -->
+            <div class="deals-tracker">
+                <span class="text-sm text-gray-300">Negócios:</span>
+                <button class="btn-deal" onclick="updateDeal({{ campaign.id }}, 'decrement')">−</button>
+                <span class="text-lg font-bold text-white" id="deals-{{ campaign.id }}">-</span>
+                <button class="btn-deal" onclick="updateDeal({{ campaign.id }}, 'increment')">+</button>
+                <span class="ml-auto text-xs text-purple-400 font-semibold">
+                    Conversão: <span id="conversion-{{ campaign.id }}">0%</span>
+                </span>
+            </div>
+
+            <!-- Timestamps -->
+            <div class="mt-4 pt-4 border-t border-white/5">
+                <div class="flex justify-between text-xs text-gray-500">
+                    <span>Criada: {{ campaign.created_at.strftime('%d/%m/%Y %H:%M') }}</span>
+                    <span id="last-sent-{{ campaign.id }}">-</span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center py-20 bg-gray-800/20 rounded-2xl border border-gray-700/30 border-dashed">
+        <div class="w-16 h-16 bg-gray-700/30 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24"
+                stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
+            </svg>
+        </div>
+        <h3 class="text-xl font-medium text-white mb-2">Nenhuma campanha encontrada</h3>
+        <p class="text-gray-400 mb-6">Crie sua primeira campanha para começar a prospectar.</p>
+        <a href="{{ url_for('new_campaign') }}" class="btn-cyber-sm"
+            style="background: linear-gradient(90deg, #4f7cff, #8b5cf6); padding: 12px 24px; border-radius: 8px; color: white; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px;">
+            Criar Campanha
+        </a>
+    </div>
+    {% endif %}
+
+</div>
+
+<script>
+    // Função para atualizar métricas da campanha
+    async function updateCampaignStats(campaignId) {
+        try {
+            const response = await fetch(`/api/campaigns/${campaignId}/stats`);
+            const data = await response.json();
+
+            if (data.error) {
+                console.error('Erro ao obter stats:', data.error);
+                return;
+            }
+
+            // Atualizar números
+            document.getElementById(`total-${campaignId}`).textContent = data.total_leads || 0;
+            document.getElementById(`sent-${campaignId}`).textContent = data.sent || 0;
+            document.getElementById(`pending-${campaignId}`).textContent = data.pending || 0;
+            document.getElementById(`failed-${campaignId}`).textContent = data.failed || 0;
+            document.getElementById(`deals-${campaignId}`).textContent = data.closed_deals || 0;
+
+            // Calcular e atualizar progresso
+            const total = data.total_leads || 1;
+            const sent = data.sent || 0;
+            const progress = Math.round((sent / total) * 100);
+            document.getElementById(`progress-percent-${campaignId}`).textContent = `${progress}%`;
+            document.getElementById(`progress-bar-${campaignId}`).style.width = `${progress}%`;
+
+            // Calcular taxa de sucesso
+            const failed = (data.failed || 0) + (data.invalid || 0);
+            const attempted = sent + failed;
+            const successRate = attempted > 0 ? Math.round((sent / attempted) * 100) : 0;
+            document.getElementById(`success-rate-${campaignId}`).textContent = `${successRate}%`;
+
+            // Atualizar conversão
+            document.getElementById(`conversion-${campaignId}`).textContent = `${data.conversion_rate || 0}%`;
+
+            // Atualizar último envio
+            if (data.last_sent_at) {
+                const lastSent = new Date(data.last_sent_at);
+                document.getElementById(`last-sent-${campaignId}`).textContent =
+                    `Último: ${lastSent.toLocaleDateString('pt-BR')} ${lastSent.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+            }
+        } catch (error) {
+            console.error('Erro ao atualizar stats:', error);
+        }
+    }
+
+    // Função para incrementar/decrementar negócios fechados
+    async function updateDeal(campaignId, action) {
+        try {
+            const response = await fetch(`/api/campaigns/${campaignId}/deal`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ action })
+            });
+
+            const data = await response.json();
+
+            if (data.error) {
+                alert('Erro: ' + data.error);
+                return;
+            }
+
+            // Atualizar contador local
+            document.getElementById(`deals-${campaignId}`).textContent = data.closed_deals;
+
+            // Recarregar stats para atualizar conversão
+            await updateCampaignStats(campaignId);
+        } catch (error) {
+            console.error('Erro ao atualizar deals:', error);
+            alert('Erro ao atualizar negócios fechados');
+        }
+    }
+
+    // Carregar stats de todas as campanhas ao carregar a página
+    document.addEventListener('DOMContentLoaded', function () {
+        const campaignCards = document.querySelectorAll('.campaign-card');
+
+        campaignCards.forEach(card => {
+            const campaignId = card.dataset.campaignId;
+            updateCampaignStats(campaignId);
+        });
+
+        // Polling automático para campanhas rodando (a cada 5 segundos)
+        setInterval(() => {
+            campaignCards.forEach(card => {
+                const campaignId = card.dataset.campaignId;
+                const status = card.dataset.status;
+
+                if (status === 'running') {
+                    updateCampaignStats(campaignId);
+                }
+            });
+        }, 5000);
+    });
+</script>
+{% endblock %}

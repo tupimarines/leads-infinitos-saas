@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash
+from flask import Flask, render_template, request, redirect, url_for, send_file, flash, abort
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -22,9 +22,14 @@ from rq import Queue
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
-from main import run_scraper, run_scraper_with_progress
+from main import run_scraper_with_progress
 import requests
 import re
+import pandas as pd
+import io
+import csv
+from openai import OpenAI
+from functools import wraps
 
 
 load_dotenv()
@@ -57,8 +62,16 @@ def init_db() -> None:
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            is_admin BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        """
+    )
+    
+    # Adicionar coluna is_admin se não existir (migração)
+    cur.execute(
+        """
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
         """
     )
     
@@ -70,7 +83,7 @@ def init_db() -> None:
             user_id INTEGER NOT NULL REFERENCES users(id),
             hotmart_purchase_id TEXT UNIQUE NOT NULL,
             hotmart_product_id TEXT NOT NULL,
-            license_type TEXT NOT NULL CHECK (license_type IN ('semestral', 'anual')),
+            license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'semestral', 'anual')),
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
             purchase_date TIMESTAMP NOT NULL,
             expires_at TIMESTAMP NOT NULL,
@@ -197,8 +210,23 @@ def init_db() -> None:
             status TEXT DEFAULT 'pending',
             message_template TEXT,
             daily_limit INTEGER DEFAULT 0,
+            closed_deals INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        """
+    )
+    
+    # Adicionar coluna closed_deals se não existir (migração)
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS closed_deals INTEGER DEFAULT 0;
+        """
+    )
+
+    # Adicionar coluna sent_today se não existir (migração)
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sent_today INTEGER DEFAULT 0;
         """
     )
     
@@ -210,10 +238,18 @@ def init_db() -> None:
             campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
             phone TEXT NOT NULL,
             name TEXT,
+            whatsapp_link TEXT,
             status TEXT DEFAULT 'pending',
             sent_at TIMESTAMP,
             log TEXT
         );
+        """
+    )
+    
+    # Adicionar coluna whatsapp_link se não existir (migração)
+    cur.execute(
+        """
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS whatsapp_link TEXT;
         """
     )
 
@@ -243,31 +279,32 @@ def init_db() -> None:
 
 
 class User(UserMixin):
-    def __init__(self, id: int, email: str, password_hash: str):
+    def __init__(self, id: int, email: str, password_hash: str, is_admin: bool = False):
         self.id = id
         self.email = email
         self.password_hash = password_hash
+        self.is_admin = is_admin
 
     @staticmethod
     def get_by_id(user_id: int) -> "User | None":
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT id, email, password_hash FROM users WHERE id = %s", (user_id,))
+            cur.execute("SELECT id, email, password_hash, is_admin FROM users WHERE id = %s", (user_id,))
             row = cur.fetchone()
         conn.close()
         if row:
-            return User(row[0], row[1], row[2])
+            return User(row[0], row[1], row[2], row[3])
         return None
 
     @staticmethod
     def get_by_email(email: str) -> "User | None":
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT id, email, password_hash FROM users WHERE email = %s", (email,))
+            cur.execute("SELECT id, email, password_hash, is_admin FROM users WHERE email = %s", (email,))
             row = cur.fetchone()
         conn.close()
         if row:
-            return User(row[0], row[1], row[2])
+            return User(row[0], row[1], row[2], row[3])
         return None
 
     @staticmethod
@@ -282,7 +319,7 @@ class User(UserMixin):
             new_id = cur.fetchone()[0]
         conn.commit()
         conn.close()
-        return User(new_id, email, password_hash)
+        return User(new_id, email, password_hash, False)
 
     def has_active_license(self) -> bool:
         """Verifica se o usuário tem uma licença ativa"""
@@ -314,11 +351,17 @@ class License:
 
     @property
     def daily_limit(self) -> int:
-        if self.license_type == 'anual':
-            return 30  # Scale
+        if self.license_type == 'scale':
+            return 30
+        elif self.license_type == 'pro':
+            return 20
+        elif self.license_type == 'starter':
+            return 10
+        elif self.license_type == 'anual':
+            return 30  # Legacy
         elif self.license_type == 'semestral':
-            return 20  # Pro
-        return 10  # Fallback/Starter
+            return 20  # Legacy
+        return 10  # Fallback
 
     @staticmethod
     def create(user_id: int, hotmart_purchase_id: str, hotmart_product_id: str, 
@@ -364,6 +407,142 @@ class License:
         return [License(row['id'], row['user_id'], row['hotmart_purchase_id'], 
                        row['hotmart_product_id'], row['license_type'], row['status'],
                        row['purchase_date'], row['expires_at']) for row in rows]
+
+
+# Decorator para rotas de admin
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            flash("Acesso não autorizado.", "error")
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+class Campaign:
+    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0):
+        self.id = id
+        self.user_id = user_id
+        self.name = name
+        self.status = status
+        self.message_template = message_template
+        self.daily_limit = daily_limit
+        self.created_at = created_at
+        self.closed_deals = closed_deals
+        self.scheduled_start = scheduled_start
+        self.sent_today = sent_today
+
+    @staticmethod
+    def create(user_id: int, name: str, message_template: str, daily_limit: int) -> "Campaign":
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit)
+                VALUES (%s, %s, %s, %s) RETURNING id, created_at
+                """,
+                (user_id, name, message_template, daily_limit)
+            )
+            row = cur.fetchone()
+            new_id = row[0]
+            created_at = row[1]
+        conn.commit()
+        conn.close()
+        return Campaign(new_id, user_id, name, 'pending', message_template, daily_limit, created_at)
+
+    @staticmethod
+    def get_by_user(user_id: int):
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM campaigns WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+            rows = cur.fetchall()
+        conn.close()
+        return [Campaign(**row) for row in rows]
+
+    @staticmethod
+    def get_by_id(campaign_id: int, user_id: int):
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, user_id))
+            row = cur.fetchone()
+        conn.close()
+        if row:
+            return Campaign(**row)
+        return None
+
+    def delete(self):
+        """Exclui a campanha e seus leads associados"""
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 1. Excluir leads da campanha
+                cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s", (self.id,))
+                
+                # 2. Excluir a campanha
+                cur.execute("DELETE FROM campaigns WHERE id = %s", (self.id,))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Erro ao excluir campanha {self.id}: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+
+class CampaignLead:
+    @staticmethod
+    def add_leads(campaign_id: int, leads: list[dict]):
+        """
+        Adiciona leads à campanha em lote.
+        leads = [{'phone': '...', 'name': '...', 'whatsapp_link': '...' (opcional)}]
+        """
+        if not leads:
+            return
+            
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                args_str = ','.join(
+                    cur.mogrify("(%s, %s, %s, %s)", 
+                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'))).decode('utf-8') 
+                    for l in leads
+                )
+                cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link) VALUES " + args_str)
+            conn.commit()
+        except Exception as e:
+            print(f"Erro ao adicionar leads: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+
+
+class CampaignLead:
+    @staticmethod
+    def add_leads(campaign_id: int, leads: list[dict]):
+        """
+        Adiciona leads à campanha em lote.
+        leads = [{'phone': '...', 'name': '...', 'whatsapp_link': '...' (opcional)}]
+        """
+        if not leads:
+            return
+            
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                args_str = ','.join(
+                    cur.mogrify("(%s, %s, %s, %s)", 
+                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'))).decode('utf-8') 
+                    for l in leads
+                )
+                cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link) VALUES " + args_str)
+            conn.commit()
+        except Exception as e:
+            print(f"Erro ao adicionar leads: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
 
 
 class HotmartService:
@@ -1437,6 +1616,653 @@ def change_password():
     return render_template("change_password.html")
 
 
+@app.route('/account')
+@login_required
+def account():
+    # 1. Obter Licenças
+    licenses = License.get_by_user_id(current_user.id)
+    active_license = None
+    for lic in licenses:
+        if lic.status == 'active':
+            active_license = lic
+            break
+            
+    # 2. Obter Instância WhatsApp
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM instances WHERE user_id = %s", (current_user.id,))
+        instance = cur.fetchone()
+    conn.close()
+    
+    return render_template('account.html', user=current_user, license=active_license, instance=instance)
+
+@app.route('/campaigns')
+@login_required
+def campaigns():
+    user_campaigns = Campaign.get_by_user(current_user.id)
+    return render_template('campaigns_list.html', campaigns=user_campaigns)
+
+
+@app.route('/campaigns/delete/<int:campaign_id>', methods=['POST'])
+@login_required
+def delete_campaign(campaign_id):
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        flash("Campanha não encontrada.", "error")
+        return redirect(url_for('campaigns'))
+    
+    if campaign.delete():
+        flash("Campanha excluída com sucesso!", "success")
+    else:
+        flash("Erro ao excluir campanha.", "error")
+        
+    return redirect(url_for('campaigns'))
+
+# --- Rotas de Admin ---
+
+@app.route('/admin')
+@login_required
+@admin_required
+def admin_dashboard():
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # Estatísticas Gerais
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        total_users = cur.fetchone()['count']
+        
+        cur.execute("SELECT COUNT(*) as count FROM licenses WHERE status = 'active'")
+        active_licenses = cur.fetchone()['count']
+        
+        cur.execute("SELECT COUNT(*) as count FROM campaigns")
+        total_campaigns = cur.fetchone()['count']
+
+        cur.execute("SELECT COUNT(*) as count FROM campaign_leads WHERE status = 'sent'")
+        total_sent = cur.fetchone()['count']
+        
+    conn.close()
+    
+    return render_template('admin/dashboard.html', 
+                         total_users=total_users, 
+                         active_licenses=active_licenses,
+                         total_campaigns=total_campaigns,
+                         total_sent=total_sent)
+
+@app.route('/admin/users')
+@login_required
+@admin_required
+def admin_users():
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # Buscar usuários com info de licença - usando JOIN LATERAL ou DISTINCT ON
+        # A duplicação ocorria pois usuários tinham multiplas instancias. Vamos pegar a mais recente.
+        cur.execute("""
+            SELECT u.id, u.email, u.is_admin, u.created_at,
+                   l.license_type, l.status as license_status, l.expires_at,
+                   i.name as instance_name, i.status as instance_status, i.apikey as instance_apikey
+            FROM users u
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id) *
+                FROM licenses
+                ORDER BY user_id, created_at DESC
+            ) l ON u.id = l.user_id
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id) *
+                FROM instances
+                ORDER BY user_id, updated_at DESC
+            ) i ON u.id = i.user_id
+            ORDER BY u.created_at DESC
+        """)
+        users = cur.fetchall()
+    conn.close()
+    return render_template('admin/users.html', users=users)
+
+@app.route('/admin/users/<int:user_id>/toggle_admin', methods=['POST'])
+@login_required
+@admin_required
+def admin_toggle_admin(user_id):
+    if user_id == current_user.id:
+        flash("Você não pode alterar seu próprio status de admin.", "error")
+        return redirect(url_for('admin_users'))
+
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE users SET is_admin = NOT is_admin WHERE id = %s", (user_id,))
+    conn.commit()
+    conn.close()
+    
+    flash("Status de admin atualizado com sucesso!", "success")
+    return redirect(url_for('admin_users'))
+
+@app.route('/admin/licenses/create', methods=['POST'])
+@login_required
+@admin_required
+def admin_create_license():
+    user_id = request.form.get('user_id')
+    license_type = request.form.get('license_type')
+    
+    if not user_id or not license_type:
+        flash("Dados inválidos.", "error")
+        return redirect(url_for('admin_users'))
+        
+    # Validar user_id
+    user = User.get_by_id(user_id)
+    if not user:
+        flash("Usuário não encontrado.", "error")
+        return redirect(url_for('admin_users'))
+
+    try:
+        # Criar licença manual
+        import datetime
+        from datetime import datetime
+        
+        # Revogar licenças anteriores se houver
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE licenses SET status = 'cancelled' WHERE user_id = %s", (user.id,))
+        conn.commit()
+        conn.close()
+
+        # Gerar IDs fictícios para compra manual
+        purchase_id = f"MANUAL-{secrets.token_hex(8)}"
+        product_id = "MANUAL-GRANT"
+        purchase_date = datetime.utcnow().isoformat()
+        
+        License.create(user.id, purchase_id, product_id, license_type, purchase_date)
+        
+        flash(f"Plano {license_type} definido para {user.email}.", "success")
+    except Exception as e:
+        print(f"Erro ao criar licença manual: {e}")
+        flash("Erro ao criar licença.", "error")
+        
+    return redirect(url_for('admin_users'))
+
+@app.route('/admin/licenses/<int:license_id>/revoke', methods=['POST'])
+@login_required
+@admin_required
+def admin_revoke_license(license_id):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE licenses SET status = 'cancelled' WHERE id = %s", (license_id,))
+    conn.commit()
+    conn.close()
+    
+    flash("Licença revogada com sucesso!", "success")
+    return redirect(url_for('admin_users'))
+
+@app.route('/admin/users/<int:user_id>/reset_password', methods=['POST'])
+@login_required
+@admin_required
+def admin_reset_password(user_id):
+    user = User.get_by_id(user_id)
+    if not user:
+        return {"error": "User not found"}, 404
+        
+    try:
+        # Gerar nova senha
+        new_password = secrets.token_urlsafe(10)
+        password_hash = generate_password_hash(new_password)
+        
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
+        conn.commit()
+        conn.close()
+        
+        # TODO: Enviar email via SMTP (Simulado no print por enquanto)
+        print(f"PASSWORD RESET FOR {user.email}: {new_password}")
+        
+        # Em produção, usar Flask-Mail aqui
+        # msg = Message("Sua nova senha - Leads Infinitos", recipients=[user.email])
+        # msg.body = f"Sua senha foi resetada. Nova senha: {new_password}"
+        # mail.send(msg)
+        
+        return {"success": True, "message": "Senha resetada e enviada por email (simulado).", "new_password": new_password}
+    except Exception as e:
+        print(f"Erro no reset de senha: {e}")
+        return {"error": str(e)}, 500
+
+@app.route('/admin/users/<int:user_id>/delete', methods=['POST'])
+@login_required
+@admin_required
+def admin_delete_user(user_id):
+    if user_id == current_user.id:
+        return {"error": "Você não pode excluir a si mesmo."}, 400
+        
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Excluir dependências MANUALMENTE (Cascata)
+            
+            # 1. Obter IDs das campanhas do usuário
+            cur.execute("SELECT id FROM campaigns WHERE user_id = %s", (user_id,))
+            campaign_ids = [row[0] for row in cur.fetchall()]
+            
+            if campaign_ids:
+                # 2. Excluir leads das campanhas
+                cur.execute("DELETE FROM campaign_leads WHERE campaign_id = ANY(%s)", (campaign_ids,))
+                # Excluir steps das campanhas (se existir tabela, garantindo limpeza)
+                # cur.execute("DELETE FROM campaign_steps WHERE campaign_id = ANY(%s)", (campaign_ids,))
+            
+            # 3. Excluir campanhas
+            cur.execute("DELETE FROM campaigns WHERE user_id = %s", (user_id,))
+            
+            # 4. Outras dependências diretas
+            cur.execute("DELETE FROM licenses WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM instances WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM scraping_jobs WHERE user_id = %s", (user_id,))
+            
+            # 5. Excluir o usuário
+            cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            
+        conn.commit()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
+        print(f"Erro ao excluir usuário: {e}")
+        conn.rollback() if 'conn' in locals() and conn else None
+        return {"error": str(e)}, 500
+
+@app.route('/admin/users/<int:user_id>/details')
+@login_required
+@admin_required
+def admin_user_details(user_id):
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # Info básica e WhatsApp (mais recente)
+        cur.execute("""
+            SELECT u.id, u.email, u.created_at, u.is_admin,
+                   i.name as instance_name, i.status as instance_status, i.apikey as instance_apikey
+            FROM users u
+            LEFT JOIN (
+                 SELECT DISTINCT ON (user_id) *
+                 FROM instances
+                 ORDER BY user_id, updated_at DESC
+            ) i ON u.id = i.user_id
+            WHERE u.id = %s
+        """, (user_id,))
+        user = cur.fetchone()
+        
+        if not user:
+            conn.close()
+            return {"error": "User not found"}, 404
+            
+        # Info licença
+        cur.execute("""
+            SELECT * FROM licenses 
+            WHERE user_id = %s AND status = 'active' 
+            ORDER BY created_at DESC LIMIT 1
+        """, (user_id,))
+        license = cur.fetchone()
+        
+    conn.close()
+    
+    return {
+        "user": {
+            "id": user['id'],
+            "email": user['email'],
+            "created_at": user['created_at'].isoformat() if user['created_at'] else None,
+            "is_admin": user['is_admin'],
+            "instance_name": user['instance_name'],
+            "instance_status": user['instance_status'],
+            "instance_apikey": user['instance_apikey']
+        },
+        "license": {
+            "type": license['license_type'] if license else None,
+            "expires_at": license['expires_at'].isoformat() if license and license['expires_at'] else None
+        } if license else None
+    }
+    
+@app.route('/admin/whatsapp/check_status/<instance_apikey>', methods=['POST'])
+@login_required
+@admin_required
+def admin_check_whatsapp_status(instance_apikey):
+    """Admin endpoint to check/update status of a whatsapp instance"""
+    service = WhatsappService()
+    result = service.get_status(instance_apikey)
+    
+    if not result:
+        return {"error": "Failed to verify status"}, 400
+        
+    # Logic similar to get_whatsapp_status but for admin
+    # MegaAPI Structure variations:
+    # 1. { "instance_data": { "phone_connected": true, ... } }
+    # 2. { "phone_connected": true, ... } (sometimes top-level in some versions)
+    # 3. [ { ... } ] (Array if looking up by key)
+    
+    is_connected = False
+    
+    if isinstance(result, list) and len(result) > 0:
+        result = result[0]
+        
+    if result.get('instance_data'):
+        is_connected = result['instance_data'].get('phone_connected', False)
+    elif 'phone_connected' in result:
+        is_connected = result.get('phone_connected', False)
+    elif result.get('status') == 'CONNECTED': # Alternative API behavior
+        is_connected = True
+        
+    if result.get('error'):
+         is_connected = False
+         
+    new_status = 'connected' if is_connected else 'disconnected'
+    
+    # Update DB
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE instances SET status = %s WHERE apikey = %s", (new_status, instance_apikey))
+    conn.commit()
+    conn.close()
+    
+    # Debug print
+    print(f"Admin Checked Status for {instance_apikey}: {new_status} (Raw: {is_connected})")
+    
+    return {"status": new_status, "result": result}
+@app.route('/campaigns/new')
+@login_required
+def new_campaign():
+    return render_template('campaigns_new.html')
+
+@app.route('/api/scraping-jobs')
+@login_required
+def api_scraping_jobs():
+    """Retorna jobs completados para o select na UI de Campanhas"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, keyword, locations, total_results, created_at 
+                FROM scraping_jobs 
+                WHERE user_id = %s AND status = 'completed' 
+                ORDER BY created_at DESC
+                """,
+                (current_user.id,)
+            )
+            jobs = cur.fetchall()
+        conn.close()
+        return json.dumps([dict(j, created_at=j['created_at'].isoformat()) for j in jobs], default=str)
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500
+
+@app.route('/api/ai/generate-copy', methods=['POST'])
+@login_required
+def generate_ai_copy():
+    """Gera mensagem persuasiva usando IA para campanhas WhatsApp"""
+    try:
+        data = request.json
+        business_context = data.get('business_context', '').strip()
+        
+        if not business_context:
+            return json.dumps({'error': 'Por favor, descreva seu negócio e produto/serviço'}), 400
+        
+        # Configurar cliente OpenAI
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            return json.dumps({'error': 'API Key do OpenAI não configurada'}), 500
+        
+        client = OpenAI(api_key=api_key)
+        
+        # Prompt otimizado para cold-outreach no WhatsApp
+        prompt = f"""Você é um especialista em copywriting para WhatsApp cold-outreach B2B.
+
+CONTEXTO DO NEGÓCIO:
+{business_context}
+
+INSTRUÇÕES:
+1. Crie uma mensagem de prospecção curta e direta (máximo 3-4 linhas)
+2. Use linguagem natural, informal mas profissional (você/tu, não "vossa empresa")
+3. OBRIGATÓRIO: Use {{nome}} no início para personalização
+4. Foque em despertar curiosidade ou oferecer valor imediato
+5. Evite palavras "spam" como "promoção", "desconto imperdível", "clique já"
+6. Termine com uma pergunta ou CTA sutil
+7. NÃO use emojis excessivos (máximo 1)
+8. Seja específico sobre o benefício para o prospect
+
+Retorne APENAS a mensagem, sem explicações ou aspas."""
+
+        # Chamar API do OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Você é um expert em copywriting para WhatsApp B2B. Suas mensagens são curtas, naturais e altamente conversíveis."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,  # Criatividade balanceada
+            max_tokens=150
+        )
+        
+        generated_message = response.choices[0].message.content.strip()
+        
+        # Garantir que {nome} está presente
+        if '{nome}' not in generated_message.lower():
+            # Adicionar {nome} no início se não estiver presente
+            generated_message = f"Olá {{nome}}, {generated_message[0].lower()}{generated_message[1:]}"
+        
+        return json.dumps({'message': generated_message})
+        
+    except Exception as e:
+        print(f"Erro ao gerar copy com IA: {e}")
+        return json.dumps({'error': f'Erro na geração de IA: {str(e)}'}), 500
+
+@app.route('/api/upload-csv-leads', methods=['POST'])
+@login_required
+def upload_csv_leads():
+    if 'file' not in request.files:
+        return json.dumps({'error': 'Nenhum arquivo enviado'}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return json.dumps({'error': 'Arquivo vazio'}), 400
+        
+    if not file.filename.endswith('.csv'):
+        return json.dumps({'error': 'Apenas arquivos .csv são permitidos'}), 400
+        
+    try:
+        # Salvar arquivo
+        user_dir = os.path.join(os.environ.get("STORAGE_DIR", "storage"), str(current_user.id), "Uploads")
+        os.makedirs(user_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"upload_{timestamp}_{file.filename}"
+        filepath = os.path.join(user_dir, filename)
+        
+        file.save(filepath)
+        
+        # Analisar o arquivo para contar leads
+        df = pd.read_csv(filepath)
+        
+        # Adicionar coluna 'status' se não existir (valor 1 = pronto para envio)
+        if 'status' not in [c.lower() for c in df.columns]:
+            df['status'] = 1
+            # Salvar novamente com a coluna status
+            df.to_csv(filepath, index=False)
+        
+        # Tentar identificar colunas
+        cols = [c.lower() for c in df.columns]
+        phone_col = next((c for c in cols if 'phone' in c or 'tel' in c or 'cel' in c or 'whatsapp' in c), None)
+        
+        count = 0
+        if phone_col:
+             # Contar válidos (apenas estimativa rápida)
+             count = int(df[df.columns[cols.index(phone_col)]].notna().sum())
+        else:
+             count = int(len(df))
+        
+        # Criar registro de Job "Fake" para rastreabilidade
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO scraping_jobs 
+                (user_id, keyword, locations, total_results, status, results_path, progress, completed_at)
+                VALUES (%s, %s, %s, %s, 'completed', %s, 100, NOW())
+                RETURNING id
+                """,
+                (current_user.id, f"Upload: {file.filename}", "Arquivo Local", count, filepath)
+            )
+            job_id = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        
+        return json.dumps({
+            'success': True, 
+            'job_id': job_id, 
+            'total_leads': int(count)
+        })
+        
+    except Exception as e:
+        print(f"Erro no upload: {e}")
+        return json.dumps({'error': str(e)}), 500
+
+@app.route('/api/campaigns', methods=['POST'])
+@login_required
+def create_campaign():
+    data = request.json
+    name = data.get('name')
+    job_id = data.get('job_id')
+    # Pode receber 'message_template' (string única) ou 'message_templates' (lista)
+    # Vamos padronizar salvando como JSON se for lista, ou string se for único.
+    # Mas para "rotação", o ideal seria salvar uma lista JSON.
+    message_templates = data.get('message_templates', [])
+    if not message_templates and data.get('message_template'):
+        message_templates = [data.get('message_template')]
+        
+    # Serializar para salvar no banco
+    message_template_json = json.dumps(message_templates)
+    
+    # NEW: Get scheduled_start from request (optional)
+    scheduled_start = data.get('scheduled_start')  # ISO format string or None
+    
+    # NEW: Validate scheduled_start if provided
+    if scheduled_start:
+        try:
+            from datetime import datetime
+            # Just validate format, don't check if future (browser already does this)
+            # Parse to ensure it's valid ISO format
+            datetime.fromisoformat(scheduled_start.replace('Z', ''))
+        except Exception as e:
+            return json.dumps({'error': f'Data inválida: {str(e)}'}), 400
+    
+    if not name or not job_id:
+        return json.dumps({'error': 'Nome e Job são obrigatórios'}), 400
+        
+    try:
+        # 1. Obter leads do Job
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT results_path FROM scraping_jobs WHERE id = %s AND user_id = %s", (job_id, current_user.id))
+            job = cur.fetchone()
+        conn.close()
+        
+        if not job or not job['results_path'] or not os.path.exists(job['results_path']):
+            return json.dumps({'error': 'Arquivo de leads não encontrado'}), 404
+            
+        # 2. Ler arquivo de resultados (CSV ou XLSX, mas o path aponta pra CSV geralmente)
+        # Fix: O scraper salva em CSV, não JSON.
+        file_path = job['results_path']
+        valid_leads = []
+        
+        try:
+            if file_path.endswith('.csv'):
+                df = pd.read_csv(file_path)
+            elif file_path.endswith('.xlsx'):
+                df = pd.read_excel(file_path)
+            else:
+                 # Fallback: tentar ler como CSV
+                df = pd.read_csv(file_path)
+            
+            # Normalizar colunas
+            # O scraper gera: name, phone_number, etc.
+            # O CSV pode ter colunas diferentes se vier de upload.
+            
+            # Map columns to expected: name, phone
+            # Scraper output: 'name', 'phone_number'
+            # Upload possible: 'nome', 'telefone', 'celular', 'phone'
+            
+            cols = [c.lower() for c in df.columns]
+            df.columns = cols
+            
+            # Identificar coluna de telefone
+            phone_col = next((c for c in cols if 'phone' in c or 'tel' in c or 'cel' in c), None)
+            # Não incluir 'whatsapp' genérico na busca de phone_col, pois whatsapp_link é separado
+            name_col = next((c for c in cols if 'name' in c or 'nome' in c or 'title' in c), None)
+            whatsapp_link_col = next((c for c in cols if c == 'whatsapp_link'), None)
+            status_col = next((c for c in cols if c == 'status'), None)
+            
+            if not phone_col:
+                 return json.dumps({'error': 'Coluna de telefone não encontrada no arquivo'}), 400
+            
+            # Filtrar apenas leads com status = 1 (ou sem coluna status)
+            if status_col:
+                df_filtered = df[df[status_col] == 1]
+            else:
+                df_filtered = df
+                 
+            for _, row in df_filtered.iterrows():
+                raw_phone = str(row[phone_col]) if pd.notna(row[phone_col]) else ""
+                raw_name = str(row[name_col]) if name_col and pd.notna(row[name_col]) else "Visitante"
+                raw_whatsapp_link = str(row[whatsapp_link_col]) if whatsapp_link_col and pd.notna(row[whatsapp_link_col]) else None
+                
+                if raw_phone:
+                     clean_phone = re.sub(r'\D', '', raw_phone)
+                     if len(clean_phone) >= 10:
+                        valid_leads.append({
+                            'phone': clean_phone,
+                            'name': raw_name,
+                            'whatsapp_link': raw_whatsapp_link
+                        })
+
+        except Exception as e:
+            print(f"Erro ao ler arquivo: {e}")
+            return json.dumps({'error': f'Erro ao ler arquivo: {str(e)}'}), 500
+        
+        if not valid_leads:
+            return json.dumps({'error': 'Nenhum lead válido encontrado na lista'}), 400
+
+        # 4. Criar Campanha
+        # NEW: Create campaign with scheduled_start and dynamic status
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Determine initial status based on scheduled_start
+            initial_status = 'pending' if scheduled_start else 'running'
+            
+            cur.execute(
+                """
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, created_at
+                """,
+                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status)
+            )
+            row = cur.fetchone()
+            campaign_id = row[0]
+            created_at = row[1]
+        conn.commit()
+        conn.close()
+        
+        # 5. Adicionar Leads
+        CampaignLead.add_leads(campaign_id, valid_leads)
+        
+        return json.dumps({'success': True, 'campaign_id': campaign_id, 'leads_count': len(valid_leads)})
+        
+    except Exception as e:
+        print(f"Erro ao criar campanha: {e}")
+        return json.dumps({'error': str(e)}), 500
+
+@app.route("/campaigns")
+@login_required
+def campaigns_list():
+    """Página para visualizar lista de campanhas"""
+    campaigns = Campaign.get_by_user(current_user.id)
+    return render_template("campaigns_list.html", campaigns=campaigns)
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    """Página de dashboard geral"""
+    return render_template("dashboard.html")
+
+
 @app.route("/jobs")
 @login_required
 def jobs():
@@ -1477,6 +2303,63 @@ def get_job_status(job_id):
         "started_at": job['started_at'],
         "completed_at": job['completed_at']
     }
+
+
+@app.route("/api/job/<int:job_id>/cancel", methods=["POST"])
+@login_required
+def cancel_job(job_id):
+    """API para cancelar um job"""
+    job = ScrapingJob.get_by_id(job_id)
+    if not job or job['user_id'] != current_user.id:
+        return {"error": "Job not found"}, 404
+        
+    if job['status'] in ['completed', 'failed']:
+        return {"error": "Job already finished"}, 400
+
+    # Sinalizar cancelamento no Redis (se estiver usando RQ, podemos tentar cancelar o job)
+    # Como o worker roda jobs do RQ, precisamos saber o Job ID do RQ.
+    # Por simplificação, vamos setar status 'cancelled' no DB e o worker deve checar.
+    ScrapingJob.update_status(job_id, 'cancelled', error_message='Cancelado pelo usuário')
+    return {"status": "cancelled"}
+
+@app.route("/api/job/<int:job_id>", methods=["DELETE"])
+@login_required
+def delete_job(job_id):
+    """API para excluir um job"""
+    job = ScrapingJob.get_by_id(job_id)
+    if not job or job['user_id'] != current_user.id:
+        return {"error": "Job not found"}, 404
+        
+    # Excluir arquivos se existirem
+    if job['results_path'] and os.path.exists(job['results_path']):
+        try:
+            os.remove(job['results_path'])
+            # Tentar remover .xlsx também se houver
+            xlsx_path = job['results_path'].replace('.csv', '.xlsx')
+            if os.path.exists(xlsx_path):
+                os.remove(xlsx_path)
+        except:
+            pass
+            
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM scraping_jobs WHERE id = %s", (job_id,))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "deleted"}
+
+@app.route("/download")
+@login_required
+def download_file():
+    path = request.args.get('path')
+    if not path:
+        return "Path required", 400
+        
+    if not os.path.exists(path):
+        return "File not found", 404
+        
+    return send_file(path, as_attachment=True)
 
 
 class WhatsappService:
@@ -1751,6 +2634,219 @@ def get_whatsapp_status(instance_key):
         
         return result
     return {"error": "Failed to get status"}, 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/stats")
+@login_required
+def get_campaign_stats(campaign_id):
+    """API para obter estatísticas de uma campanha"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Verificar se a campanha pertence ao usuário
+            cur.execute(
+                "SELECT id, closed_deals FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+            
+            if not campaign:
+                conn.close()
+                return {"error": "Campaign not found"}, 404
+            
+            closed_deals = campaign['closed_deals'] or 0
+            
+            # Buscar estatísticas de leads
+            cur.execute(
+                """
+                SELECT 
+                    COUNT(*) as total_leads,
+                    COUNT(CASE WHEN status = 'sent' THEN 1 END) as sent,
+                    COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed,
+                    COUNT(CASE WHEN status = 'invalid' THEN 1 END) as invalid,
+                    MIN(sent_at) as started_at,
+                    MAX(sent_at) as last_sent_at
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                """,
+                (campaign_id,)
+            )
+            stats = cur.fetchone()
+        
+        conn.close()
+        
+        # Calcular taxa de conversão
+        sent = stats['sent'] or 0
+        conversion_rate = round((closed_deals / sent * 100), 1) if sent > 0 else 0
+        
+        return {
+            "total_leads": stats['total_leads'] or 0,
+            "sent": sent,
+            "pending": stats['pending'] or 0,
+            "failed": stats['failed'] or 0,
+            "invalid": stats['invalid'] or 0,
+            "closed_deals": closed_deals,
+            "conversion_rate": conversion_rate,
+            "started_at": stats['started_at'].isoformat() if stats['started_at'] else None,
+            "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None
+        }
+        
+    except Exception as e:
+        print(f"Erro ao obter stats da campanha: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/deal", methods=["POST"])
+@login_required
+def update_campaign_deal(campaign_id):
+    """API para incrementar/decrementar negócios fechados de uma campanha"""
+    try:
+        data = request.json
+        action = data.get('action')  # 'increment' ou 'decrement'
+        
+        if action not in ['increment', 'decrement']:
+            return {"error": "Invalid action. Use 'increment' or 'decrement'"}, 400
+        
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Verificar se a campanha pertence ao usuário
+            cur.execute(
+                "SELECT id FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+            
+            if not campaign:
+                conn.close()
+                return {"error": "Campaign not found"}, 404
+            
+            # Incrementar ou decrementar
+            if action == 'increment':
+                cur.execute(
+                    "UPDATE campaigns SET closed_deals = closed_deals + 1 WHERE id = %s RETURNING closed_deals",
+                    (campaign_id,)
+                )
+            else:  # decrement
+                cur.execute(
+                    "UPDATE campaigns SET closed_deals = GREATEST(closed_deals - 1, 0) WHERE id = %s RETURNING closed_deals",
+                    (campaign_id,)
+                )
+            
+            result = cur.fetchone()
+            new_value = result['closed_deals']
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            "success": True,
+            "closed_deals": new_value
+        }
+        
+    except Exception as e:
+        print(f"Erro ao atualizar deals da campanha: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/api/dashboard/overview")
+@login_required
+def get_dashboard_overview():
+    """API para obter visão geral do dashboard do usuário"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Total de campanhas
+            cur.execute(
+                "SELECT COUNT(*) as total FROM campaigns WHERE user_id = %s",
+                (current_user.id,)
+            )
+            total_campaigns = cur.fetchone()['total']
+            
+            # Campanhas ativas
+            cur.execute(
+                "SELECT COUNT(*) as active FROM campaigns WHERE user_id = %s AND status = 'running'",
+                (current_user.id,)
+            )
+            active_campaigns = cur.fetchone()['active']
+            
+            # Leads extraídos hoje
+            cur.execute(
+                """
+                SELECT COUNT(*) as count FROM campaign_leads cl
+                JOIN campaigns c ON cl.campaign_id = c.id
+                WHERE c.user_id = %s AND DATE(c.created_at) = CURRENT_DATE
+                """,
+                (current_user.id,)
+            )
+            today_leads = cur.fetchone()['count']
+            
+            # Mensagens enviadas hoje
+            cur.execute(
+                """
+                SELECT COUNT(*) as count FROM campaign_leads cl
+                JOIN campaigns c ON cl.campaign_id = c.id
+                WHERE c.user_id = %s AND DATE(cl.sent_at) = CURRENT_DATE AND cl.status = 'sent'
+                """,
+                (current_user.id,)
+            )
+            today_sent = cur.fetchone()['count']
+            
+            # Taxa de sucesso (hoje)
+            cur.execute(
+                """
+                SELECT 
+                    COUNT(CASE WHEN cl.status = 'sent' THEN 1 END) as sent,
+                    COUNT(CASE WHEN cl.status IN ('failed', 'invalid') THEN 1 END) as failed
+                FROM campaign_leads cl
+                JOIN campaigns c ON cl.campaign_id = c.id
+                WHERE c.user_id = %s AND DATE(cl.sent_at) = CURRENT_DATE
+                """,
+                (current_user.id,)
+            )
+            success_data = cur.fetchone()
+            sent_count = success_data['sent'] or 0
+            failed_count = success_data['failed'] or 0
+            total_attempted = sent_count + failed_count
+            success_rate = round((sent_count / total_attempted * 100), 1) if total_attempted > 0 else 0
+            
+            # Total de negócios fechados (todas as campanhas)
+            cur.execute(
+                "SELECT COALESCE(SUM(closed_deals), 0) as total FROM campaigns WHERE user_id = %s",
+                (current_user.id,)
+            )
+            total_deals = cur.fetchone()['total']
+            
+            # Taxa de conversão geral (todas as campanhas)
+            cur.execute(
+                """
+                SELECT 
+                    COALESCE(SUM(c.closed_deals), 0) as total_deals,
+                    COUNT(CASE WHEN cl.status = 'sent' THEN 1 END) as total_sent
+                FROM campaigns c
+                LEFT JOIN campaign_leads cl ON cl.campaign_id = c.id
+                WHERE c.user_id = %s
+                """,
+                (current_user.id,)
+            )
+            conversion_data = cur.fetchone()
+            overall_conversion = round((conversion_data['total_deals'] / conversion_data['total_sent'] * 100), 1) if conversion_data['total_sent'] > 0 else 0
+        
+        conn.close()
+        
+        return {
+            "today_leads_extracted": today_leads,
+            "today_messages_sent": today_sent,
+            "today_success_rate": success_rate,
+            "total_closed_deals": total_deals,
+            "overall_conversion_rate": overall_conversion,
+            "active_campaigns": active_campaigns,
+            "total_campaigns": total_campaigns
+        }
+        
+    except Exception as e:
+        print(f"Erro ao obter overview do dashboard: {e}")
+        return {"error": str(e)}, 500
 
 
 @app.route("/api/webhooks/hotmart", methods=["POST"])

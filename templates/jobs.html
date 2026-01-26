@@ -8,7 +8,7 @@
         <div class="col-12">
             <h2>Jobs de Scraping</h2>
             <p class="text-muted">Acompanhe o progresso dos seus jobs de scraping.</p>
-            
+
             {% if jobs %}
             <div class="table-responsive">
                 <table class="table table-striped">
@@ -34,54 +34,68 @@
                             </td>
                             <td>
                                 {% if job.status == 'pending' %}
-                                    <span class="badge bg-warning">Pendente</span>
+                                <span class="badge bg-warning">Pendente</span>
                                 {% elif job.status == 'running' %}
-                                    <span class="badge bg-primary">Executando</span>
+                                <span class="badge bg-primary">Executando</span>
                                 {% elif job.status == 'completed' %}
-                                    <span class="badge bg-success">Concluído</span>
+                                <span class="badge bg-success">Concluído</span>
                                 {% elif job.status == 'failed' %}
-                                    <span class="badge bg-danger">Falhou</span>
+                                <span class="badge bg-danger">Falhou</span>
                                 {% endif %}
                             </td>
                             <td>
                                 {% if job.status == 'running' %}
-                                    <div class="progress" style="width: 100px;">
-                                        <div class="progress-bar" role="progressbar" 
-                                             style="width: {{ job.progress }}%" 
-                                             aria-valuenow="{{ job.progress }}" 
-                                             aria-valuemin="0" aria-valuemax="100">
-                                            {{ job.progress }}%
-                                        </div>
+                                <div class="progress" style="width: 100px;">
+                                    <div class="progress-bar" role="progressbar" style="width: {{ job.progress }}%"
+                                        aria-valuenow="{{ job.progress }}" aria-valuemin="0" aria-valuemax="100">
+                                        {{ job.progress }}%
                                     </div>
+                                </div>
                                 {% else %}
-                                    {{ job.progress }}%
+                                {{ job.progress }}%
                                 {% endif %}
                             </td>
                             <td>
                                 {% if job.current_location %}
-                                    {{ job.current_location }}
+                                {{ job.current_location }}
                                 {% else %}
-                                    -
+                                -
                                 {% endif %}
                             </td>
                             <td>{{ job.created_at }}</td>
                             <td>
-                                {% if job.status == 'completed' and job.results_path %}
-                                    <a href="/download?path={{ job.results_path }}" class="btn btn-sm btn-success">
-                                        <i class="fas fa-download"></i> Download
-                                    </a>
-                                {% elif job.status == 'failed' and job.error_message %}
-                                    <button class="btn btn-sm btn-outline-danger" 
-                                            data-bs-toggle="tooltip" 
-                                            title="{{ job.error_message }}">
-                                        <i class="fas fa-exclamation-triangle"></i>
+                                <!-- Dropdown com Bootstrap 5 -->
+                                <div class="dropdown">
+                                    <button class="btn btn-sm btn-secondary dropdown-toggle" type="button"
+                                        id="dropdownMenuButton{{ job.id }}" data-bs-toggle="dropdown"
+                                        aria-expanded="false">
+                                        Ações
                                     </button>
-                                {% elif job.status == 'running' %}
-                                    <button class="btn btn-sm btn-outline-primary" 
-                                            onclick="refreshJob({{ job.id }})">
-                                        <i class="fas fa-sync"></i> Atualizar
-                                    </button>
-                                {% endif %}
+                                    <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton{{ job.id }}">
+                                        {% if job.status == 'running' or job.status == 'pending' %}
+                                        <li><a class="dropdown-item" href="#"
+                                                onclick="refreshJob({{ job.id }}); return false;">
+                                                <i class="fas fa-sync text-primary"></i> Atualizar Status
+                                            </a></li>
+                                        {% endif %}
+
+                                        {% if job.status == 'completed' and job.results_path %}
+                                        <li><a class="dropdown-item" href="/download?path={{ job.results_path }}">
+                                                <i class="fas fa-download text-success"></i> Baixar CSV
+                                            </a></li>
+                                        {% endif %}
+
+                                        {% if job.status != 'running' %}
+                                        <li>
+                                            <hr class="dropdown-divider">
+                                        </li>
+                                        <li><a class="dropdown-item text-danger" href="#"
+                                                onclick="deleteJob({{ job.id }}); return false;">
+                                                <i class="fas fa-trash"></i> Excluir
+                                            </a></li>
+                                        {% endif %}
+                                    </ul>
+                                </div>
                             </td>
                         </tr>
                         {% endfor %}
@@ -91,7 +105,7 @@
             {% else %}
             <div class="alert alert-info">
                 <i class="fas fa-info-circle"></i>
-                Nenhum job de scraping encontrado. 
+                Nenhum job de scraping encontrado.
                 <a href="/" class="alert-link">Inicie um novo scraping</a>.
             </div>
             {% endif %}
@@ -99,42 +113,115 @@
     </div>
 </div>
 
-<script>
-function refreshJob(jobId) {
-    fetch(`/api/job/${jobId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.status === 'completed') {
-                location.reload();
-            } else if (data.status === 'failed') {
-                alert('Job falhou: ' + (data.error_message || 'Erro desconhecido'));
-                location.reload();
-            } else {
-                // Update progress bar
-                const progressBar = document.querySelector(`tr:has(td:contains("${jobId}")) .progress-bar`);
-                if (progressBar) {
-                    progressBar.style.width = data.progress + '%';
-                    progressBar.setAttribute('aria-valuenow', data.progress);
-                    progressBar.textContent = data.progress + '%';
-                }
-            }
-        })
-        .catch(error => {
-            console.error('Erro ao atualizar job:', error);
-        });
-}
-
-// Auto-refresh running jobs every 5 seconds
-document.addEventListener('DOMContentLoaded', function() {
-    const runningJobs = document.querySelectorAll('tr:has(.badge.bg-primary)');
-    if (runningJobs.length > 0) {
-        setInterval(() => {
-            runningJobs.forEach(row => {
-                const jobId = row.querySelector('td:first-child').textContent;
-                refreshJob(parseInt(jobId));
-            });
-        }, 5000);
+<style>
+    /* Fix for dropdown menu in dark mode */
+    .dropdown-menu {
+        background-color: #1a233a;
+        border: 1px solid rgba(79, 124, 255, 0.2);
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+        z-index: 9999;
     }
-});
+
+    .dropdown-item {
+        color: #e8ecf6;
+    }
+
+    .dropdown-item:hover {
+        background-color: rgba(79, 124, 255, 0.1);
+        color: #fff;
+    }
+
+    .dropdown-divider {
+        border-top-color: rgba(255, 255, 255, 0.1);
+    }
+</style>
+
+<script>
+    function refreshJob(jobId) {
+        fetch(`/api/job/${jobId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'completed') {
+                    location.reload();
+                } else if (data.status === 'failed') {
+                    location.reload();
+                } else {
+                    // Update progress bar
+                    // Try to find row by ID
+                    const rows = document.querySelectorAll('tbody tr');
+                    rows.forEach(row => {
+                        const idCell = row.querySelector('td:first-child');
+                        if (idCell && idCell.textContent.trim() == jobId) {
+                            const progressBar = row.querySelector('.progress-bar');
+                            if (progressBar) {
+                                progressBar.style.width = data.progress + '%';
+                                progressBar.setAttribute('aria-valuenow', data.progress);
+                                progressBar.textContent = data.progress + '%';
+                            }
+
+                            // Update status badge if changed (simple check)
+                            const statusCell = row.querySelector('td:nth-child(4)');
+                            // Logic to update badge could be more complex, reloading is safer for status changes
+                            if (data.status !== 'running' && data.status !== 'pending') {
+                                location.reload();
+                            }
+                        }
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('Erro ao atualizar job:', error);
+            });
+    }
+
+    function cancelJob(jobId) {
+        if (!confirm('Deseja realmente cancelar este job?')) return;
+
+        fetch(`/api/job/${jobId}/cancel`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Erro: ' + data.error);
+                } else {
+                    alert('Job cancelado com sucesso.');
+                    location.reload();
+                }
+            })
+            .catch(err => alert('Erro ao cancelar job: ' + err));
+    }
+
+    function deleteJob(jobId) {
+        if (!confirm('Deseja realmente excluir este job e seus arquivos?')) return;
+
+        fetch(`/api/job/${jobId}`, { method: 'DELETE' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Erro: ' + data.error);
+                } else {
+                    alert('Job excluído com sucesso.');
+                    location.reload();
+                }
+            })
+            .catch(err => alert('Erro ao excluir job: ' + err));
+    }
+
+    // Auto-refresh running jobs every 5 seconds
+    document.addEventListener('DOMContentLoaded', function () {
+        const runningJobs = document.querySelectorAll('.progress-bar');
+        if (runningJobs.length > 0) {
+            setInterval(() => {
+                const rows = document.querySelectorAll('tbody tr');
+                rows.forEach(row => {
+                    // Find ID
+                    const idCell = row.querySelector('td:first-child');
+                    const statusBadge = row.querySelector('.badge');
+                    if (idCell && statusBadge && (statusBadge.textContent.includes('Executando') || statusBadge.textContent.includes('Pendente'))) {
+                        refreshJob(idCell.textContent.trim());
+                    }
+                });
+            }, 5000);
+        }
+    });
 </script>
 {% endblock %}

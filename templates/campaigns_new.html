@@ -1,0 +1,524 @@
+{% extends "base.html" %}
+
+{% block title %}Nova Campanha - Leads Infinitos{% endblock %}
+
+{% block extra_head %}
+<!-- Tailwind CSS (via CDN for rapid dev) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    bg: '#0b1020',
+                    card: '#0f1630',
+                    primary: '#4f7cff',
+                    accent: '#8b5cf6',
+                }
+            }
+        }
+    }
+</script>
+<style>
+    /* Custom Neon/Glass Effects */
+    .glass-panel {
+        background: rgba(15, 22, 48, 0.7);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .neon-input {
+        background: rgba(12, 20, 48, 0.8);
+        border: 1px solid rgba(79, 124, 255, 0.3);
+        box-shadow: 0 0 10px rgba(79, 124, 255, 0.05);
+        transition: all 0.3s ease;
+    }
+
+    .neon-input:focus {
+        border-color: #4f7cff;
+        box-shadow: 0 0 15px rgba(79, 124, 255, 0.3);
+        outline: none;
+    }
+
+    .btn-cyber {
+        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        position: relative;
+        overflow: hidden;
+        transition: all 0.3s ease;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-weight: 700;
+        border: none;
+    }
+
+    .btn-cyber::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+        transition: 0.5s;
+    }
+
+    .btn-cyber:hover::before {
+        left: 100%;
+    }
+
+    .btn-cyber:hover {
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.6);
+        transform: translateY(-2px);
+    }
+
+    /* Override base styles if needed */
+    h1,
+    h2,
+    h3 {
+        color: #e8ecf6;
+    }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="container mx-auto px-4 py-12">
+    <div class="max-w-3xl mx-auto">
+
+        <div class="mb-8 text-center">
+            <h1
+                class="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 mb-2">
+                Nova Campanha
+            </h1>
+            <p class="text-gray-400">Configure o disparo em massa para seus leads extraídos.</p>
+        </div>
+
+        <div class="glass-panel p-8 rounded-2xl relative overflow-hidden">
+            <!-- decorative blurred blob -->
+            <div
+                class="absolute -top-20 -right-20 w-64 h-64 bg-purple-600 rounded-full mix-blend-multiply filter blur-3xl opacity-10 animate-blob">
+            </div>
+
+            <form id="campaignForm" class="space-y-6 relative z-10">
+
+                <!-- Nome da Campanha -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Nome da Campanha</label>
+                    <input type="text" id="name" placeholder="Ex: Prospecção Dentistas SP" required
+                        class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600">
+                </div>
+
+                <!-- Seleção de Lista (Job) -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Lista de Leads (Extração)</label>
+                    <div class="relative">
+                        <select id="job_id" required
+                            class="neon-input w-full px-4 py-3 rounded-xl text-white appearance-none cursor-pointer">
+                            <option value="" disabled selected>Carregando extrações...</option>
+                        </select>
+                        <div
+                            class="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-gray-400">
+                            <svg class="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                                <path
+                                    d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
+                            </svg>
+                        </div>
+                    </div>
+                    <p id="jobStats" class="text-xs text-blue-400 mt-2 hidden"></p>
+
+                    <!-- Upload CSV Option -->
+                    <div class="mt-3 flex justify-end">
+                        <input type="file" id="csvUpload" accept=".csv" class="hidden">
+                        <button type="button" id="uploadCsvBtn"
+                            class="text-xs flex items-center gap-1 text-purple-400 hover:text-purple-300 transition-colors border border-purple-500/30 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                            </svg>
+                            Envie sua própria lista
+                        </button>
+                    </div>
+
+
+                </div>
+
+                <!-- Campo de Contexto do Negócio (Para IA) -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">
+                        Fale sobre seu negócio
+                        <span class="text-xs font-normal text-gray-500 ml-2">(Usado pela IA para gerar mensagens)</span>
+                    </label>
+                    <textarea id="business_context" rows="3"
+                        placeholder="Ex: Sou dentista em São Paulo. Oferecemos limpeza, clareamento e aparelhos ortodônticos com preços justos..."
+                        class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600"></textarea>
+                </div>
+
+                <!-- Templates de Mensagem -->
+                <div>
+                    <div class="flex justify-between items-center mb-2">
+                        <label class="block text-sm font-semibold text-gray-300">
+                            Mensagem <span class="text-xs font-normal text-gray-500 ml-2">(Use {nome} para
+                                personalizar)</span>
+                        </label>
+                        <button type="button" id="mainAIBtn"
+                            class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                            </svg>
+                            Criar com IA
+                        </button>
+                    </div>
+
+                    <div id="templates-container" class="space-y-3">
+                        <!-- Template 1 (Default) - sem wrapper para não ter botão X -->
+                        <textarea name="message_template" rows="4" required
+                            placeholder="Olá {nome}, vi sua empresa no Google Maps e..."
+                            class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 template-input"></textarea>
+                    </div>
+
+                    <div class="mt-2">
+                        <button type="button" id="addTemplateBtn"
+                            class="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+                            </svg>
+                            Adicionar variação (Spin)
+                        </button>
+                        <p class="text-xs text-gray-500 mt-1">Adicione até 5 variações para rotacionar o envio e evitar
+                            bloqueios.</p>
+                    </div>
+                </div>
+
+                <!-- Agendamento (Visual Only for now) -->
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">Início (opcional)</label>
+                        <input type="datetime-local" id="scheduled_start"
+                            class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm">
+                        <p class="text-xs text-gray-500 mt-1">Deixe vazio para iniciar imediatamente</p>
+                    </div>
+                </div>
+
+                <!-- Submit Button -->
+                <div class="pt-4">
+                    <button type="submit" id="submitBtn"
+                        class="btn-cyber w-full py-4 rounded-xl text-white shadow-lg text-lg flex justify-center items-center gap-2">
+                        <span>Iniciar Campanha</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                            stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                    </button>
+                    <p id="feedback" class="text-center mt-4 text-sm font-medium hidden"></p>
+                </div>
+
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Função para gerar copy com IA
+    async function generateCopyWithAI(targetTextarea = null) {
+        const businessContext = document.getElementById('business_context').value.trim();
+
+        if (!businessContext) {
+            alert('Por favor, descreva seu negócio no campo "Fale sobre seu negócio" para a IA gerar mensagens personalizadas.');
+            document.getElementById('business_context').focus();
+            return;
+        }
+
+        // Definir qual textarea será preenchido
+        let textarea;
+        if (targetTextarea) {
+            textarea = targetTextarea;
+        } else {
+            // Procurar último textarea vazio, ou criar novo se todos estiverem cheios
+            const allTextareas = Array.from(container.querySelectorAll('.template-input'));
+            textarea = allTextareas.find(t => !t.value.trim());
+
+            if (!textarea && allTextareas.length < maxTemplates) {
+                // Criar novo textarea
+                addBtn.click();
+                await new Promise(resolve => setTimeout(resolve, 100));
+                const newTextareas = container.querySelectorAll('.template-input');
+                textarea = newTextareas[newTextareas.length - 1];
+            } else if (!textarea) {
+                textarea = allTextareas[allTextareas.length - 1];
+            }
+        }
+
+        // Loading state
+        const originalPlaceholder = textarea.placeholder;
+        textarea.disabled = true;
+        textarea.placeholder = '✨ IA gerando mensagem...';
+
+        try {
+            const res = await fetch('/api/ai/generate-copy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ business_context: businessContext })
+            });
+
+            const data = await res.json();
+
+            if (res.ok && data.message) {
+                textarea.value = data.message;
+                textarea.placeholder = originalPlaceholder;
+                // Breve flash de sucesso
+                textarea.style.borderColor = '#10b981';
+                setTimeout(() => {
+                    textarea.style.borderColor = '';
+                }, 1000);
+            } else {
+                throw new Error(data.error || 'Erro desconhecido');
+            }
+        } catch (err) {
+            alert(`Erro ao gerarcopy: ${err.message}`);
+            textarea.placeholder = originalPlaceholder;
+        } finally {
+            textarea.disabled = false;
+        }
+    }
+
+    // Gerenciador de Templates
+    const container = document.getElementById('templates-container');
+    const addBtn = document.getElementById('addTemplateBtn');
+    const maxTemplates = 5;
+
+    // Handler para o botão principal "Criar com IA" - usando ID correto
+    document.addEventListener('DOMContentLoaded', () => {
+        const mainAIBtn = document.getElementById('mainAIBtn');
+        if (mainAIBtn) {
+            mainAIBtn.addEventListener('click', () => generateCopyWithAI());
+        }
+    });
+
+    addBtn.addEventListener('click', () => {
+        const currentCount = container.querySelectorAll('textarea').length;
+        if (currentCount >= maxTemplates) {
+            alert('Máximo de 5 variações atingido.');
+            return;
+        }
+
+        // Criar container para textarea + botões
+        const wrapper = document.createElement('div');
+        wrapper.className = 'relative';
+
+        const newTextarea = document.createElement('textarea');
+        newTextarea.rows = 4;
+        newTextarea.placeholder = `Variação de mensagem ${currentCount + 1}...`;
+        newTextarea.className = 'neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 template-input animate-fade-in';
+        newTextarea.name = 'message_template';
+
+        // Botão X para excluir (acima do botão IA)
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'absolute top-2 right-14 text-xs bg-red-600/20 text-red-300 px-2 py-1 rounded border border-red-500/30 hover:bg-red-600/40 transition-colors flex items-center gap-1';
+        deleteBtn.innerHTML = '✕';
+        deleteBtn.title = 'Excluir variação';
+        deleteBtn.addEventListener('click', () => {
+            wrapper.remove();
+            // Re-habilitar botão adicionar se estava escondido
+            const currentCount = container.querySelectorAll('textarea').length;
+            if (currentCount < maxTemplates) {
+                addBtn.style.display = 'flex';
+            }
+        });
+
+        // Mini botão IA
+        const miniAIBtn = document.createElement('button');
+        miniAIBtn.type = 'button';
+        miniAIBtn.className = 'absolute top-2 right-2 text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1';
+        miniAIBtn.innerHTML = '✨ IA';
+        miniAIBtn.addEventListener('click', () => generateCopyWithAI(newTextarea));
+
+        wrapper.appendChild(newTextarea);
+        wrapper.appendChild(deleteBtn);
+        wrapper.appendChild(miniAIBtn);
+        container.appendChild(wrapper);
+
+        if (currentCount + 1 >= maxTemplates) {
+            addBtn.style.display = 'none';
+        }
+    });
+
+    // Carregar Jobs (Listas) ao iniciar
+    document.addEventListener('DOMContentLoaded', async () => {
+        try {
+            const res = await fetch('/api/scraping-jobs');
+            const jobs = await res.json();
+
+            const select = document.getElementById('job_id');
+            select.innerHTML = '<option value="" disabled selected>Selecione uma lista de leads...</option>';
+
+            if (jobs.length === 0) {
+                select.innerHTML += '<option value="" disabled>Nenhuma extração encontrada. Faça um Job primeiro.</option>';
+            }
+
+            jobs.forEach(job => {
+                const date = new Date(job.created_at).toLocaleDateString('pt-BR');
+                const opt = document.createElement('option');
+                opt.value = job.id;
+                opt.textContent = `${job.keyword} - ${job.locations} (${job.total_results} leads) - ${date}`;
+                opt.dataset.count = job.total_results;
+                select.appendChild(opt);
+            });
+
+            // Update stats on change
+            select.addEventListener('change', (e) => {
+                const opt = e.target.selectedOptions[0];
+                const count = opt.dataset.count;
+                const stats = document.getElementById('jobStats');
+                if (count) {
+                    stats.textContent = `Aproximadamente ${count} contatos disponíveis nesta lista.`;
+                    stats.classList.remove('hidden');
+                }
+            });
+
+        } catch (err) {
+            console.error(err);
+            document.getElementById('jobStats').textContent = 'Erro ao carregar listas.';
+            document.getElementById('jobStats').classList.remove('hidden');
+            document.getElementById('jobStats').classList.add('text-red-400');
+        }
+    });
+
+    // Handle CSV Upload
+    const uploadBtn = document.getElementById('uploadCsvBtn');
+    const fileInput = document.getElementById('csvUpload');
+    const jobSelect = document.getElementById('job_id');
+
+    uploadBtn.addEventListener('click', () => {
+        fileInput.click();
+    });
+
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // Basic validation
+        if (file.type !== 'text/csv' && !file.name.endsWith('.csv')) {
+            alert('Por favor, selecione um arquivo CSV válido.');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        // Visual feedback
+        const originalText = uploadBtn.innerHTML;
+        uploadBtn.disabled = true;
+        uploadBtn.innerHTML = 'Enviando...';
+
+        try {
+            const res = await fetch('/api/upload-csv-leads', {
+                method: 'POST',
+                body: formData
+            });
+
+            const json = await res.json();
+
+            if (res.ok) {
+                // Success: Add new option to select and select it
+                const opt = document.createElement('option');
+                opt.value = json.job_id; // The backend should create a virtual job or similar
+                opt.textContent = `[Upload] ${file.name} (${json.total_leads} leads)`;
+                opt.dataset.count = json.total_leads;
+                opt.selected = true;
+                jobSelect.appendChild(opt);
+
+                // Trigger change event to update stats
+                jobSelect.dispatchEvent(new Event('change'));
+
+                alert('Lista enviada com sucesso!');
+            } else {
+                throw new Error(json.error || 'Erro ao enviar arquivo');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Erro no upload: ' + err.message);
+        } finally {
+            uploadBtn.disabled = false;
+            uploadBtn.innerHTML = originalText;
+            fileInput.value = ''; // Reset
+        }
+    });
+
+    // Handle Submit
+    document.getElementById('campaignForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const btn = document.getElementById('submitBtn');
+        const feedback = document.getElementById('feedback');
+        const originalText = btn.innerHTML;
+
+        // Coletar templates
+        const templateInputs = document.querySelectorAll('.template-input');
+        const messageTemplates = Array.from(templateInputs).map(input => input.value).filter(val => val.trim() !== '');
+
+        if (messageTemplates.length === 0) {
+            alert('Digite ao menos uma mensagem.');
+            return;
+        }
+
+        // Loading State
+        btn.disabled = true;
+        btn.innerHTML = '<span class="animate-pulse">Criando Campanha...</span>';
+        feedback.classList.add('hidden');
+
+        // NEW: Validate scheduled_start if provided
+        const scheduledInput = document.getElementById('scheduled_start');
+        if (scheduledInput.value) {
+            const scheduledDate = new Date(scheduledInput.value);
+            const now = new Date();
+            if (scheduledDate <= now) {
+                alert('Data de início deve ser futura');
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
+        }
+
+        const data = {
+            name: document.getElementById('name').value,
+            job_id: document.getElementById('job_id').value,
+            message_templates: messageTemplates, // Envia lista
+            scheduled_start: scheduledInput.value || null  // NEW: Send scheduled_start
+        };
+
+        try {
+            const res = await fetch('/api/campaigns', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            const json = await res.json();
+
+            if (res.ok) {
+                feedback.textContent = `Sucesso! Campanha criada com ${json.leads_count} leads.`;
+                feedback.className = 'text-center mt-4 text-sm font-medium text-green-400';
+                feedback.classList.remove('hidden');
+
+                // Redirect after short delay
+                setTimeout(() => {
+                    window.location.href = '/campaigns';
+                }, 1500);
+            } else {
+                throw new Error(json.error || 'Erro desconhecido');
+            }
+
+        } catch (err) {
+            feedback.textContent = `Erro: ${err.message}`;
+            feedback.className = 'text-center mt-4 text-sm font-medium text-red-400';
+            feedback.classList.remove('hidden');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    });
+</script>
+{% endblock %}

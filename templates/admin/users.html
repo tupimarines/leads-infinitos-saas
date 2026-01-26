@@ -1,0 +1,337 @@
+{% extends "base.html" %}
+
+{% block title %}Gerenciar Usuários - Admin{% endblock %}
+
+{% block body %}
+<script src="https://cdn.tailwindcss.com"></script>
+<div class="container py-8">
+    <div class="flex justify-between items-center mb-8">
+        <h1 class="text-3xl font-bold text-white">Gerenciar Usuários</h1>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn">Voltar</a>
+    </div>
+
+    <!-- Filters -->
+    <div class="mb-6 flex gap-4">
+        <input type="text" id="searchInput" placeholder="Filtrar por email, ID..."
+            class="bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 w-64 focus:outline-none focus:border-blue-500"
+            onkeyup="filterTable()">
+
+        <select id="planFilter" onchange="filterTable()"
+            class="bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 focus:outline-none focus:border-blue-500">
+            <option value="all">Todos os Planos</option>
+            <option value="starter">Starter</option>
+            <option value="pro">Pro</option>
+            <option value="scale">Scale</option>
+            <option value="no-plan">Sem Plano</option>
+        </select>
+    </div>
+
+    <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm text-gray-400" id="usersTable">
+                <thead class="bg-gray-800/50 text-xs uppercase text-gray-300">
+                    <tr>
+                        <th class="px-6 py-4">ID</th>
+                        <th class="px-6 py-4">Email</th>
+                        <th class="px-6 py-4">Status Admin</th>
+                        <th class="px-6 py-4">Licença</th>
+                        <th class="px-6 py-4">Expiração</th>
+                        <th class="px-6 py-4 text-right">Ações</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-700/50">
+                    {% for user in users %}
+                    <tr class="hover:bg-gray-800/30 user-row" data-plan="{{ user.license_type or 'no-plan' }}"
+                        data-search="{{ user.email }} {{ user.id }}">
+
+                        <td class="px-6 py-4">{{ user.id }}</td>
+                        <td class="px-6 py-4 font-medium text-white">{{ user.email }}</td>
+                        <td class="px-6 py-4">
+                            {% if user.is_admin %}
+                            <span
+                                class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                ADMIN
+                            </span>
+                            {% else %}
+                            <span
+                                class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800">
+                                USER
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4">
+                            {% if user.license_status == 'active' %}
+                            {# Helper para cores por plano #}
+                            {% set plan_color = 'text-gray-400' %}
+                            {% if user.license_type == 'starter' %}
+                            {% set plan_color = 'text-green-400' %}
+                            {% elif user.license_type == 'pro' %}
+                            {% set plan_color = 'text-blue-400' %}
+                            {% elif user.license_type == 'scale' %}
+                            {% set plan_color = 'text-purple-400' %}
+                            {% elif user.license_type == 'anual' %}
+                            {% set plan_color = 'text-orange-400' %}
+                            {% elif user.license_type == 'semestral' %}
+                            {% set plan_color = 'text-yellow-400' %}
+                            {% endif %}
+
+                            <span class="{{ plan_color }} font-bold">{{ user.license_type|default('Sem Plano')|upper
+                                }}</span>
+                            {% else %}
+                            {% if user.license_type %}
+                            <span class="text-gray-400">{{ user.license_type|upper }} ({{ user.license_status }})</span>
+                            {% else %}
+                            <span class="text-gray-500">-</span>
+                            {% endif %}
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4">
+                            {% if user.expires_at %}
+                            {{ user.expires_at.strftime('%d/%m/%Y') }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 text-right">
+                            <button onclick="openDetailsModal('{{ user.id }}')"
+                                class="text-blue-400 hover:text-blue-300 text-xs px-3 py-1 border border-blue-400/30 rounded transition-colors">
+                                Detalhes
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Modal User Details -->
+<div id="detailsModal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50">
+    <div class="card p-6 w-full max-w-lg mx-4 relative">
+        <button onclick="closeDetailsModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white">✕</button>
+
+        <h3 class="text-xl font-bold text-white mb-6">Detalhes do Usuário</h3>
+
+        <div id="modalLoading" class="text-center py-8">
+            <span class="text-blue-400 animate-pulse">Carregando...</span>
+        </div>
+
+        <div id="modalContent" class="hidden space-y-6">
+            <!-- Info Grid -->
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-xs text-gray-500 uppercase">Email</label>
+                    <div id="detailEmail" class="text-white font-medium truncate"></div>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 uppercase">Assinante Desde</label>
+                    <div id="detailSince" class="text-white"></div>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 uppercase">WhatsApp</label>
+                    <div id="detailWhatsapp" class="text-sm flex items-center gap-2"></div>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 uppercase">Plano Atual</label>
+                    <div id="detailPlan" class="text-white font-bold"></div>
+                </div>
+            </div>
+
+            <hr class="border-gray-700">
+
+            <!-- Actions -->
+            <div class="space-y-4">
+                <!-- Change Plan -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-400 mb-2">Alterar Plano</label>
+                    <form action="{{ url_for('admin_create_license') }}" method="POST" class="flex gap-2">
+                        <input type="hidden" name="user_id" id="formPlanUserId">
+                        <select name="license_type"
+                            class="flex-1 bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 text-sm focus:outline-none focus:border-blue-500">
+                            <option value="starter">Starter (10 msg/dia)</option>
+                            <option value="pro">Pro (20 msg/dia)</option>
+                            <option value="scale">Scale (30 msg/dia)</option>
+                        </select>
+                        <button type="submit" class="btn btn-primary text-sm whitespace-nowrap">Aplicar</button>
+                    </form>
+                </div>
+
+                <!-- Danger Zone -->
+                <div class="pt-4 border-t border-red-500/20 grid grid-cols-2 gap-4">
+                    <button onclick="resetPassword()"
+                        class="w-full py-2 px-4 rounded-lg bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 hover:bg-yellow-500/20 text-sm font-medium transition-colors">
+                        Resetar Senha
+                    </button>
+                    <button onclick="deleteUser()"
+                        class="w-full py-2 px-4 rounded-lg bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20 text-sm font-medium transition-colors">
+                        Excluir Usuário
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentUserId = null;
+    let currentInstanceKey = null;
+
+    function filterTable() {
+        const query = document.getElementById('searchInput').value.toLowerCase();
+        const plan = document.getElementById('planFilter').value;
+        const rows = document.querySelectorAll('.user-row');
+
+        rows.forEach(row => {
+            const textMatch = row.dataset.search.toLowerCase().includes(query);
+            const planMatch = plan === 'all' || row.dataset.plan === plan;
+
+            row.style.display = textMatch && planMatch ? '' : 'none';
+        });
+    }
+
+    async function openDetailsModal(userId) {
+        currentUserId = userId;
+        const modal = document.getElementById('detailsModal');
+        const loading = document.getElementById('modalLoading');
+        const content = document.getElementById('modalContent');
+
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        loading.style.display = 'block';
+        content.classList.add('hidden');
+
+        // Update form ID
+        document.getElementById('formPlanUserId').value = userId;
+
+        try {
+            const response = await fetch(`/admin/users/${userId}/details`);
+            const data = await response.json();
+
+            if (data.error) throw new Error(data.error);
+
+            // Populate Data
+            document.getElementById('detailEmail').textContent = data.user.email;
+            document.getElementById('detailSince').textContent = new Date(data.user.created_at).toLocaleDateString('pt-BR');
+
+            // WhatsApp Status
+            const waDiv = document.getElementById('detailWhatsapp');
+            if (data.user.instance_name) {
+                currentInstanceKey = data.user.instance_apikey;
+                const statusColor = data.user.instance_status === 'connected' ? 'text-green-400' : 'text-yellow-400';
+
+                waDiv.innerHTML = `
+                    <div>
+                        <span class="${statusColor} font-medium">${data.user.instance_name}</span> 
+                        <span class="text-xs text-gray-500">(${data.user.instance_status})</span>
+                    </div>
+                    <button onclick="verifyWhatsappStatus('${data.user.instance_apikey}')" class="ml-auto text-xs bg-blue-500/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors" title="Verificar Status">
+                        ⟳
+                    </button>
+                `;
+            } else {
+                currentInstanceKey = null;
+                waDiv.innerHTML = '<span class="text-gray-500">Não conectado</span>';
+            }
+
+            // Plan Status
+            const planDiv = document.getElementById('detailPlan');
+            if (data.license) {
+                planDiv.textContent = `${data.license.type.toUpperCase()} (Exp: ${new Date(data.license.expires_at).toLocaleDateString('pt-BR')})`;
+                planDiv.className = getDataPlanColor(data.license.type);
+            } else {
+                planDiv.textContent = 'Sem Plano Ativo';
+                planDiv.className = 'text-gray-500 font-bold';
+            }
+
+            loading.style.display = 'none';
+            content.classList.remove('hidden');
+
+        } catch (error) {
+            alert('Erro ao carregar detalhes: ' + error.message);
+            closeDetailsModal();
+        }
+    }
+
+    async function verifyWhatsappStatus(apiKey) {
+        if (!apiKey) return;
+
+        const btn = document.querySelector(`button[onclick="verifyWhatsappStatus('${apiKey}')"]`);
+        const originalContent = btn.innerHTML;
+        btn.innerHTML = '...';
+        btn.disabled = true;
+
+        try {
+            const response = await fetch(`/admin/whatsapp/check_status/${apiKey}`, { method: 'POST' });
+            const data = await response.json();
+
+            if (data.status) {
+                // Reload modal to reflect changes
+                openDetailsModal(currentUserId);
+            } else {
+                alert('Erro na verificação');
+            }
+        } catch (e) {
+            alert('Erro ao verificar status');
+        } finally {
+            btn.innerHTML = originalContent;
+            btn.disabled = false;
+        }
+    }
+
+    function getDataPlanColor(type) {
+        switch (type) {
+            case 'starter': return 'text-green-400 font-bold';
+            case 'pro': return 'text-blue-400 font-bold';
+            case 'scale': return 'text-purple-400 font-bold';
+            case 'anual': return 'text-orange-400 font-bold'; /* Legacy */
+            case 'semestral': return 'text-yellow-400 font-bold'; /* Legacy */
+            default: return 'text-gray-300 font-bold';
+        }
+    }
+
+    function closeDetailsModal() {
+        document.getElementById('detailsModal').classList.add('hidden');
+        document.getElementById('detailsModal').classList.remove('flex');
+    }
+
+    async function resetPassword() {
+        if (!confirm('Tem certeza? Uma nova senha será gerada.')) return;
+
+        try {
+            const response = await fetch(`/admin/users/${currentUserId}/reset_password`, { method: 'POST' });
+            const data = await response.json();
+
+            if (data.success) {
+                alert(`Sucesso! Nova senha: ${data.new_password}`);
+            } else {
+                alert('Erro: ' + data.error);
+            }
+        } catch (e) {
+            alert('Erro ao resetar senha');
+        }
+    }
+
+    async function deleteUser() {
+        const email = document.getElementById('detailEmail').textContent;
+        const confirmMsg = `PERIGO: Você está prestes a excluir o usuário ${email} e TODOS os seus dados.\n\nEsta ação é IRREVERSÍVEL.\n\nDigite "DELETAR" para confirmar.`;
+
+        const input = prompt(confirmMsg);
+        if (input !== 'DELETAR') return;
+
+        try {
+            const response = await fetch(`/admin/users/${currentUserId}/delete`, { method: 'POST' });
+            const data = await response.json();
+
+            if (data.success) {
+                alert('Usuário excluído!');
+                location.reload();
+            } else {
+                alert('Erro: ' + (data.error || 'Erro desconhecido'));
+            }
+        } catch (e) {
+            alert('Erro ao excluir usuário');
+        }
+    }
+</script>
+{% endblock %}

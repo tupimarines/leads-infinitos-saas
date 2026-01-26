@@ -8,6 +8,9 @@ gunicorn>=21.2.0
 requests>=2.31.0
 flask-mail>=0.9.1
 redis>=5.0.0
-rq>=1.15.0
+rq==1.16.2
 psycopg2-binary>=2.9.0
 python-dotenv>=1.0.0
+playwright-stealth==1.0.6
+apify-client
+openai>=1.0.0

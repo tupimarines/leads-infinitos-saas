@@ -31,6 +31,37 @@ def get_db_connection():
     )
     return conn
 
+def extract_phone_from_whatsapp_link(whatsapp_link):
+    """
+    Extrai o número de telefone de um link do WhatsApp.
+    Exemplos de formatos aceitos:
+    - https://wa.me/5511999999999
+    - https://api.whatsapp.com/send?phone=5511999999999
+    - wa.me/5511999999999
+    Retorna o número ou None se não conseguir extrair.
+    """
+    if not whatsapp_link:
+        return None
+    
+    # Regex para extrair número de links do WhatsApp
+    patterns = [
+        r'wa\.me/([0-9]+)',
+        r'phone=([0-9]+)',
+        r'whatsapp\.com/send\?phone=([0-9]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, str(whatsapp_link))
+        if match:
+            return match.group(1)
+    
+    # Se não encontrou padrão conhecido, tenta extrair qualquer sequência de dígitos longa
+    digits = re.sub(r'\D', '', str(whatsapp_link))
+    if len(digits) >= 10:  # Mínimo para um telefone válido
+        return digits
+    
+    return None
+
 def format_jid(phone):
     """
     Formats a phone number into a WhatsApp JID.
@@ -78,6 +109,12 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
     Verifica se o número existe no WhatsApp usando Mega API.
     GET /rest/instance/isOnWhatsApp/{nome}?jid={jid}
     """
+    if os.environ.get('MOCK_SENDER'):
+        print(f"[MOCK] Checked existence for {phone_jid}: True")
+        # Simulate API delay
+        time.sleep(0.1)
+        return True
+
     url = f"{MEGA_API_URL}/rest/instance/isOnWhatsApp/{instance_name}"
     headers = {
         "Authorization": MEGA_API_TOKEN,
@@ -106,6 +143,11 @@ def send_message(instance_name, phone_jid, message):
     Envia mensagem usando a Mega API.
     POST /rest/sendMessage/{instance_key}/text
     """
+    if os.environ.get('MOCK_SENDER'):
+        print(f"[MOCK] Sent message to {phone_jid}: {message[:20]}...")
+        time.sleep(0.5)
+        return True, {"key": "mocked_key"}
+
     url = f"{MEGA_API_URL}/rest/sendMessage/{instance_name}/text"
     headers = {
         "Authorization": MEGA_API_TOKEN,
@@ -139,12 +181,31 @@ def process_campaigns():
         try:
             conn = get_db_connection()
             
-            # 1. Buscar todas as campanhas 'running'
+            # 1. Buscar campanhas 'running' OU 'pending' que atingiram horário agendado
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM campaigns WHERE status = 'running'")
+                cur.execute("""
+                    SELECT * FROM campaigns 
+                    WHERE status IN ('pending', 'running')
+                    AND (scheduled_start IS NULL OR scheduled_start <= NOW())
+                """)
                 campaigns = cur.fetchall()
             
             conn.close() # Close immediately to free connection, we'll reopen if needed
+            
+            # NEW: Auto-start scheduled campaigns that reached their time
+            for campaign in campaigns:
+                if campaign['status'] == 'pending':
+                    # Campaign was scheduled and time has arrived, start it
+                    conn_temp = get_db_connection()
+                    with conn_temp.cursor() as cur_temp:
+                        cur_temp.execute(
+                            "UPDATE campaigns SET status = 'running' WHERE id = %s",
+                            (campaign['id'],)
+                        )
+                    conn_temp.commit()
+                    conn_temp.close()
+                    campaign['status'] = 'running'  # Update local dict for this iteration
+                    print(f"Campaign {campaign['id']} auto-started (was scheduled)")
             
             if not campaigns:
                 time.sleep(5)
@@ -220,9 +281,34 @@ def process_campaigns():
                                 conn.commit()
                          continue
                     
-                    phone_jid = format_jid(lead['phone'])
+                    # 5. Determinar número a usar (priorizar whatsapp_link)
+                    phone_to_use = None
                     
-                    # 5. Check WhatsApp Existence (Mega API)
+                    # Primeiro tentar whatsapp_link
+                    if lead.get('whatsapp_link'):
+                        phone_to_use = extract_phone_from_whatsapp_link(lead['whatsapp_link'])
+                        if phone_to_use:
+                            print(f"Using phone from WhatsApp link: {phone_to_use}")
+                    
+                    # Se não conseguiu do link, usar phone_number
+                    if not phone_to_use and lead.get('phone'):
+                        phone_to_use = lead['phone']
+                        print(f"Using phone_number field: {phone_to_use}")
+                    
+                    # Se mesmo assim não tem número, marcar como inválido
+                    if not phone_to_use:
+                        print(f"Lead {lead['id']} has no valid phone number. Marking as invalid.")
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE campaign_leads SET status = 'invalid', sent_at = NOW(), log = 'No phone number available' WHERE id = %s",
+                                (lead['id'],)
+                            )
+                        conn.commit()
+                        continue
+                    
+                    phone_jid = format_jid(phone_to_use)
+                    
+                    # 6. Check WhatsApp Existence (Mega API)
                     exists = check_phone_on_whatsapp(instance_name, phone_jid)
                     
                     if not exists:
@@ -238,7 +324,7 @@ def process_campaigns():
                         user_next_send_time[user_id] = datetime.now() + timedelta(seconds=2) 
                         continue
 
-                    # 6. Preparar Mensagem (Variação)
+                    # 7. Preparar Mensagem (Variação + Substituição de Variáveis)
                     message_text = "Olá!"
                     if campaign['message_template']:
                         try:
@@ -248,8 +334,10 @@ def process_campaigns():
                         except:
                             pass
                     
-                    # Replace variables (basic)
-                    # if lead['name']: message_text = message_text.replace("{name}", lead['name'])
+                    # Replace variables
+                    if lead.get('name'):
+                        message_text = message_text.replace("{nome}", lead['name'])
+                        message_text = message_text.replace("{name}", lead['name'])  # Suportar ambas as versões
                     
                     # 7. Enviar
                     print(f"Sending to {phone_jid} (User {user_id})...")
