@@ -371,6 +371,10 @@ class License:
                license_type: str, purchase_date: str) -> "License":
         # Calcular data de expiração baseada no tipo de licença
         from datetime import datetime, timedelta
+        
+        # Garantir formato correto do license_type
+        license_type = license_type.strip().lower()
+        
         purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
         
         if license_type == 'semestral':
@@ -705,8 +709,10 @@ class HotmartService:
                 
                 user = User.create(email, temp_password)
                 
-                # TODO: Enviar email com a senha (se SMTP estiver configurado)
-                # Por enquanto apenas logamos, pois o foco é a integração funcionar
+                # Enviar email com a senha
+                print(f"📧 Enviando email de boas-vindas para {email}...")
+                send_welcome_email(email, temp_password)
+
             
             # 2. Determinar Tipo de Licença (Preço)
             price_value = purchase.get('price', {}).get('value', 0)
@@ -1458,6 +1464,57 @@ def verify_license():
     """API para verificar status da licença (usado por JavaScript)"""
     has_license = current_user.has_active_license()
     return {"has_active_license": has_license}
+
+
+def send_async_email(app_instance, msg):
+    with app_instance.app_context():
+        try:
+            mail.send(msg)
+            print(f"📧 Email enviado para {msg.recipients} via SMTP")
+        except Exception as e:
+            print(f"❌ Erro ao enviar email: {e}")
+
+def send_reset_email(to_email, token):
+    """Envia email de redefinição de senha"""
+    reset_url = url_for('reset_password', token=token, _external=True)
+    msg = Message("Redefinição de Senha - Leads Infinitos", recipients=[to_email])
+    msg.body = f"""Olá!
+
+Recebemos uma solicitação para redefinir sua senha.
+Clique no link abaixo para criar uma nova senha:
+
+{reset_url}
+
+Se você não solicitou isso, ignore este email. O link expira em 1 hora.
+
+Atenciosamente,
+Equipe Leads Infinitos"""
+    
+    # Enviar em thread separada para não bloquear
+    threading.Thread(target=send_async_email, args=(app._get_current_object(), msg)).start()
+
+def send_welcome_email(to_email, password):
+    """Envia email de boas-vindas com credenciais"""
+    login_url = url_for('login', _external=True)
+    msg = Message("Bem-vindo ao Leads Infinitos!", recipients=[to_email])
+    msg.body = f"""Olá!
+
+Sua conta foi criada com sucesso após a confirmação do pagamento.
+Aqui estão suas credenciais de acesso:
+
+Email: {to_email}
+Senha: {password}
+
+Acesse em: {login_url}
+
+Recomendamos que altere sua senha após o primeiro login.
+
+Atenciosamente,
+Equipe Leads Infinitos"""
+
+    # Enviar em thread separada
+    threading.Thread(target=send_async_email, args=(app._get_current_object(), msg)).start()
+
 
 
 @app.route("/forgot-password", methods=["GET", "POST"])
