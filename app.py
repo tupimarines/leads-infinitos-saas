@@ -52,10 +52,12 @@ def get_db_connection():
 
 
 def init_db() -> None:
+    print("🔄 Iniciando migração do banco de dados...")
     conn = get_db_connection()
     cur = conn.cursor()
     
     # Tabela de usuários
+    print("➡️ Verificando tabela users...")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -69,6 +71,7 @@ def init_db() -> None:
     )
     
     # Adicionar coluna is_admin se não existir (migração)
+    print("➡️ Adicionando coluna is_admin se necessário...")
     cur.execute(
         """
         ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
