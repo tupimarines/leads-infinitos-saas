@@ -1491,7 +1491,7 @@ Atenciosamente,
 Equipe Leads Infinitos"""
     
     # Enviar em thread separada para não bloquear
-    threading.Thread(target=send_async_email, args=(app._get_current_object(), msg)).start()
+    threading.Thread(target=send_async_email, args=(app, msg)).start()
 
 def send_welcome_email(to_email, password):
     """Envia email de boas-vindas com credenciais"""
@@ -1513,7 +1513,7 @@ Atenciosamente,
 Equipe Leads Infinitos"""
 
     # Enviar em thread separada
-    threading.Thread(target=send_async_email, args=(app._get_current_object(), msg)).start()
+    threading.Thread(target=send_async_email, args=(app, msg)).start()
 
 
 
