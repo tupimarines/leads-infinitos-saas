@@ -1487,11 +1487,17 @@ def scrape():
         flash("Você não possui uma licença ativa. Por favor, adquira uma licença para continuar.", "error")
         return redirect(url_for("index"))
     
-    # Converter purchase_date para datetime
+    # Converter purchase_date para datetime (pode já ser datetime do banco)
     from datetime import datetime
-    subscription_date = datetime.fromisoformat(active_license.purchase_date.replace('Z', '+00:00'))
-    if subscription_date.tzinfo is not None:
-        subscription_date = subscription_date.replace(tzinfo=None)  # Remove timezone info
+    subscription_date = active_license.purchase_date
+    
+    # Se for string, converter
+    if isinstance(subscription_date, str):
+        subscription_date = datetime.fromisoformat(subscription_date.replace('Z', '+00:00'))
+    
+    # Remover timezone info se presente
+    if hasattr(subscription_date, 'tzinfo') and subscription_date.tzinfo is not None:
+        subscription_date = subscription_date.replace(tzinfo=None)
     
     # Calcular uso mensal
     cycle_info = ScrapingJob.get_monthly_lead_count(current_user.id, subscription_date)
