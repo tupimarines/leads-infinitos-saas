@@ -1,0 +1,109 @@
+services:
+  redis:
+    image: "redis:alpine"
+    container_name: "leads_infinitos_redis"
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: always
+    healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  db:
+    image: postgres:15-alpine
+    container_name: "leads_infinitos_postgres"
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "devpassword"
+      POSTGRES_DB: "leads_infinitos"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    container_name: "leads_infinitos_web"
+    command: sh -c "python -c 'from app import init_db; init_db()' && gunicorn -b 0.0.0.0:8000 --timeout 120 --workers 2 app:app"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=devpassword
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: always
+
+  worker:
+    build: .
+    container_name: "leads_infinitos_worker"
+    command: python worker.py
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - MEGA_API_URL=${MEGA_API_URL}
+      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+      - APIFY_TOKEN=${APIFY_TOKEN}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: always
+
+  sender:
+    build: .
+    container_name: "leads_infinitos_sender"
+    command: python worker_sender.py
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - MEGA_API_URL=${MEGA_API_URL}
+      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+      - APIFY_TOKEN=${APIFY_TOKEN}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: always
+
+volumes:
+  redis_data:
+  postgres_data:
+
