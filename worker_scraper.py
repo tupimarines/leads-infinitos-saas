@@ -23,7 +23,7 @@ def get_db_connection():
     )
     return conn
 
-def update_job_status(job_id, status, progress=None, current_location=None, results_path=None, error_message=None):
+def update_job_status(job_id, status, progress=None, current_location=None, results_path=None, error_message=None, lead_count=None):
     """Updates job status in the database safely from the worker"""
     conn = get_db_connection()
     try:
@@ -45,6 +45,10 @@ def update_job_status(job_id, status, progress=None, current_location=None, resu
         if error_message is not None:
             update_fields.append("error_message = %s")
             params.append(error_message)
+        
+        if lead_count is not None:
+            update_fields.append("lead_count = %s")
+            params.append(lead_count)
 
         if status == 'running':
              pass 
@@ -118,7 +122,19 @@ def run_scraper_task(job_id: int):
         # 5. Conclusão
         if results and len(results) > 0:
             final_path = results[0].get('csv_path', '')
-            update_job_status(job_id, 'completed', progress=100, results_path=final_path)
+            
+            # Count leads from CSV
+            lead_count = 0
+            if os.path.exists(final_path):
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(final_path)
+                    lead_count = len(df)
+                    print(f"Counted {lead_count} leads from CSV: {final_path}")
+                except Exception as e:
+                    print(f"Warning: Could not count leads from CSV: {e}")
+            
+            update_job_status(job_id, 'completed', progress=100, results_path=final_path, lead_count=lead_count)
         else:
             update_job_status(job_id, 'failed', error_message="Nenhum resultado encontrado.")
 

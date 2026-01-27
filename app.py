@@ -181,10 +181,34 @@ def init_db() -> None:
             current_location TEXT,
             results_path TEXT,
             error_message TEXT,
+            lead_count INTEGER DEFAULT 0,
             started_at TIMESTAMP,
             completed_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        """
+    )
+    
+    # Adicionar coluna lead_count se ainda não existir (compatibilidade com DBs existentes)
+    cur.execute(
+        """
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='scraping_jobs' AND column_name='lead_count'
+            ) THEN
+                ALTER TABLE scraping_jobs ADD COLUMN lead_count INTEGER DEFAULT 0;
+            END IF;
+        END $$;
+        """
+    )
+    
+    # Criar índice para queries de agregação mensal
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scraping_jobs_user_date 
+        ON scraping_jobs(user_id, created_at);
         """
     )
 
@@ -1163,6 +1187,58 @@ class ScrapingJob:
             rows = cur.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+    
+    @staticmethod
+    def get_monthly_lead_count(user_id: int, subscription_date: datetime) -> dict:
+        """
+        Retorna leads usados no ciclo mensal atual baseado em purchase_date
+        
+        Args:
+            user_id: ID do usuário
+            subscription_date: Data de compra da licença (purchase_date)
+        
+        Returns:
+            {
+                'used': int,           # Leads usados no ciclo atual
+                'cycle_start': datetime,
+                'cycle_end': datetime
+            }
+        """
+        from datetime import datetime, timedelta
+        
+        # Calcular quantos meses (ciclos de 30 dias) passaram desde a assinatura
+        today = datetime.now()
+        days_since_purchase = (today - subscription_date).days
+        months_elapsed = days_since_purchase // 30
+        
+        # Ciclo atual: purchase_date + (30 * months_elapsed) dias
+        cycle_start = subscription_date + timedelta(days=30 * months_elapsed)
+        cycle_end = cycle_start + timedelta(days=30)
+        
+        # Se hoje < cycle_start (edge case), estamos no ciclo anterior
+        if today < cycle_start:
+            months_elapsed -= 1
+            cycle_start = subscription_date + timedelta(days=30 * months_elapsed)
+            cycle_end = cycle_start + timedelta(days=30)
+        
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(lead_count), 0) as total
+                FROM scraping_jobs
+                WHERE user_id = %s
+                  AND status = 'completed'
+                  AND created_at >= %s
+                  AND created_at < %s
+            """, (user_id, cycle_start, cycle_end))
+            used = cur.fetchone()[0]
+        conn.close()
+        
+        return {
+            'used': used,
+            'cycle_start': cycle_start,
+            'cycle_end': cycle_end
+        }
 
 
 def run_scraping_job(job_id: int):
@@ -1401,6 +1477,39 @@ def scrape():
     
     # Limitar a 15 localizações
     localizacoes = [loc.strip() for loc in localizacoes if loc.strip()][:15]
+    
+    # VALIDAÇÃO: Limite mensal de 1500 leads
+    # Buscar licença ativa do usuário
+    licenses = License.get_by_user_id(current_user.id)
+    active_license = next((l for l in licenses if l.status == 'active'), None)
+    
+    if not active_license:
+        flash("Você não possui uma licença ativa. Por favor, adquira uma licença para continuar.", "error")
+        return redirect(url_for("index"))
+    
+    # Converter purchase_date para datetime
+    from datetime import datetime
+    subscription_date = datetime.fromisoformat(active_license.purchase_date.replace('Z', '+00:00'))
+    if subscription_date.tzinfo is not None:
+        subscription_date = subscription_date.replace(tzinfo=None)  # Remove timezone info
+    
+    # Calcular uso mensal
+    cycle_info = ScrapingJob.get_monthly_lead_count(current_user.id, subscription_date)
+    
+    # Validar limite (1500 leads por mês)
+    MONTHLY_LIMIT = 1500
+    requested_leads = total
+    
+    if cycle_info['used'] + requested_leads > MONTHLY_LIMIT:
+        available = MONTHLY_LIMIT - cycle_info['used']
+        renewal_date = cycle_info['cycle_end'].date().isoformat()
+        
+        flash(
+            f"Limite mensal atingido! Você já usou {cycle_info['used']} de {MONTHLY_LIMIT} leads neste ciclo. "
+            f"Disponível: {available} leads. Renovação em {renewal_date}.",
+            "error"
+        )
+        return redirect(url_for("index"))
     
     # Create background job
     job_id = ScrapingJob.create(
@@ -2870,36 +2979,41 @@ def get_dashboard_overview():
             )
             total_campaigns = cur.fetchone()['total']
             
-            # Campanhas ativas
+            # Campanhas ativas (status='running')
             cur.execute(
                 "SELECT COUNT(*) as active FROM campaigns WHERE user_id = %s AND status = 'running'",
                 (current_user.id,)
             )
             active_campaigns = cur.fetchone()['active']
             
-            # Leads extraídos hoje
+            # Leads extraídos HOJE (de scraping_jobs - CORRIGIDO)
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(lead_count), 0) as total
+                FROM scraping_jobs
+                WHERE user_id = %s 
+                  AND status = 'completed'
+                  AND DATE(created_at) = CURRENT_DATE
+                """,
+                (current_user.id,)
+            )
+            today_leads = cur.fetchone()['total']
+            
+            # Mensagens enviadas NO MÊS (ALTERADO de hoje para mês)
             cur.execute(
                 """
                 SELECT COUNT(*) as count FROM campaign_leads cl
                 JOIN campaigns c ON cl.campaign_id = c.id
-                WHERE c.user_id = %s AND DATE(c.created_at) = CURRENT_DATE
+                WHERE c.user_id = %s 
+                  AND EXTRACT(MONTH FROM cl.sent_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+                  AND EXTRACT(YEAR FROM cl.sent_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+                  AND cl.status = 'sent'
                 """,
                 (current_user.id,)
             )
-            today_leads = cur.fetchone()['count']
+            month_sent = cur.fetchone()['count']
             
-            # Mensagens enviadas hoje
-            cur.execute(
-                """
-                SELECT COUNT(*) as count FROM campaign_leads cl
-                JOIN campaigns c ON cl.campaign_id = c.id
-                WHERE c.user_id = %s AND DATE(cl.sent_at) = CURRENT_DATE AND cl.status = 'sent'
-                """,
-                (current_user.id,)
-            )
-            today_sent = cur.fetchone()['count']
-            
-            # Taxa de sucesso (hoje)
+            # Taxa de sucesso NO MÊS (ALTERADO de hoje para mês)
             cur.execute(
                 """
                 SELECT 
@@ -2907,7 +3021,9 @@ def get_dashboard_overview():
                     COUNT(CASE WHEN cl.status IN ('failed', 'invalid') THEN 1 END) as failed
                 FROM campaign_leads cl
                 JOIN campaigns c ON cl.campaign_id = c.id
-                WHERE c.user_id = %s AND DATE(cl.sent_at) = CURRENT_DATE
+                WHERE c.user_id = %s 
+                  AND EXTRACT(MONTH FROM cl.sent_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+                  AND EXTRACT(YEAR FROM cl.sent_at) = EXTRACT(YEAR FROM CURRENT_DATE)
                 """,
                 (current_user.id,)
             )
@@ -2924,27 +3040,15 @@ def get_dashboard_overview():
             )
             total_deals = cur.fetchone()['total']
             
-            # Taxa de conversão geral (todas as campanhas)
-            cur.execute(
-                """
-                SELECT 
-                    COALESCE(SUM(c.closed_deals), 0) as total_deals,
-                    COUNT(CASE WHEN cl.status = 'sent' THEN 1 END) as total_sent
-                FROM campaigns c
-                LEFT JOIN campaign_leads cl ON cl.campaign_id = c.id
-                WHERE c.user_id = %s
-                """,
-                (current_user.id,)
-            )
-            conversion_data = cur.fetchone()
-            overall_conversion = round((conversion_data['total_deals'] / conversion_data['total_sent'] * 100), 1) if conversion_data['total_sent'] > 0 else 0
+            # Taxa de conversão geral (usando mensagens mensais)
+            overall_conversion = round((total_deals / month_sent * 100), 1) if month_sent > 0 else 0
         
         conn.close()
         
         return {
             "today_leads_extracted": today_leads,
-            "today_messages_sent": today_sent,
-            "today_success_rate": success_rate,
+            "today_messages_sent": month_sent,  # Nome mantido para compatibilidade frontend
+            "today_success_rate": success_rate,  # Nome mantido para compatibilidade frontend
             "total_closed_deals": total_deals,
             "overall_conversion_rate": overall_conversion,
             "active_campaigns": active_campaigns,
