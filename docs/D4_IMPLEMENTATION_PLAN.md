@@ -168,24 +168,25 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
 
 #### 📋 Fluxo Principal do Usuário (Single User)
 
-- [ ] **1. Compra Hotmart (Simulação)**
-  - Simular webhook de compra aprovada via Postman/Insomnia.
-  - Verificar se usuário foi criado no banco.
-  - Verificar se licença foi atribuída corretamente.
+- [x] **1. Compra Hotmart (Simulação)**
+  - [x] Simular webhook de compra aprovada via Postman/Insomnia.
+  - [x] Verificar se usuário foi criado no banco.
+  - [x] Verificar se licença foi atribuída corretamente.
   
-- [ ] **2. Acesso Inicial & Reset de Senha**
-  - Acessar `leads infinitos` (login).
-  - Tentar login com senha padrão (se houver) ou usar "Esqueci minha senha".
-  - Verificar recebimento do token de reset.
+- [x] **2. Acesso Inicial & Reset de Senha**
+  - [x] Acessar `leads infinitos` (login).
+  - [x] Tentar login com senha padrão (se houver) ou usar "Esqueci minha senha".
+  - [x] Verificar recebimento do token de reset.
 
-- [ ] **3. Fluxo de Email SMTP**
-  - Confirmar recebimento do email de reset (SMTP configurado).
-  - Clicar no link e definir nova senha.
-  - Logar com nova senha.
+- [x] **3. Fluxo de Email SMTP**
+  - [x] Confirmar recebimento do email de reset (SMTP configurado).
+  - [x] Clicar no link e definir nova senha.
+  - [x] Logar com nova senha.
 
 - [ ] **4. Acesso ao Dashboard**
-  - Verificar se dashboard carrega zerado (primeiro acesso).
-  - Validar permissões de visualização.
+  - [x] Verificar se dashboard carrega zerado (primeiro acesso).
+  - [] Validar permissões de visualização.
+  - [] Verificar atualização do dashboard e percentual tx de sucesso
 
 - [ ] **5. Extração de Leads (Apify Integration)**
   - Criar novo Job de extração (Google Maps Scraper).

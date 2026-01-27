@@ -69,7 +69,8 @@ def run_scraper_task(job_id: int):
     Função executada pelo RQ Worker.
     Substitui a antiga 'run_scraping_job' baseada em threads.
     """
-    print(f"Starting job {job_id}")
+    print(f"🚀 [WORKER] Received task for Job {job_id}")
+    print(f"Start job {job_id}")
     
     # 1. Ler Job do Banco
     conn = get_db_connection()

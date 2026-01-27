@@ -379,6 +379,8 @@ class License:
         
         if license_type == 'semestral':
             expires_at = purchase_dt + timedelta(days=180)
+        elif license_type in ['starter', 'pro', 'scale']:
+            expires_at = purchase_dt + timedelta(days=365) # Assumindo validade anual conforme screenshot
         else:  # anual
             expires_at = purchase_dt + timedelta(days=365)
         
@@ -716,10 +718,22 @@ class HotmartService:
             
             # 2. Determinar Tipo de Licença (Preço)
             price_value = purchase.get('price', {}).get('value', 0)
-            if price_value >= 287.00:
-                license_type = 'anual'
+            
+            # Lógica de preços baseada nos planos (Starter=197, Pro=297, Scale=397)
+            # Usando faixas seguras considerando possíveis descontos pequenos, 
+            # mas para cupons de 99% precisariamos de outra validação (TODO: Validar oferta/produto)
+            # Por enquanto, assumindo faixas de preço padrão ou fallback para Starter
+            
+            if price_value >= 390.00:
+                license_type = 'scale'
+            elif price_value >= 290.00:
+                license_type = 'pro'
+            elif price_value > 50.00: # Se pagou mais de 50, provavelmente é Starter/Pro c/ desconto ou Starter
+                 license_type = 'starter'
             else:
-                license_type = 'semestral'
+                 # Fallback para compras com muito desconto (ex: 99% off) ou testes
+                 # O usuário mencionou ter comprado "Starter" com cupom de 99%
+                 license_type = 'starter'
                 
             # 3. Verificar se licença já existe (Idempotência)
             existing_licenses = License.get_by_user_id(user.id)
@@ -1389,11 +1403,37 @@ def scrape():
         total_results=total
     )
     
+    # Validar API Token antes de enfileirar
+    if not os.environ.get('APIFY_TOKEN'):
+        flash("Erro de Configuração: APIFY_TOKEN não encontrado. Contate o suporte ou configure no arquivo .env/Dokploy.", "error")
+        # Marcar job como falho imediatamente para não ficar 'pending' para sempre
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE scraping_jobs SET status = 'failed', error_message = %s WHERE id = %s", 
+                        ('APIFY_TOKEN não configurado', job_id))
+        conn.commit()
+        conn.close()
+        return redirect(url_for("jobs"))
+
     # Start job in background (Queue)
-    from worker_scraper import run_scraper_task
-    q.enqueue(run_scraper_task, job_id)
-    
-    flash(f"Scraping enfileirado! Job ID: {job_id}. Você pode acompanhar o progresso na página de jobs.")
+    try:
+        from worker_scraper import run_scraper_task
+        q.enqueue(run_scraper_task, job_id)
+        flash(f"Scraping enfileirado! Job ID: {job_id}. Você pode acompanhar o progresso na página de jobs.")
+    except Exception as e:
+        print(f"❌ Erro ao enfileirar job no Redis: {e}")
+        flash(f"Erro ao iniciar o job: {str(e)}", "error")
+        # Tentar marcar como falho no banco
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("UPDATE scraping_jobs SET status = 'failed', error_message = %s WHERE id = %s", 
+                            (f'Erro de Fila: {str(e)}', job_id))
+            conn.commit()
+            conn.close()
+        exceptLink:
+            pass
+
     return redirect(url_for("jobs"))
 
 
