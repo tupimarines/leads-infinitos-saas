@@ -134,7 +134,57 @@ def run_scraper_task(job_id: int):
                 except Exception as e:
                     print(f"Warning: Could not count leads from CSV: {e}")
             
+            # Atualizar job
             update_job_status(job_id, 'completed', progress=100, results_path=final_path, lead_count=lead_count)
+            
+            # Registrar no histórico imutável (anti-bypass de limite)
+            if lead_count > 0:
+                try:
+                    from datetime import datetime, timedelta
+                    
+                    # Buscar licença do usuário para calcular ciclo
+                    conn = get_db_connection()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT purchase_date FROM licenses 
+                            WHERE user_id = %s AND status = 'active'
+                            ORDER BY created_at DESC LIMIT 1
+                        """, (user_id,))
+                        license_row = cur.fetchone()
+                        
+                        if license_row:
+                            purchase_date = license_row[0]
+                            
+                            # Converter para datetime se for string
+                            if isinstance(purchase_date, str):
+                                purchase_date = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
+                            
+                            # Remover timezone
+                            if hasattr(purchase_date, 'tzinfo') and purchase_date.tzinfo is not None:
+                                purchase_date = purchase_date.replace(tzinfo=None)
+                            
+                            # Calcular ciclo atual
+                            today = datetime.now()
+                            days_since_purchase = (today - purchase_date).days
+                            months_elapsed = days_since_purchase // 30
+                            
+                            cycle_start = purchase_date + timedelta(days=30 * months_elapsed)
+                            cycle_end = cycle_start + timedelta(days=30)
+                            
+                            # Inserir no histórico imutável
+                            cur.execute("""
+                                INSERT INTO monthly_usage_history 
+                                (user_id, cycle_start, cycle_end, leads_extracted, job_id)
+                                VALUES (%s, %s, %s, %s, %s)
+                            """, (user_id, cycle_start.date(), cycle_end.date(), lead_count, job_id))
+                            conn.commit()
+                            print(f"✅ Registered {lead_count} leads in monthly usage history (cycle {cycle_start.date()} to {cycle_end.date()})")
+                        else:
+                            print(f"⚠️ No active license found for user {user_id}, skipping usage history")
+                    
+                    conn.close()
+                except Exception as e:
+                    print(f"⚠️ Error recording monthly usage history: {e}")
         else:
             update_job_status(job_id, 'failed', error_message="Nenhum resultado encontrado.")
 

@@ -211,6 +211,29 @@ def init_db() -> None:
         ON scraping_jobs(user_id, created_at);
         """
     )
+    
+    # Tabela de histórico imutável de uso mensal (anti-bypass de limite)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS monthly_usage_history (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            cycle_start DATE NOT NULL,
+            cycle_end DATE NOT NULL,
+            leads_extracted INTEGER NOT NULL DEFAULT 0,
+            job_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    
+    # Índice para queries de limite mensal
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_monthly_usage_user_cycle 
+        ON monthly_usage_history(user_id, cycle_start);
+        """
+    )
 
     # Tabela de instâncias do WhatsApp
     cur.execute(
@@ -1192,6 +1215,7 @@ class ScrapingJob:
     def get_monthly_lead_count(user_id: int, subscription_date: datetime) -> dict:
         """
         Retorna leads usados no ciclo mensal atual baseado em purchase_date
+        AGORA CONSULTA O HISTÓRICO IMUTÁVEL (anti-bypass por deleção de jobs)
         
         Args:
             user_id: ID do usuário
@@ -1199,7 +1223,7 @@ class ScrapingJob:
         
         Returns:
             {
-                'used': int,           # Leads usados no ciclo atual
+                'used': int,           # Leads usados no ciclo atual  
                 'cycle_start': datetime,
                 'cycle_end': datetime
             }
@@ -1223,14 +1247,14 @@ class ScrapingJob:
         
         conn = get_db_connection()
         with conn.cursor() as cur:
+            # QUERY IMUTÁVEL: Consulta histórico ao invés de scraping_jobs
+            # Isso impede bypass por deleção de jobs
             cur.execute("""
-                SELECT COALESCE(SUM(lead_count), 0) as total
-                FROM scraping_jobs
+                SELECT COALESCE(SUM(leads_extracted), 0) as total
+                FROM monthly_usage_history
                 WHERE user_id = %s
-                  AND status = 'completed'
-                  AND created_at >= %s
-                  AND created_at < %s
-            """, (user_id, cycle_start, cycle_end))
+                  AND cycle_start = %s
+            """, (user_id, cycle_start.date()))
             used = cur.fetchone()[0]
         conn.close()
         
