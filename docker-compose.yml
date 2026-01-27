@@ -30,17 +30,6 @@ services:
     build: .
     container_name: "leads_infinitos_worker"
     command: python worker.py
-    env_file:
-      - .env
-    environment:
-      - REDIS_URL=${REDIS_URL}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - MEGA_API_URL=${MEGA_API_URL}
-      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
-      - APIFY_TOKEN=${APIFY_TOKEN}
     volumes:
       - .:/app
     env_file:
