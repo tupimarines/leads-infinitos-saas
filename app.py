@@ -1431,7 +1431,7 @@ def scrape():
                             (f'Erro de Fila: {str(e)}', job_id))
             conn.commit()
             conn.close()
-        exceptLink:
+        except:
             pass
 
     return redirect(url_for("jobs"))
