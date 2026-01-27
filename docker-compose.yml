@@ -23,6 +23,8 @@ services:
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
     restart: always
+    networks:
+      - dokploy-network
 
   worker:
     build: .
@@ -39,12 +41,32 @@ services:
       - MEGA_API_URL=${MEGA_API_URL}
       - MEGA_API_TOKEN=${MEGA_API_TOKEN}
       - APIFY_TOKEN=${APIFY_TOKEN}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - MEGA_API_URL=${MEGA_API_URL}
+      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+      - APIFY_TOKEN=${APIFY_TOKEN}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - HOTMART_HOTTOK=${HOTMART_HOTTOK}
       - HOTMART_PRODUCT_ID=${HOTMART_PRODUCT_ID}
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
     restart: always
+    networks:
+      - dokploy-network
 
   sender:
     build: .
