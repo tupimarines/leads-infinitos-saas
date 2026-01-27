@@ -48,11 +48,6 @@ services:
       - HOTMART_PRODUCT_ID=${HOTMART_PRODUCT_ID}
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
-    depends_on:
-      redis:
-        condition: service_healthy
-      db:
-        condition: service_healthy
     restart: always
     networks:
       - dokploy-network
