@@ -227,6 +227,8 @@ def init_db() -> None:
     )
 
     # Adicionar coluna sent_today se não existir (migração)
+    cur.execute(
+        """
         ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sent_today INTEGER DEFAULT 0;
         """
     )
