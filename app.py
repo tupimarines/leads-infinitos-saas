@@ -227,9 +227,14 @@ def init_db() -> None:
     )
 
     # Adicionar coluna sent_today se não existir (migração)
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sent_today INTEGER DEFAULT 0;
+        """
+    )
+
+    # Adicionar coluna scheduled_start se não existir (migração)
     cur.execute(
         """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sent_today INTEGER DEFAULT 0;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMP;
         """
     )
     
