@@ -64,11 +64,14 @@ services:
     env_file:
       - .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=devpassword
+      - REDIS_URL=${REDIS_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - MEGA_API_URL=${MEGA_API_URL}
+      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+      - APIFY_TOKEN=${APIFY_TOKEN}
     depends_on:
       redis:
         condition: service_healthy
@@ -85,13 +88,14 @@ services:
     env_file:
       - .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=devpassword
+      - REDIS_URL=${REDIS_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
       - MEGA_API_URL=${MEGA_API_URL}
       - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+      - APIFY_TOKEN=${APIFY_TOKEN}
     depends_on:
       redis:
         condition: service_healthy
