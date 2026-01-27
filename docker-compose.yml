@@ -23,6 +23,8 @@ services:
       - HOTMART_PRODUCT_ID=${HOTMART_PRODUCT_ID}
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
+    volumes:
+      - storage_data:/app/storage
     restart: always
     networks:
       - dokploy-network
@@ -32,7 +34,7 @@ services:
     container_name: "leads_infinitos_worker"
     command: python worker.py
     volumes:
-      - .:/app
+      - storage_data:/app/storage
     env_file:
       - .env
     environment:
@@ -57,6 +59,8 @@ services:
     build: .
     container_name: "leads_infinitos_sender"
     command: python worker_sender.py
+    volumes:
+      - storage_data:/app/storage
     env_file:
       - .env
     environment:
@@ -80,3 +84,7 @@ services:
 networks:
   dokploy-network:
     external: true
+
+volumes:
+  storage_data:
+    driver: local

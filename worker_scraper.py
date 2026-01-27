@@ -94,6 +94,10 @@ def run_scraper_task(job_id: int):
         user_id = job['user_id']
         
         queries = [f"{keyword} in {loc}" for loc in locations]
+        
+        # 3.1. Ensure STORAGE_ROOT exists (fix for FileNotFoundError)
+        os.makedirs(STORAGE_ROOT, exist_ok=True)
+        
         user_base_dir = os.path.join(STORAGE_ROOT, str(user_id), "GMaps Data")
         
         # 4. Run Scraper
