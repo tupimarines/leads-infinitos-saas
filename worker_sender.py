@@ -128,6 +128,11 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
         
         if response.status_code == 200:
             data = response.json()
+            
+            # Handle list response: [{ "exists": true, "jid": "..." }]
+            if isinstance(data, list) and len(data) > 0:
+                data = data[0]
+                
             # Mega API response: { "exists": true, "jid": "..." }
             exists = data.get('exists', False)
             correct_jid = data.get('jid', phone_jid) # Use API JID if available, else fallback
