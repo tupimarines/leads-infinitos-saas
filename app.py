@@ -2920,6 +2920,12 @@ def get_whatsapp_status(instance_key):
             is_connected = True
         elif result.get('status') == 'open':
             is_connected = True
+        # NEW: Handle nested instance object from payload: {'instance': {'status': 'connected'}}
+        elif isinstance(result.get('instance'), dict):
+             status_val = result['instance'].get('status')
+             if status_val in ['connected', 'CONNECTED', 'open']:
+                 is_connected = True
+
             
         # If there's an error flag, override to disconnected
         if result.get('error'):
