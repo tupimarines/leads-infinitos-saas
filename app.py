@@ -566,40 +566,13 @@ class CampaignLead:
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
+                # Incluir status='pending' explicitamente para garantir processamento pelo worker
                 args_str = ','.join(
-                    cur.mogrify("(%s, %s, %s, %s)", 
-                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'))).decode('utf-8') 
+                    cur.mogrify("(%s, %s, %s, %s, %s)", 
+                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending')).decode('utf-8') 
                     for l in leads
                 )
-                cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link) VALUES " + args_str)
-            conn.commit()
-        except Exception as e:
-            print(f"Erro ao adicionar leads: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-
-
-class CampaignLead:
-    @staticmethod
-    def add_leads(campaign_id: int, leads: list[dict]):
-        """
-        Adiciona leads à campanha em lote.
-        leads = [{'phone': '...', 'name': '...', 'whatsapp_link': '...' (opcional)}]
-        """
-        if not leads:
-            return
-            
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                args_str = ','.join(
-                    cur.mogrify("(%s, %s, %s, %s)", 
-                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'))).decode('utf-8') 
-                    for l in leads
-                )
-                cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link) VALUES " + args_str)
+                cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link, status) VALUES " + args_str)
             conn.commit()
         except Exception as e:
             print(f"Erro ao adicionar leads: {e}")
