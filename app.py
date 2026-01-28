@@ -2671,15 +2671,20 @@ class WhatsappService:
             return None
 
     def restart_instance(self, instance_key: str) -> dict:
-        """Restarts WhatsApp instance connection"""
-        url = f"{self.base_url}/rest/instance/{instance_key}/restart"
-        print(f"🔄 [WhatsappService] Restarting {instance_key} via {url}")
+        """Restarts WhatsApp instance (via Logout)"""
+        # Mega API doesn't have /restart. Use /logout to force reconnection.
+        url = f"{self.base_url}/rest/instance/{instance_key}/logout"
+        print(f"🔄 [WhatsappService] Restarting (Logout) {instance_key} via {url}")
         
         try:
             response = requests.post(url, headers=self.headers, timeout=15)
             print(f"🔄 Restart API Status: {response.status_code}")
             print(f"🔄 Restart API Body: {response.text}")
             
+            # 401/404 might mean already logged out
+            if response.status_code in [401, 404]:
+                 return {"status": "success", "message": "Already logged out"}
+
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -2690,17 +2695,16 @@ class WhatsappService:
 
     def delete_instance(self, instance_key: str) -> dict:
         """Deletes WhatsApp instance"""
-        url = f"{self.base_url}/rest/instance/{instance_key}/delete"
-        print(f"🗑️ [WhatsappService] Deleting {instance_key} via {url}")
+        # Try DELETE verb first. If fail, log it.
+        # Some versions use POST /instance/delete/{key} or DELETE /instance/{key}
+        url = f"{self.base_url}/rest/instance/{instance_key}" 
+        print(f"🗑️ [WhatsappService] Deleting {instance_key} via DELETE {url}")
         
         try:
-            # According to some docs, delete might need params like logout or different method
-            # Let's try simple POST first
-            response = requests.post(url, headers=self.headers, timeout=15)
+            response = requests.delete(url, headers=self.headers, timeout=15)
             print(f"🗑️ Delete API Status: {response.status_code}")
             print(f"🗑️ Delete API Body: {response.text}")
             
-            # If 404, maybe it's already deleted? Treat as success?
             if response.status_code == 404:
                 return {"message": "Instance already deleted or not found"}
                 
@@ -2709,7 +2713,7 @@ class WhatsappService:
         except requests.exceptions.RequestException as e:
             print(f"❌ Error deleting instance: {e}")
             if e.response:
-                print(f"❌ Response: {e.response.text}")
+                 print(f"❌ Response: {e.response.text}")
             return {"error": str(e)}
 
 
