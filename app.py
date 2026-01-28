@@ -2658,6 +2658,10 @@ class WhatsappService:
             
             response.raise_for_status()
             data = response.json()
+            
+            # DEBUG: Log status payload to understand structure
+            print(f"🔍 [WhatsappService] Status Payload: {data}")
+
             # API might return a list [ {InstanceObject} ]
             if isinstance(data, list) and len(data) > 0:
                 return data[0]
