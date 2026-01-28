@@ -2606,25 +2606,36 @@ class WhatsappService:
             }
         }
 
+        print(f"🆕 [WhatsappService] Creating instance {instance_name} via {url}")
+        
         try:
             response = requests.post(url, params=params, json=payload, headers=self.headers, timeout=15)
+            # Log response body if error or just debug
+            if response.status_code != 200:
+                print(f"❌ Create API Status: {response.status_code}")
+                print(f"❌ Create API Body: {response.text}")
+                
             response.raise_for_status()
             
-            # Debug
-            print(f"Mega API Response: {response.text}")
+            print(f"✅ Create API Response: {response.text[:200]}") # Truncate for sanity
             
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error creating instance: {e}")
+            print(f"❌ Error creating instance: {e}")
             if e.response:
-                print(f"Response: {e.response.text}")
+                print(f"❌ Response: {e.response.text}")
             return None
 
     def get_qr_code(self, instance_key: str) -> dict:
         """Gets QR Code for the instance"""
         url = f"{self.base_url}/rest/instance/qrcode/{instance_key}"
+        print(f"📷 [WhatsappService] Getting QR for {instance_key} via {url}")
         try:
             response = requests.get(url, headers=self.headers, timeout=15)
+            if response.status_code != 200:
+                 print(f"❌ QR API Status: {response.status_code}")
+                 print(f"❌ QR API Body: {response.text}")
+            
             response.raise_for_status()
             try:
                 return response.json()
@@ -2632,14 +2643,19 @@ class WhatsappService:
                 # Some endpoints return raw strings or HTML
                 return {"data": response.text}
         except requests.exceptions.RequestException as e:
-            print(f"Error getting QR code: {e}")
+            print(f"❌ Error getting QR code: {e}")
             return None
 
     def get_status(self, instance_key: str) -> dict:
         """Gets instance connection status"""
         url = f"{self.base_url}/rest/instance/{instance_key}"
+        # print(f"🔍 [WhatsappService] Checking status for {instance_key}") # Too spammy if polling?
+        # Let's log only errors or significant events
         try:
             response = requests.get(url, headers=self.headers, timeout=10)
+            if response.status_code != 200:
+                 print(f"❌ Status API Error: {response.status_code} - {response.text}")
+            
             response.raise_for_status()
             data = response.json()
             # API might return a list [ {InstanceObject} ]
@@ -2647,34 +2663,50 @@ class WhatsappService:
                 return data[0]
             return data
         except requests.exceptions.RequestException as e:
-            print(f"Error getting status: {e}")
+            print(f"❌ Error getting status: {e}")
             return None
 
     def restart_instance(self, instance_key: str) -> dict:
         """Restarts WhatsApp instance connection"""
         url = f"{self.base_url}/rest/instance/{instance_key}/restart"
+        print(f"🔄 [WhatsappService] Restarting {instance_key} via {url}")
+        
         try:
             response = requests.post(url, headers=self.headers, timeout=15)
+            print(f"🔄 Restart API Status: {response.status_code}")
+            print(f"🔄 Restart API Body: {response.text}")
+            
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error restarting instance: {e}")
+            print(f"❌ Error restarting instance: {e}")
             if e.response:
-                print(f"Response: {e.response.text}")
-            return None
+                print(f"❌ Response: {e.response.text}")
+            return {"error": str(e)}
 
     def delete_instance(self, instance_key: str) -> dict:
         """Deletes WhatsApp instance"""
         url = f"{self.base_url}/rest/instance/{instance_key}/delete"
+        print(f"🗑️ [WhatsappService] Deleting {instance_key} via {url}")
+        
         try:
+            # According to some docs, delete might need params like logout or different method
+            # Let's try simple POST first
             response = requests.post(url, headers=self.headers, timeout=15)
+            print(f"🗑️ Delete API Status: {response.status_code}")
+            print(f"🗑️ Delete API Body: {response.text}")
+            
+            # If 404, maybe it's already deleted? Treat as success?
+            if response.status_code == 404:
+                return {"message": "Instance already deleted or not found"}
+                
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error deleting instance: {e}")
+            print(f"❌ Error deleting instance: {e}")
             if e.response:
-                print(f"Response: {e.response.text}")
-            return None
+                print(f"❌ Response: {e.response.text}")
+            return {"error": str(e)}
 
 
 @app.route("/whatsapp")
@@ -2909,6 +2941,8 @@ def get_whatsapp_status(instance_key):
 @login_required
 def restart_whatsapp_instance(instance_key):
     """API to restart instance connection"""
+    print(f"🔄 Restarting instance {instance_key} for user {current_user.id}...")
+    
     # Verify ownership
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -2917,12 +2951,14 @@ def restart_whatsapp_instance(instance_key):
     conn.close()
     
     if not row or row[1] != current_user.id:
+        print(f"❌ Unauthorized restart attempt for {instance_key}")
         return {"error": "Unauthorized"}, 403
         
     service = WhatsappService()
     result = service.restart_instance(instance_key)
     
-    # Mega API returns success even if restart is just queued
+    print(f"🔄 Restart Result: {result}")
+    
     if result and not result.get('error'):
         return {"status": "success", "message": "Restart command sent"}
         
@@ -2933,6 +2969,8 @@ def restart_whatsapp_instance(instance_key):
 @login_required
 def delete_whatsapp_instance(instance_key):
     """API to delete instance"""
+    print(f"🗑️ Deleting instance {instance_key} for user {current_user.id}...")
+    
     # Verify ownership
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -2941,14 +2979,17 @@ def delete_whatsapp_instance(instance_key):
     conn.close()
     
     if not row or row[1] != current_user.id:
+        print(f"❌ Unauthorized delete attempt for {instance_key}")
         return {"error": "Unauthorized"}, 403
         
     service = WhatsappService()
     
     # 1. Delete from Mega API
     result = service.delete_instance(instance_key)
+    print(f"🗑️ Mega API Delete Result: {result}")
     
     # 2. Delete from DB
+    print(f"🗑️ Removing from database...")
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute("DELETE FROM instances WHERE id = %s", (row[0],))
