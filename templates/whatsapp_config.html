@@ -204,6 +204,12 @@
             } else if (data.instance_data && (data.instance_data.phone_connected || data.instance_data.status === 'open')) {
                 // Compatibility with other versions/Evolution
                 isConnected = true;
+            } else if (data.phone_connected === true) {
+                // Direct field
+                isConnected = true;
+            } else if (data.status === 'CONNECTED' || data.status === 'open') {
+                // Status field variations
+                isConnected = true;
             }
 
             updateStatusUI(isConnected ? 'connected' : 'disconnected');
@@ -211,6 +217,9 @@
             if (isConnected) {
                 showMessage('Conexão ativa!', 'success');
                 qrContainer.innerHTML = '<div style="color: #19c37d; font-size: 40px;">✓</div>';
+
+                // Reload page after successful connection to update all states
+                setTimeout(() => location.reload(), 1500);
             } else {
                 showMessage('Instância desconectada.', 'error');
             }

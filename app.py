@@ -2836,24 +2836,48 @@ def get_whatsapp_status(instance_key):
     result = service.get_status(instance_key)
     
     if result:
-        # Update DB status if possible
-        # Mega API result like: {"instance_key": "...", "phone_connected": true/false, "user": {...}}
-        # We can try to infer status
-        is_connected = result.get('instance_data', {}).get('phone_connected') 
-        # Note: Structure might vary, trusting 'phone_connected' or analyzing payload.
-        # Fallback: check if result has 'error' or 'status' field.
+        # Comprehensive status detection logic (matching admin_check_whatsapp_status)
+        # Mega API Structure variations:
+        # 1. { "instance_data": { "phone_connected": true, ... } }
+        # 2. { "phone_connected": true, ... } (sometimes top-level)
+        # 3. { "status": "CONNECTED" or "open" }
+        # 4. [ { ... } ] (Array if looking up by key)
+        
+        is_connected = False
+        
+        # Handle array response
+        if isinstance(result, list) and len(result) > 0:
+            result = result[0]
+            
+        # Check various possible status indicators
+        if result.get('instance_data'):
+            is_connected = result['instance_data'].get('phone_connected', False)
+        elif 'phone_connected' in result:
+            is_connected = result.get('phone_connected', False)
+        elif result.get('status') == 'CONNECTED':
+            is_connected = True
+        elif result.get('status') == 'open':
+            is_connected = True
+            
+        # If there's an error flag, override to disconnected
+        if result.get('error'):
+            is_connected = False
         
         new_status = 'connected' if is_connected else 'disconnected'
         
-        # Also Update DB
+        # Update DB with new status
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("UPDATE instances SET status = %s WHERE id = %s", (new_status, row[0]))
+            cur.execute("UPDATE instances SET status = %s, updated_at = NOW() WHERE id = %s", (new_status, row[0]))
         conn.commit()
         conn.close()
         
+        # Debug logging
+        print(f"Status checked for instance {instance_key} (User {current_user.id}): {new_status} (Connected: {is_connected})")
+        
         return result
     return {"error": "Failed to get status"}, 500
+
 
 
 @app.route("/api/campaigns/<int:campaign_id>/stats")
