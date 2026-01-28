@@ -162,14 +162,34 @@ def send_message(instance_name, phone_jid, message):
         }
     }
     
+    # DETAILED LOGGING FOR DEBUGGING
+    print(f"=== SENDING MESSAGE ===")
+    print(f"URL: {url}")
+    print(f"To: {phone_jid}")
+    print(f"Message: {message}")
+    print(f"Payload: {json.dumps(payload, indent=2)}")
+    
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        # LOG RESPONSE
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Body: {response.text}")
+        
         if response.status_code == 200:
-            return True, response.json() # Mega API returns 200 for success
+            response_data = response.json()
+            print(f"✅ Message sent successfully!")
+            print(f"Response Data: {json.dumps(response_data, indent=2)}")
+            return True, response_data
         else:
-            return False, f"{response.status_code} - {response.text}"
+            error_msg = f"{response.status_code} - {response.text}"
+            print(f"❌ Failed to send message: {error_msg}")
+            return False, error_msg
     except Exception as e:
-        return False, str(e)
+        error_msg = str(e)
+        print(f"❌ Exception sending message: {error_msg}")
+        return False, error_msg
+
 
 def process_campaigns():
     """
