@@ -234,7 +234,11 @@ def process_campaigns():
                     campaign['status'] = 'running'  # Update local dict for this iteration
                     print(f"Campaign {campaign['id']} auto-started (was scheduled)")
             
+            # Heartbeat (verbose) or just informative?
+            # print(f"❤️ Worker Heartbeat: Checking {len(campaigns)} active campaigns...")
+            
             if not campaigns:
+                # print("No active campaigns. Sleeping...")
                 time.sleep(5)
                 continue
                 
