@@ -108,12 +108,12 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
     """
     Verifica se o número existe no WhatsApp usando Mega API.
     GET /rest/instance/isOnWhatsApp/{nome}?jid={jid}
+    Retorna (exists, correct_jid)
     """
     if os.environ.get('MOCK_SENDER'):
         print(f"[MOCK] Checked existence for {phone_jid}: True")
-        # Simulate API delay
         time.sleep(0.1)
-        return True
+        return True, phone_jid
 
     url = f"{MEGA_API_URL}/rest/instance/isOnWhatsApp/{instance_name}"
     headers = {
@@ -128,15 +128,17 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
         
         if response.status_code == 200:
             data = response.json()
-            # Mega API response matches: { "exists": true, "jid": "..." }
-            return data.get('exists', False)
+            # Mega API response: { "exists": true, "jid": "..." }
+            exists = data.get('exists', False)
+            correct_jid = data.get('jid', phone_jid) # Use API JID if available, else fallback
+            return exists, correct_jid
         else:
             print(f"Error checking WhatsApp existence: {response.status_code} - {response.text}")
-            return False # Assume false or handle error differently? Safe to assume false to avoid ban on non-existent numbers.
+            return False, None
             
     except Exception as e:
         print(f"Exception checking WhatsApp existence: {e}")
-        return False
+        return False, None
 
 def send_message(instance_name, phone_jid, message):
     """
@@ -329,7 +331,7 @@ def process_campaigns():
                     phone_jid = format_jid(phone_to_use)
                     
                     # 6. Check WhatsApp Existence (Mega API)
-                    exists = check_phone_on_whatsapp(instance_name, phone_jid)
+                    exists, correct_jid = check_phone_on_whatsapp(instance_name, phone_jid)
                     
                     if not exists:
                         print(f"Number {phone_jid} not on WhatsApp. Marking invalid.")
@@ -339,10 +341,14 @@ def process_campaigns():
                                 (lead['id'],)
                             )
                         conn.commit()
-                        # Do not set delay for invalid numbers? Or set small delay?
-                        # Let's set a small delay to avoid spamming the check API too fast
+                        # Short delay for invalid numbers
                         user_next_send_time[user_id] = datetime.now() + timedelta(seconds=2) 
                         continue
+                    
+                    # Use the corrected JID from API (e.g. might handle the extra 9 digit automatically)
+                    if correct_jid and correct_jid != phone_jid:
+                        print(f"🔄 Correcting JID from {phone_jid} to {correct_jid}")
+                        phone_jid = correct_jid
 
                     # 7. Preparar Mensagem (Variação + Substituição de Variáveis)
                     message_text = "Olá!"
