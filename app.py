@@ -2325,13 +2325,14 @@ def upload_csv_leads():
         
         # Tentar identificar colunas
         cols = [c.lower() for c in df.columns]
-        phone_col = next((c for c in cols if 'phone' in c or 'tel' in c or 'cel' in c or 'whatsapp' in c), None)
+        name_col = next((c for c in cols if 'name' in c or 'nome' in c), None)
         
         count = 0
-        if phone_col:
-             # Contar válidos (apenas estimativa rápida)
-             count = int(df[df.columns[cols.index(phone_col)]].notna().sum())
+        if name_col:
+             # Contar válidos usando a coluna 'name' como referência
+             count = int(df[df.columns[cols.index(name_col)]].notna().sum())
         else:
+             # Se não tiver coluna name, usar o total de linhas
              count = int(len(df))
         
         # Criar registro de Job "Fake" para rastreabilidade
