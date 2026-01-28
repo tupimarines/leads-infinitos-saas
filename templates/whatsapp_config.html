@@ -39,7 +39,7 @@
                 <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                     <button id="btn-create" class="btn btn-primary" onclick="createInstance()" {% if instance and
                         instance.status=='connected' %}disabled style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
-                        {% if instance %}Reconfigurar Instância{% else %}Criar Instância{% endif %}
+                        {% if instance %}Configurar{% else %}Criar Instância{% endif %}
                     </button>
                     <button id="btn-qr" class="btn" onclick="getQrCode()" {% if not instance %}disabled
                         style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
@@ -48,6 +48,17 @@
                     <button id="btn-status" class="btn" onclick="checkStatus()" {% if not instance %}disabled
                         style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
                         Verificar Status
+                    </button>
+                    <button id="btn-restart" class="btn" onclick="restartInstance()" {% if not instance %}disabled
+                        style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
+                        Reiniciar Conexão
+                    </button>
+                    <button id="btn-delete" class="btn" onclick="deleteInstance()" {% if not instance %}disabled
+                        style="opacity: 0.5; cursor: not-allowed; background: rgba(255,93,93,.12); color: #ff5d5d; border-color: rgba(255,93,93,.35);"
+                        {% else
+                        %}style="background: rgba(255,93,93,.12); color: #ff5d5d; border-color: rgba(255,93,93,.35);" {%
+                        endif %}>
+                        Deletar Instância
                     </button>
                 </div>
 
@@ -227,6 +238,68 @@
         } catch (e) {
             console.error(e);
             showMessage('Erro ao verificar status.', 'error');
+        }
+    }
+
+    async function restartInstance() {
+        const key = document.getElementById('instance_key').value;
+        if (!key) return showMessage('Instância não configurada.', 'error');
+
+        if (!confirm('Deseja reiniciar a conexão da instância? Isso pode levar alguns segundos.')) {
+            return;
+        }
+
+        document.getElementById('btn-restart').disabled = true;
+        document.getElementById('loading').style.display = 'block';
+
+        try {
+            const res = await fetch(`/api/whatsapp/restart/${key}`, { method: 'POST' });
+            const data = await res.json();
+
+            if (data.error) throw new Error(data.error);
+
+            showMessage('Conexão reiniciada! Aguarde alguns segundos e verifique o status.', 'success');
+
+            // Auto-check status after 3 seconds
+            setTimeout(() => {
+                checkStatus();
+            }, 3000);
+
+        } catch (e) {
+            showMessage(e.message || 'Erro ao reiniciar conexão.', 'error');
+        } finally {
+            document.getElementById('btn-restart').disabled = false;
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    async function deleteInstance() {
+        const key = document.getElementById('instance_key').value;
+        if (!key) return showMessage('Instância não configurada.', 'error');
+
+        if (!confirm('⚠️ ATENÇÃO: Deseja realmente DELETAR esta instância?\n\nEsta ação:\n- Removerá a instância da Mega API\n- Desconectará o WhatsApp\n- Você precisará criar uma nova instância\n\nDeseja continuar?')) {
+            return;
+        }
+
+        document.getElementById('btn-delete').disabled = true;
+        document.getElementById('loading').style.display = 'block';
+
+        try {
+            const res = await fetch(`/api/whatsapp/delete/${key}`, { method: 'POST' });
+            const data = await res.json();
+
+            if (data.error) throw new Error(data.error);
+
+            showMessage('Instância deletada com sucesso! Recarregando página...', 'success');
+
+            // Reload page after 2 seconds
+            setTimeout(() => location.reload(), 2000);
+
+        } catch (e) {
+            showMessage(e.message || 'Erro ao deletar instância.', 'error');
+            document.getElementById('btn-delete').disabled = false;
+        } finally {
+            document.getElementById('loading').style.display = 'none';
         }
     }
 </script>

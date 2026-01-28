@@ -2650,6 +2650,32 @@ class WhatsappService:
             print(f"Error getting status: {e}")
             return None
 
+    def restart_instance(self, instance_key: str) -> dict:
+        """Restarts WhatsApp instance connection"""
+        url = f"{self.base_url}/rest/instance/{instance_key}/restart"
+        try:
+            response = requests.post(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error restarting instance: {e}")
+            if e.response:
+                print(f"Response: {e.response.text}")
+            return None
+
+    def delete_instance(self, instance_key: str) -> dict:
+        """Deletes WhatsApp instance"""
+        url = f"{self.base_url}/rest/instance/{instance_key}/delete"
+        try:
+            response = requests.post(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error deleting instance: {e}")
+            if e.response:
+                print(f"Response: {e.response.text}")
+            return None
+
 
 @app.route("/whatsapp")
 @login_required
@@ -2877,6 +2903,60 @@ def get_whatsapp_status(instance_key):
         
         return result
     return {"error": "Failed to get status"}, 500
+
+
+@app.route("/api/whatsapp/restart/<instance_key>", methods=["POST"])
+@login_required
+def restart_whatsapp_instance(instance_key):
+    """API to restart instance connection"""
+    # Verify ownership
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, user_id FROM instances WHERE apikey = %s", (instance_key,))
+        row = cur.fetchone()
+    conn.close()
+    
+    if not row or row[1] != current_user.id:
+        return {"error": "Unauthorized"}, 403
+        
+    service = WhatsappService()
+    result = service.restart_instance(instance_key)
+    
+    # Mega API returns success even if restart is just queued
+    if result and not result.get('error'):
+        return {"status": "success", "message": "Restart command sent"}
+        
+    return {"error": "Failed to restart instance"}, 500
+
+
+@app.route("/api/whatsapp/delete/<instance_key>", methods=["POST"])
+@login_required
+def delete_whatsapp_instance(instance_key):
+    """API to delete instance"""
+    # Verify ownership
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, user_id FROM instances WHERE apikey = %s", (instance_key,))
+        row = cur.fetchone()
+    conn.close()
+    
+    if not row or row[1] != current_user.id:
+        return {"error": "Unauthorized"}, 403
+        
+    service = WhatsappService()
+    
+    # 1. Delete from Mega API
+    result = service.delete_instance(instance_key)
+    
+    # 2. Delete from DB
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM instances WHERE id = %s", (row[0],))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "success", "message": "Instance deleted"}
+
 
 
 
