@@ -185,18 +185,17 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
 
 - [ ] **4. Acesso ao Dashboard**
   - [x] Verificar se dashboard carrega zerado (primeiro acesso).
-  - [] Validar permissões de visualização.
+  - [x] Validar permissões de visualização.
   - [] Verificar atualização do dashboard e percentual tx de sucesso
 
-- [ ] **5. Extração de Leads (Apify Integration)**
-  - Criar novo Job de extração (Google Maps Scraper).
-  - Aguardar conclusão.
-  - Verificar se leads foram salvos no banco.
-
-- [ ] **6. Upload de Arquivo Manual**
-  - Preparar CSV/Excel com leads (incluir coluna status/whatsapp se necessário).
-  - Fazer upload na tela de campanhas/leads.
-  - Verificar importação correta dos dados.
+- [x] **5. Extração de Leads (Apify Integration)**
+  - [x] Criar novo Job de extração (Google Maps Scraper).
+  - [x] Aguardar conclusão.
+  - [x] Verificar se leads foram salvos no banco.
+[x] **6. Upload de Arquivo Manual**
+  [x] Preparar CSV/Excel com leads (incluir coluna status/whatsapp se necessário).
+  [x] Fazer upload na tela de campanhas/leads.
+  [x] Verificar importação correta dos dados.
 
 - [ ] **7. Criação de Campanhas Mistas**
   - **Campanha A (Instantânea):** Usar lista extraída (passo 5). Início imediato.
@@ -214,17 +213,17 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
   - Confirmar se "Negócios Fechados" podem ser alterados manualmente.
   - Validar cálculos de taxas.
 
-- [ ] **10. Exportação de Dados**
-  - Baixar lista extraída (CSV/Excel).
-  - Verificar integridade dos dados exportados.
+- [x] **10. Exportação de Dados**
+  - [x] Baixar lista extraída (CSV/Excel).
+  - [x] Verificar integridade dos dados exportados.
 
-- [ ] **11. Gestão de Jobs (Limpeza)**
-  - Excluir jobs de extração antigos.
-  - Verificar se dados relacionados foram tratados corretamente (cascade ou mantidos conforme regra).
+- [x] **11. Gestão de Jobs (Limpeza)**
+  - [x] Excluir jobs de extração antigos.
+  - [x] Verificar se dados relacionados foram tratados corretamente (cascade ou mantidos conforme regra).
 
-- [ ] **12. Gestão de Campanhas (Limpeza)**
-  - Excluir as campanhas criadas.
-  - Verificar limpeza no banco de dados.
+- [x] **12. Gestão de Campanhas (Limpeza)**
+  - [x] Excluir as campanhas criadas.
+  - [x] Verificar limpeza no banco de dados.
 
 - [ ] **13. Limites do Plano (Starter)**
   - Simular compra de plano Starter (limite diário restrito).

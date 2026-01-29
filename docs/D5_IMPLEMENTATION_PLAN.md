@@ -34,3 +34,12 @@ Fix the issue where scraping jobs are not processing in production, and ensure t
         - `Starting job <job_id>` (This is the new log we added).
         - `Executing Apify Actor...`
 4.  **Failure Case**: If `APIFY_TOKEN` is removed, the UI should now show "Erro de Configuração: APIFY_TOKEN não encontrado" instead of failing silently or later in the worker.
+
+### Passo 1: Serviço Principal (Site + Worker)
+- **Tipo**: Application / Service
+- **Source**: GitHub (`main`)
+- **Build Type**: Docker Compose
+- **Compose Path**: `./docker-compose.yml` (Padrão)
+- **Funcionalidade**: Roda Site, Worker e Sender na mesma pilha.
+
+*Nota: O arquivo de desenvolvimento foi renomeado para `docker-compose.dev.yml`.*

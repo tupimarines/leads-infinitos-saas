@@ -470,24 +470,29 @@
         btn.innerHTML = '<span class="animate-pulse">Criando Campanha...</span>';
         feedback.classList.add('hidden');
 
-        // NEW: Validate scheduled_start if provided
+        // NEW: Validate and convert scheduled_start
+        let scheduledStartUTC = null;
         const scheduledInput = document.getElementById('scheduled_start');
+
         if (scheduledInput.value) {
             const scheduledDate = new Date(scheduledInput.value);
             const now = new Date();
+
             if (scheduledDate <= now) {
                 alert('Data de início deve ser futura');
                 btn.disabled = false;
                 btn.innerHTML = originalText;
                 return;
             }
+            // Convert to UTC ISO string
+            scheduledStartUTC = scheduledDate.toISOString();
         }
 
         const data = {
             name: document.getElementById('name').value,
             job_id: document.getElementById('job_id').value,
             message_templates: messageTemplates, // Envia lista
-            scheduled_start: scheduledInput.value || null  // NEW: Send scheduled_start
+            scheduled_start: scheduledStartUTC  // Send UTC
         };
 
         try {
