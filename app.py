@@ -2331,6 +2331,20 @@ def upload_csv_leads():
 @app.route('/api/campaigns', methods=['POST'])
 @login_required
 def create_campaign():
+    def extract_phone_from_whatsapp_link(link):
+        """Helper to extract phone from whatsapp link"""
+        if not link: return None
+        import re
+        # Patterns
+        patterns = [r'wa\.me/([0-9]+)', r'phone=([0-9]+)', r'whatsapp\.com/send\?phone=([0-9]+)']
+        for pattern in patterns:
+            match = re.search(pattern, str(link))
+            if match: return match.group(1)
+        # Fallback: just digits if long enough
+        digits = re.sub(r'\D', '', str(link))
+        if len(digits) >= 10: return digits
+        return None
+
     data = request.json
     name = data.get('name')
     job_id = data.get('job_id')
@@ -2403,8 +2417,9 @@ def create_campaign():
             whatsapp_link_col = next((c for c in cols if c == 'whatsapp_link'), None)
             status_col = next((c for c in cols if c == 'status'), None)
             
-            if not phone_col:
-                 return json.dumps({'error': 'Coluna de telefone não encontrada no arquivo'}), 400
+            # Check availability: Need either phone_col OR whatsapp_link_col
+            if not phone_col and not whatsapp_link_col:
+                 return json.dumps({'error': 'Nenhuma coluna de telefone ou link de WhatsApp encontrada no arquivo'}), 400
             
             # Filtrar apenas leads com status = 1 (ou sem coluna status)
             if status_col:
@@ -2413,18 +2428,31 @@ def create_campaign():
                 df_filtered = df
                  
             for _, row in df_filtered.iterrows():
-                raw_phone = str(row[phone_col]) if pd.notna(row[phone_col]) else ""
+                raw_phone = str(row[phone_col]) if phone_col and pd.notna(row[phone_col]) else ""
                 raw_name = str(row[name_col]) if name_col and pd.notna(row[name_col]) else "Visitante"
                 raw_whatsapp_link = str(row[whatsapp_link_col]) if whatsapp_link_col and pd.notna(row[whatsapp_link_col]) else None
                 
-                if raw_phone:
-                     clean_phone = re.sub(r'\D', '', raw_phone)
-                     if len(clean_phone) >= 10:
-                        valid_leads.append({
-                            'phone': clean_phone,
-                            'name': raw_name,
-                            'whatsapp_link': raw_whatsapp_link
-                        })
+                final_phone = None
+                
+                # 1. Try to extract from WhatsApp Link FIRST (Priority)
+                if raw_whatsapp_link:
+                    extracted = extract_phone_from_whatsapp_link(raw_whatsapp_link)
+                    if extracted:
+                        final_phone = extracted
+                
+                # 2. If not found, try Phone column
+                if not final_phone and raw_phone:
+                     clean_p = re.sub(r'\D', '', raw_phone)
+                     if len(clean_p) >= 10:
+                        final_phone = clean_p
+                
+                # 3. Add if valid
+                if final_phone:
+                    valid_leads.append({
+                        'phone': final_phone,
+                        'name': raw_name,
+                        'whatsapp_link': raw_whatsapp_link
+                    })
 
         except Exception as e:
             print(f"Erro ao ler arquivo: {e}")
