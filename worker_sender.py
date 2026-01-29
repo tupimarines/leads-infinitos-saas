@@ -271,8 +271,9 @@ def process_campaigns():
                         )
                         licenses = cur.fetchall()
                         for lic in licenses:
-                            if lic['license_type'] == 'anual': user_limit = max(user_limit, 30)
-                            elif lic['license_type'] == 'semestral': user_limit = max(user_limit, 20)
+                            l_type = lic['license_type']
+                            if l_type == 'scale': user_limit = max(user_limit, 30)
+                            elif l_type == 'pro': user_limit = max(user_limit, 20)
                     
                     if not check_daily_limit(user_id, user_limit):
                         # print(f"User {user_id} limit reached. Skipping.")

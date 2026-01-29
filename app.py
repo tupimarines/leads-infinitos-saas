@@ -414,10 +414,6 @@ class License:
             return 20
         elif self.license_type == 'starter':
             return 10
-        elif self.license_type == 'anual':
-            return 30  # Legacy
-        elif self.license_type == 'semestral':
-            return 20  # Legacy
         return 10  # Fallback
 
     @staticmethod
@@ -431,12 +427,10 @@ class License:
         
         purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
         
-        if license_type == 'semestral':
-            expires_at = purchase_dt + timedelta(days=180)
-        elif license_type in ['starter', 'pro', 'scale']:
-            expires_at = purchase_dt + timedelta(days=365) # Assumindo validade anual conforme screenshot
-        else:  # anual
-            expires_at = purchase_dt + timedelta(days=365)
+        # Validity usually 1 year for all these plans as per Screenshot in conversation history context (assuming)
+        # Or if "semestral" logic was different, we assume standard 1 year for the new plans unless specified otherwise.
+        # Defaulting to 1 year for standard SaaS plans.
+        expires_at = purchase_dt + timedelta(days=365)
         
         conn = get_db_connection()
         with conn.cursor() as cur:
