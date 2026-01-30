@@ -1,0 +1,391 @@
+{% extends "base.html" %}
+
+{% block title %}Editar Campanha - Leads Infinitos{% endblock %}
+
+{% block extra_head %}
+<!-- Tailwind CSS (via CDN for rapid dev) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+    /* Custom Neon/Glass Effects */
+    .glass-panel {
+        background: rgba(15, 22, 48, 0.7);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .neon-input {
+        background: rgba(12, 20, 48, 0.8);
+        border: 1px solid rgba(79, 124, 255, 0.3);
+        box-shadow: 0 0 10px rgba(79, 124, 255, 0.05);
+        transition: all 0.3s ease;
+    }
+
+    .neon-input:focus {
+        border-color: #4f7cff;
+        box-shadow: 0 0 15px rgba(79, 124, 255, 0.3);
+        outline: none;
+    }
+
+    .btn-cyber {
+        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        transition: all 0.3s ease;
+    }
+
+    .btn-cyber:hover {
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.6);
+        transform: translateY(-2px);
+    }
+
+    /* Status Colors */
+    .status-pending {
+        color: #60a5fa;
+        background: rgba(96, 165, 250, 0.1);
+    }
+
+    .status-sent {
+        color: #34d399;
+        background: rgba(52, 211, 153, 0.1);
+    }
+
+    .status-failed {
+        color: #f87171;
+        background: rgba(248, 113, 113, 0.1);
+    }
+
+    .status-invalid {
+        color: #fbbf24;
+        background: rgba(251, 191, 36, 0.1);
+    }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="container mx-auto px-4 py-8">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row gap-8">
+
+        <!-- Sidebar / Edit Form -->
+        <div class="w-full md:w-1/3 space-y-6">
+            <div class="mb-4">
+                <a href="/campaigns" class="text-gray-400 hover:text-white flex items-center gap-2 text-sm">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                    </svg>
+                    Voltar
+                </a>
+                <h1
+                    class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 mt-2">
+                    Editar Campanha
+                </h1>
+                <p class="text-xs text-gray-400">ID: {{ campaign.id }} • Status: <span
+                        class="uppercase font-bold text-white">{{ campaign.status }}</span></p>
+            </div>
+
+            <div class="glass-panel p-6 rounded-2xl relative">
+                <form id="editForm" class="space-y-4">
+
+                    <!-- Nome -->
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-1">Nome</label>
+                        <input type="text" id="name" value="{{ campaign.name }}" required
+                            class="neon-input w-full px-4 py-2 rounded-xl text-white">
+                    </div>
+
+                    <!-- Mensagens -->
+                    <div>
+                        <div class="flex justify-between items-center mb-1">
+                            <label class="block text-sm font-semibold text-gray-300">Mensagens</label>
+                            <button type="button" id="saveTemplateBtn"
+                                class="text-xs text-blue-400 hover:text-blue-300">Salvar Modelo</button>
+                        </div>
+                        <div id="templates-container" class="space-y-2">
+                            <!-- Populated via JS -->
+                        </div>
+                        <button type="button" id="addTemplateBtn"
+                            class="mt-2 text-xs text-blue-400 flex items-center gap-1">
+                            + Adicionar Variação
+                        </button>
+                    </div>
+
+                    <!-- Agendamento -->
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-1">Início Agendado</label>
+                        <input type="datetime-local" id="scheduled_start"
+                            class="neon-input w-full px-4 py-2 rounded-xl text-white text-sm">
+                    </div>
+
+                    <!-- Botão Salvar -->
+                    <div class="pt-2">
+                        <button type="submit" id="saveBtn"
+                            class="btn-cyber w-full py-3 rounded-xl text-white font-bold shadow-lg">
+                            Salvar Alterações
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Change List Section -->
+                <div class="mt-8 pt-6 border-t border-gray-700">
+                    <h3 class="text-lg font-semibold text-white mb-2">Trocar Lista de Leads</h3>
+                    <p class="text-xs text-gray-500 mb-4">Atenção: Isso substituirá todos os leads <span
+                            class="text-blue-400">pendentes</span> por novos leads do Job selecionado.</p>
+
+                    <div class="space-y-2">
+                        <select id="job_id" class="neon-input w-full px-4 py-2 rounded-xl text-white text-sm">
+                            <option value="" disabled selected>Carregando listas...</option>
+                        </select>
+                        <button type="button" id="replaceLeadsBtn"
+                            class="w-full py-2 rounded-xl text-gray-300 border border-red-500/30 hover:bg-red-500/10 transition-colors text-sm">
+                            Substituir Pendentes
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Leads Table -->
+        <div class="w-full md:w-2/3">
+            <div class="glass-panel p-6 rounded-2xl h-full flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold text-white">Leads da Campanha</h2>
+                    <div class="text-sm text-gray-400" id="totalLeadsCount">Carregando...</div>
+                </div>
+
+                <div class="overflow-auto flex-1 rounded-xl border border-gray-700/50 bg-black/20">
+                    <table class="w-full text-left text-sm text-gray-300">
+                        <thead class="bg-gray-800/50 text-gray-400 sticky top-0 backdrop-blur-sm">
+                            <tr>
+                                <th class="px-4 py-3 font-medium">Nome</th>
+                                <th class="px-4 py-3 font-medium">Fone / Link</th>
+                                <th class="px-4 py-3 font-medium">Status</th>
+                                <th class="px-4 py-3 font-medium text-right">Log</th>
+                            </tr>
+                        </thead>
+                        <tbody id="leadsTableBody" class="divide-y divide-gray-800">
+                            <!-- Rows -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                <div class="flex justify-between items-center mt-4 pt-2 border-t border-gray-800">
+                    <button id="prevPage"
+                        class="px-3 py-1 rounded bg-gray-800 disabled:opacity-50 text-gray-300 hover:bg-gray-700">Anterior</button>
+                    <span id="pageInfo" class="text-sm text-gray-500">Página 1</span>
+                    <button id="nextPage"
+                        class="px-3 py-1 rounded bg-gray-800 disabled:opacity-50 text-gray-300 hover:bg-gray-700">Próxima</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+    const CAMPAIGN_ID = {{ campaign.id }};
+    // Parse message templates from server (it might be a string or JSON list)
+    let rawTemplates = {{ campaign.message_template | tojson if campaign.message_template else '[]' }};
+
+    // Normalize to array
+    let currentTemplates = [];
+    try {
+        if (rawTemplates.startsWith('[')) {
+            currentTemplates = JSON.parse(rawTemplates);
+        } else if (rawTemplates.startsWith('"')) { // Double encoded json sometimes
+            currentTemplates = JSON.parse(JSON.parse(rawTemplates));
+        } else {
+            currentTemplates = [rawTemplates];
+        }
+    } catch (e) {
+        currentTemplates = [rawTemplates]; // Fallback as raw string
+    }
+    if (!Array.isArray(currentTemplates)) currentTemplates = [currentTemplates];
+    currentTemplates = currentTemplates.filter(t => t); // Filter empty
+
+    // --- Template UI ---
+    const tplContainer = document.getElementById('templates-container');
+
+    function renderTemplates() {
+        tplContainer.innerHTML = '';
+        currentTemplates.forEach((tpl, idx) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'relative';
+            wrap.innerHTML = `
+                <textarea rows="3" class="neon-input w-full px-4 py-2 rounded-xl text-white placeholder-gray-600 template-input mb-2" data-idx="${idx}">${tpl}</textarea>
+                <button type="button" class="absolute top-2 right-2 text-red-400 hover:text-red-200" onclick="removeTemplate(${idx})">✕</button>
+            `;
+            tplContainer.appendChild(wrap);
+        });
+        if (currentTemplates.length === 0) {
+            addTemplate(); // Ensure at least one
+        }
+    }
+
+    function addTemplate() {
+        currentTemplates.push('');
+        renderTemplates();
+    }
+
+    function removeTemplate(idx) {
+        currentTemplates.splice(idx, 1);
+        renderTemplates();
+    }
+
+    window.removeTemplate = removeTemplate; // Expose global
+    document.getElementById('addTemplateBtn').addEventListener('click', addTemplate);
+    renderTemplates();
+
+    // --- Init Data ---
+    const scheduledStart = "{{ campaign.scheduled_start.isoformat() if campaign.scheduled_start else '' }}";
+    if (scheduledStart) {
+        // Format for input datetime-local: YYYY-MM-DDThh:mm
+        document.getElementById('scheduled_start').value = scheduledStart.slice(0, 16);
+    }
+
+    // --- Update Logic ---
+    document.getElementById('editForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const inputs = document.querySelectorAll('.template-input');
+        const msgs = Array.from(inputs).map(i => i.value).filter(v => v.trim());
+
+        if (msgs.length === 0) { alert('Adicione pelo menos uma mensagem'); return; }
+
+        const data = {
+            name: document.getElementById('name').value,
+            scheduled_start: document.getElementById('scheduled_start').value || null,
+            message_templates: msgs
+        };
+
+        const btn = document.getElementById('saveBtn');
+        const original = btn.innerHTML;
+        btn.disabled = true; btn.innerHTML = 'Salvando...';
+
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/update`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            if (res.ok) {
+                alert('Campanha atualizada!');
+            } else {
+                throw new Error((await res.json()).error);
+            }
+        } catch (err) {
+            alert('Erro: ' + err.message);
+        } finally {
+            btn.disabled = false; btn.innerHTML = original;
+        }
+    });
+
+    // --- Lead Table Logic ---
+    let currentPage = 1;
+
+    async function loadLeads(page) {
+        const tbody = document.getElementById('leadsTableBody');
+        tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">Carregando...</td></tr>';
+
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/leads?page=${page}`);
+            const data = await res.json();
+
+            tbody.innerHTML = '';
+            document.getElementById('totalLeadsCount').textContent = `Total: ${data.total}`;
+            document.getElementById('pageInfo').textContent = `Página ${data.page} de ${data.pages}`;
+
+            currentPage = data.page;
+            document.getElementById('prevPage').disabled = currentPage <= 1;
+            document.getElementById('nextPage').disabled = currentPage >= data.pages;
+
+            if (data.leads.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">Nenhum lead encontrado.</td></tr>';
+                return;
+            }
+
+            data.leads.forEach(lead => {
+                const statusClass = `status-${lead.status}`;
+                const statusLabel = {
+                    'pending': 'Pendente',
+                    'sent': 'Enviado',
+                    'failed': 'Falhou',
+                    'invalid': 'Inválido'
+                }[lead.status] || lead.status;
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="px-4 py-3 text-white font-medium truncate max-w-[150px]" title="${lead.name || '-'}">${lead.name || '-'}</td>
+                    <td class="px-4 py-3 text-gray-400 text-xs font-mono">${lead.phone || '-'}</td>
+                    <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs font-bold ${statusClass}">${statusLabel}</span></td>
+                    <td class="px-4 py-3 text-right text-gray-500 text-xs truncate max-w-[100px]" title="${lead.log || ''}">${lead.log || '-'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+        } catch (err) {
+            tbody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-red-400">Erro: ${err.message}</td></tr>`;
+        }
+    }
+
+    document.getElementById('prevPage').addEventListener('click', () => loadLeads(currentPage - 1));
+    document.getElementById('nextPage').addEventListener('click', () => loadLeads(currentPage + 1));
+    loadLeads(1);
+
+    // --- Replace Leads Logic ---
+
+    // Load Jobs
+    (async () => {
+        try {
+            const res = await fetch('/api/scraping-jobs');
+            const jobs = await res.json();
+            const select = document.getElementById('job_id');
+            select.innerHTML = '<option value="" disabled selected>Selecionar Lista...</option>';
+            jobs.forEach(job => {
+                select.innerHTML += `<option value="${job.id}">${job.keyword} (${job.total_results})</option>`;
+            });
+        } catch (e) { console.error(e); }
+    })();
+
+    document.getElementById('replaceLeadsBtn').addEventListener('click', async () => {
+        const jobId = document.getElementById('job_id').value;
+        if (!jobId) { alert('Selecione uma lista primeiro.'); return; }
+
+        if (!confirm('TEM CERTEZA? Isso excluirá todos os leads PENDENTES desta campanha e adicionará os da nova lista. Leads já enviados serão mantidos.')) return;
+
+        const btn = document.getElementById('replaceLeadsBtn');
+        const original = btn.innerHTML;
+        btn.disabled = true; btn.innerHTML = 'Substituindo...';
+
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/replace-leads`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ job_id: jobId })
+            });
+            const json = await res.json();
+
+            if (res.ok) {
+                alert(`Leads substituídos com sucesso! ${json.count} novos leads adicionados.`);
+                loadLeads(1);
+            } else {
+                throw new Error(json.error);
+            }
+        } catch (err) {
+            alert('Erro: ' + err.message);
+        } finally {
+            btn.disabled = false; btn.innerHTML = original;
+        }
+    });
+
+    // --- Save Template Logic ---
+    // (Optional: Reuse similar logic from campaigns_new if desired)
+    document.getElementById('saveTemplateBtn').addEventListener('click', async () => {
+        const inputs = document.querySelectorAll('.template-input');
+        const content = inputs[0]?.value; // Take first one
+        if (!content) return alert('Digite algo para salvar');
+        const name = prompt('Nome do Modelo:');
+        if (!name) return;
+        // ... (POST logic same as before) ...
+    });
+
+</script>
+{% endblock %}

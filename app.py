@@ -575,6 +575,42 @@ class CampaignLead:
             conn.close()
 
 
+class MessageTemplate:
+    def __init__(self, id, user_id, name, content, created_at):
+        self.id = id
+        self.user_id = user_id
+        self.name = name
+        self.content = content
+        self.created_at = created_at
+
+    @staticmethod
+    def create(user_id: int, name: str, content: str) -> "MessageTemplate":
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO message_templates (user_id, name, content)
+                VALUES (%s, %s, %s) RETURNING id, created_at
+                """,
+                (user_id, name, content)
+            )
+            row = cur.fetchone()
+            new_id = row[0]
+            created_at = row[1]
+        conn.commit()
+        conn.close()
+        return MessageTemplate(new_id, user_id, name, content, created_at)
+
+    @staticmethod
+    def get_by_user(user_id: int):
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM message_templates WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+            rows = cur.fetchall()
+        conn.close()
+        return [MessageTemplate(**row) for row in rows]
+
+
 class HotmartService:
     def __init__(self):
         self.base_url = "https://developers.hotmart.com/payments/api/v1"
@@ -3256,3 +3292,200 @@ def hotmart_webhook():
         return {"status": "success"}, 200
     else:
         return {"status": "error"}, 400
+
+
+@app.route('/campaigns/<int:campaign_id>/edit')
+@login_required
+def edit_campaign(campaign_id):
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        flash("Campanha não encontrada.", "error")
+        return redirect(url_for('campaigns'))
+    return render_template('campaigns_edit.html', campaign=campaign)
+
+
+@app.route('/api/campaigns/<int:campaign_id>/leads')
+@login_required
+def get_campaign_leads(campaign_id):
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+        
+    page = request.args.get('page', 1, type=int)
+    per_page = 50
+    offset = (page - 1) * per_page
+    
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT COUNT(*) as count FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
+        total = cur.fetchone()['count']
+        
+        cur.execute("""
+            SELECT id, phone, name, whatsapp_link, status, log, sent_at 
+            FROM campaign_leads 
+            WHERE campaign_id = %s 
+            ORDER BY id ASC
+            LIMIT %s OFFSET %s
+        """, (campaign_id, per_page, offset))
+        leads = cur.fetchall()
+    conn.close()
+    
+    return json.dumps({
+        'leads': [dict(l, sent_at=l['sent_at'].isoformat() if l['sent_at'] else None) for l in leads],
+        'total': total,
+        'page': page,
+        'pages': (total + per_page - 1) // per_page
+    }, default=str)
+
+
+@app.route('/api/templates', methods=['GET', 'POST'])
+@login_required
+def message_templates():
+    if request.method == 'POST':
+        data = request.json
+        name = data.get('name')
+        content = data.get('content')
+        
+        if not name or not content:
+            return json.dumps({'error': 'Nome e conteúdo obrigatórios'}), 400
+            
+        tpl = MessageTemplate.create(current_user.id, name, content)
+        return json.dumps({'id': tpl.id, 'name': tpl.name, 'content': tpl.content})
+        
+    else:
+        templates = MessageTemplate.get_by_user(current_user.id)
+        return json.dumps([vars(t) for t in templates], default=str)
+
+
+@app.route('/api/campaigns/<int:campaign_id>/update', methods=['POST'])
+@login_required
+def update_campaign(campaign_id):
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+    
+    data = request.json
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if 'name' in data:
+                cur.execute("UPDATE campaigns SET name = %s WHERE id = %s", (data['name'], campaign_id))
+            
+            if 'scheduled_start' in data:
+                 cur.execute("UPDATE campaigns SET scheduled_start = %s WHERE id = %s", (data['scheduled_start'], campaign_id))
+                 
+            if 'message_templates' in data:
+                templates = json.dumps(data['message_templates'])
+                cur.execute("UPDATE campaigns SET message_template = %s WHERE id = %s", (templates, campaign_id))
+                
+        conn.commit()
+        return json.dumps({'success': True})
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/campaigns/<int:campaign_id>/replace-leads', methods=['POST'])
+@login_required
+def replace_leads(campaign_id):
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+        
+    data = request.json
+    job_id = data.get('job_id')
+    
+    if not job_id:
+        return json.dumps({'error': 'Job ID obrigatório'}), 400
+        
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT results_path FROM scraping_jobs WHERE id = %s AND user_id = %s", (job_id, current_user.id))
+            job = cur.fetchone()
+        
+        if not job or not job['results_path'] or not os.path.exists(job['results_path']):
+            conn.close()
+            return json.dumps({'error': 'Arquivo de leads não encontrado'}), 404
+            
+        file_path = job['results_path']
+        valid_leads = []
+        
+        if file_path.endswith('.csv'):
+            df = pd.read_csv(file_path)
+        elif file_path.endswith('.xlsx'):
+            df = pd.read_excel(file_path)
+        else:
+             try:
+                 df = pd.read_csv(file_path)
+             except:
+                 conn.close()
+                 return json.dumps({'error': 'Formato de arquivo desconhecido'}), 400
+
+        # Normalization Logic (Simplified version of create_campaign)
+        cols = [c.lower() for c in df.columns]
+        phone_col = next((c for c in cols if 'phone' in c or 'telefone' in c or 'celular' in c or 'whatsapp' in c), None)
+        name_col = next((c for c in cols if 'name' in c or 'nome' in c), None)
+        link_col = next((c for c in cols if 'link' in c or 'url' in c), None)
+        status_col = next((c for c in cols if 'status' in c), None)
+        
+        # Helper to extract phone
+        def extract_phone(link):
+            if not link: return None
+            import re
+            patterns = [r'wa\.me/([0-9]+)', r'phone=([0-9]+)', r'whatsapp\.com/send\?phone=([0-9]+)']
+            for pattern in patterns:
+                match = re.search(pattern, str(link))
+                if match: return match.group(1)
+            digits = re.sub(r'\D', '', str(link))
+            if len(digits) >= 10: return digits
+            return None
+
+        for _, row in df.iterrows():
+            # Check Status if exists (1 = ready)
+            if status_col and str(row.iloc[cols.index(status_col)]) != '1':
+                continue
+                
+            lead_data = {}
+            if name_col: lead_data['name'] = str(row.iloc[cols.index(name_col)])
+            
+            raw_phone = None
+            raw_link = None
+            
+            if phone_col: raw_phone = str(row.iloc[cols.index(phone_col)])
+            if link_col: raw_link = str(row.iloc[cols.index(link_col)])
+            
+            final_phone = extract_phone(raw_link) or extract_phone(raw_phone)
+            
+            if final_phone:
+                lead_data['phone'] = final_phone
+                lead_data['whatsapp_link'] = raw_link if raw_link else f"https://wa.me/{final_phone}"
+                valid_leads.append(lead_data)
+        
+        if not valid_leads:
+             conn.close()
+             return json.dumps({'error': 'Nenhum lead válido encontrado nesta lista (verifique filtro de status=1)'}), 400
+
+        # Replace logic: Delete pending leads, insert new ones
+        with conn.cursor() as cur:
+            # Delete only pending to preserve history of sent leads
+            cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s AND status = 'pending'", (campaign_id,))
+            
+            # Insert new
+            args_str = ','.join(
+                cur.mogrify("(%s, %s, %s, %s, %s)", 
+                           (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending')).decode('utf-8') 
+                for l in valid_leads
+            )
+            cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link, status) VALUES " + args_str)
+            
+        conn.commit()
+        conn.close()
+        
+        return json.dumps({'success': True, 'count': len(valid_leads)})
+        
+    except Exception as e:
+        if 'conn' in locals(): conn.close()
+        return json.dumps({'error': str(e)}), 500
