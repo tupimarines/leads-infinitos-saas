@@ -3315,18 +3315,41 @@ def get_campaign_leads(campaign_id):
     per_page = 50
     offset = (page - 1) * per_page
     
+    # Filters
+    name_filter = request.args.get('name', '')
+    phone_filter = request.args.get('phone', '')
+    status_filter = request.args.get('status', '')
+
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT COUNT(*) as count FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
+        # Build query dynamically
+        base_query = "FROM campaign_leads WHERE campaign_id = %s"
+        params = [campaign_id]
+        
+        if name_filter:
+            base_query += " AND name ILIKE %s"
+            params.append(f"%{name_filter}%")
+        if phone_filter:
+            base_query += " AND phone ILIKE %s"
+            params.append(f"%{phone_filter}%")
+        if status_filter:
+            base_query += " AND status = %s"
+            params.append(status_filter)
+
+        # Count total filtered
+        cur.execute(f"SELECT COUNT(*) as count {base_query}", tuple(params))
         total = cur.fetchone()['count']
         
-        cur.execute("""
+        # Fetch filtered leads
+        query = f"""
             SELECT id, phone, name, whatsapp_link, status, log, sent_at 
-            FROM campaign_leads 
-            WHERE campaign_id = %s 
+            {base_query}
             ORDER BY id ASC
             LIMIT %s OFFSET %s
-        """, (campaign_id, per_page, offset))
+        """
+        params.extend([per_page, offset])
+        
+        cur.execute(query, tuple(params))
         leads = cur.fetchall()
     conn.close()
     
