@@ -2318,7 +2318,7 @@ def upload_csv_leads():
         file.save(filepath)
         
         # Analisar o arquivo para contar leads
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(filepath, dtype=str)
         
         # Adicionar coluna 'status' se não existir (valor 1 = pronto para envio)
         if 'status' not in [c.lower() for c in df.columns]:
@@ -2428,12 +2428,12 @@ def create_campaign():
         
         try:
             if file_path.endswith('.csv'):
-                df = pd.read_csv(file_path)
+                df = pd.read_csv(file_path, dtype=str)
             elif file_path.endswith('.xlsx'):
-                df = pd.read_excel(file_path)
+                df = pd.read_excel(file_path, dtype=str)
             else:
                  # Fallback: tentar ler como CSV
-                df = pd.read_csv(file_path)
+                df = pd.read_csv(file_path, dtype=str)
             
             # Normalizar colunas
             # O scraper gera: name, phone_number, etc.
@@ -3437,12 +3437,12 @@ def replace_leads(campaign_id):
         valid_leads = []
         
         if file_path.endswith('.csv'):
-            df = pd.read_csv(file_path)
+            df = pd.read_csv(file_path, dtype=str)
         elif file_path.endswith('.xlsx'):
-            df = pd.read_excel(file_path)
+            df = pd.read_excel(file_path, dtype=str)
         else:
              try:
-                 df = pd.read_csv(file_path)
+                 df = pd.read_csv(file_path, dtype=str)
              except:
                  conn.close()
                  return json.dumps({'error': 'Formato de arquivo desconhecido'}), 400
