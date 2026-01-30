@@ -229,6 +229,7 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
             },
             "maximumLeadsEnrichmentRecords": 0,
             "maxImages": 0,
+            "countryCode": "br",
         }
 
         try:
