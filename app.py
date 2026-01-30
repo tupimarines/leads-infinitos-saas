@@ -2471,8 +2471,12 @@ def create_campaign():
                  return json.dumps({'error': 'Nenhuma coluna de telefone ou link de WhatsApp encontrada no arquivo'}), 400
             
             # Filtrar apenas leads com status = 1 (ou sem coluna status)
+            # Filtrar apenas leads com status = 1 (ou sem coluna status)
             if status_col:
-                df_filtered = df[df[status_col] == 1]
+                # Convert to numeric to be safe or compare with string '1'
+                # Since we used dtype=str, it should be '1'. 
+                # Handling both cases safely:
+                df_filtered = df[df[status_col].astype(str).str.strip() == '1']
             else:
                 df_filtered = df
                  
@@ -3481,8 +3485,11 @@ def replace_leads(campaign_id):
 
         for _, row in df.iterrows():
             # Check Status if exists (1 = ready)
-            if status_col and str(row.iloc[cols.index(status_col)]) != '1':
-                continue
+            # Safe comparison for string '1'
+            if status_col:
+                val = str(row.iloc[cols.index(status_col)]).strip()
+                if val != '1':
+                    continue
                 
             lead_data = {}
             if name_col: lead_data['name'] = str(row.iloc[cols.index(name_col)])
