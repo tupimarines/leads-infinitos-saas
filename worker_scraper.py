@@ -211,7 +211,7 @@ def run_scraper_task(job_id: int):
             # Registrar no histórico imutável (anti-bypass de limite)
             if lead_count > 0:
                 try:
-                    from datetime import datetime, timedelta
+                    from datetime import timedelta
                     
                     # Buscar licença do usuário para calcular ciclo
                     conn = get_db_connection()
