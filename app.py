@@ -2177,7 +2177,9 @@ def admin_user_details(user_id):
             "is_admin": user['is_admin'],
             "instance_name": user['instance_name'],
             "instance_status": user['instance_status'],
-            "instance_apikey": user['instance_apikey']
+            "instance_apikey": user['instance_apikey'],
+            "remote_jid": None  # Will be populated via JS check or separate call, but let's try to fetch if status is connected? 
+                                # Actually, better to fetch it in the check_status endpoint called by frontend.
         },
         "license": {
             "type": license['license_type'] if license else None,
@@ -2219,6 +2221,16 @@ def admin_check_whatsapp_status(instance_apikey):
          
     new_status = 'connected' if is_connected else 'disconnected'
     
+    # Extract Remote JID / Phone
+    remote_jid = None
+    if isinstance(result, dict):
+        # Variant 1: top level 'id' or 'jid'
+        remote_jid = result.get('id') or result.get('me')
+        
+        # Variant 2: instance_data
+        if not remote_jid and result.get('instance_data'):
+             remote_jid = result['instance_data'].get('phone') or result['instance_data'].get('user') or result['instance_data'].get('jid')
+
     # Update DB
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -2227,9 +2239,68 @@ def admin_check_whatsapp_status(instance_apikey):
     conn.close()
     
     # Debug print
-    print(f"Admin Checked Status for {instance_apikey}: {new_status} (Raw: {is_connected})")
+    print(f"Admin Checked Status for {instance_apikey}: {new_status} (JID: {remote_jid})")
     
-    return {"status": new_status, "result": result}
+    return {"status": new_status, "result": result, "remote_jid": remote_jid}
+
+
+@app.route('/admin/users/create', methods=['POST'])
+@login_required
+@admin_required
+def admin_create_user():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    
+    if not email or not password:
+        return {"error": "Email e senha são obrigatórios"}, 400
+        
+    # Check if user exists
+    user = User.get_by_email(email)
+    if user:
+        return {"error": "Email já cadastrado"}, 400
+        
+    try:
+        User.create(email, password)
+        return {"success": True}
+    except Exception as e:
+        return {"error": str(e)}, 500
+
+
+@app.route('/admin/users/<int:user_id>/update', methods=['POST'])
+@login_required
+@admin_required
+def admin_update_user(user_id):
+    data = request.json
+    email = data.get('email')
+    password = data.get('password') # Optional
+    
+    if not email:
+        return {"error": "Email é obrigatório"}, 400
+        
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check for email conflict
+            cur.execute("SELECT id FROM users WHERE email = %s AND id != %s", (email, user_id))
+            if cur.fetchone():
+                return {"error": "Email já está em uso por outro usuário"}, 400
+            
+            # Update Email
+            cur.execute("UPDATE users SET email = %s WHERE id = %s", (email, user_id))
+            
+            # Update Password if provided
+            if password:
+                password_hash = generate_password_hash(password)
+                cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
+                
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}, 500
+    finally:
+        conn.close()
 @app.route('/campaigns/new')
 @login_required
 def new_campaign():
