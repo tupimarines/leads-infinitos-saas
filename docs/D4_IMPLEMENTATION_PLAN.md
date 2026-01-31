@@ -183,10 +183,10 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
   - [x] Clicar no link e definir nova senha.
   - [x] Logar com nova senha.
 
-- [ ] **4. Acesso ao Dashboard**
+- [x] **4. Acesso ao Dashboard**
   - [x] Verificar se dashboard carrega zerado (primeiro acesso).
   - [x] Validar permissões de visualização.
-  - [] Verificar atualização do dashboard e percentual tx de sucesso
+  - [x] Verificar atualização do dashboard e percentual tx de sucesso
 
 - [x] **5. Extração de Leads (Apify Integration)**
   - [x] Criar novo Job de extração (Google Maps Scraper).
@@ -197,18 +197,18 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
   [x] Fazer upload na tela de campanhas/leads.
   [x] Verificar importação correta dos dados.
 
-- [ ] **7. Criação de Campanhas Mistas**
+- [x] **7. Criação de Campanhas Mistas**
   - **Campanha A (Instantânea):** Usar lista extraída (passo 5). Início imediato.
   - **Campanha B (Agendada):** Usar lista de upload (passo 6). Início agendado para +10 min.
   - Validar configuração de mensagens e variáveis.
 
-- [ ] **8. Execução de Disparos**
+- [x] **8. Execução de Disparos**
   - Verificar logs do `worker_sender`.
   - Confirmar se Campanha A iniciou imediatamente.
   - Confirmar se Campanha B aguardou o horário.
   - Comparar disparos realizados vs lista de leads (conferência visual/banco).
 
-- [ ] **9. Dashboard & Métricas em Tempo Real**
+- [x] **9. Dashboard & Métricas em Tempo Real**
   - Verificar atualização dos contadores (Enviados, Pendentes, Falhas).
   - Confirmar se "Negócios Fechados" podem ser alterados manualmente.
   - Validar cálculos de taxas.
@@ -225,7 +225,7 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
   - [x] Excluir as campanhas criadas.
   - [x] Verificar limpeza no banco de dados.
 
-- [ ] **13. Limites do Plano (Starter)**
+- [x] **13. Limites do Plano (Starter)**
   - Simular compra de plano Starter (limite diário restrito).
   - Tentar enviar + mensagens que o limite.
   - Verificar bloqueio/pausa automática da campanha.
@@ -236,30 +236,30 @@ O `worker_sender.py` é um **loop dedicado** que processa campanhas continuament
 
 **Este teste é crítico para validar o `worker_sender` e o isolamento de dados.**
 
-- [ ] **14. Simulação de 3 Campanhas Simultâneas**
+- [x] **14. Simulação de 3 Campanhas Simultâneas**
   - **Setup:** Criar 3 usuários diferentes (User A, User B, User C).
   - **Ação:** Iniciar 1 campanha para cada usuário SIMULTANEAMENTE (aprox. mesmo horário).
   - **Verificações Críticas:**
-    - [ ] **Fila:** O sistema engasgou? (Verificar uso de CPU/Memória do container sender).
-    - [ ] **Isolamento:** User A enviou leads do User B? (JAMAIS pode acontecer).
-    - [ ] **Concorrência:** As 3 campanhas progrediram ou uma bloqueou as outras?
-    - [ ] **Worker:** Monitorar logs para garantir que o loop está iterando entre as campanhas (Round-robin ou paralelo).
+    - [x] **Fila:** O sistema engasgou? (Verificar uso de CPU/Memória do container sender).
+    - [x] **Isolamento:** User A enviou leads do User B? (JAMAIS pode acontecer).
+    - [x] **Concorrência:** As 3 campanhas progrediram ou uma bloqueou as outras?
+    - [x] **Worker:** Monitorar logs para garantir que o loop está iterando entre as campanhas (Round-robin ou paralelo).
 
 ---
 
 #### ⚙️ Testes Administrativos e Conta
 
-- [ ] **15. Dashboard (Funcionalidades Avançadas)**
+- [x] **15. Dashboard (Funcionalidades Avançadas)**
   - Testar filtros de data.
   - Testar widgets de performance.
 
-- [ ] **16. Super Admin**
+- [x] **16. Super Admin**
   - Acessar painel de admin (se houver rota dedicada ou via Django Admin).
   - Listar todos os usuários.
   - Alterar planos manualmente.
   - Ver estatísticas globais.
 
-- [ ] **17. Minha Conta**
+- [x] **17. Minha Conta**
   - Alterar dados cadastrais.
   - Alterar senha novamente dentro da área logada.
   - Verificar logout.
@@ -309,11 +309,11 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ## ✅ Critérios de Sucesso
 
-- [ ] Usuário consegue gerar mensagens com IA em 1 clique
-- [ ] Dashboard mostra métricas em tempo real
-- [ ] Worker_sender está rodando no Docker
-- [ ] Sistema aguenta 5 campanhas simultâneas sem crash
-- [ ] Limites diários funcionam corretamente
+- [x] Usuário consegue gerar mensagens com IA em 1 clique
+- [x] Dashboard mostra métricas em tempo real
+- [x] Worker_sender está rodando no Docker
+- [x] Sistema aguenta 5 campanhas simultâneas sem crash
+- [x] Limites diários funcionam corretamente
 
 ---
 
