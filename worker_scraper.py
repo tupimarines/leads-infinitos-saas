@@ -120,23 +120,94 @@ def run_scraper_task(job_id: int):
         )
         
         # 5. Conclusão
+        # 5. Conclusão
         if results and len(results) > 0:
-            final_path = results[0].get('csv_path', '')
+            import pandas as pd
             
-            # Count leads from CSV
-            lead_count = 0
-            if os.path.exists(final_path):
-                try:
-                    import pandas as pd
-                    df = pd.read_csv(final_path)
-                    lead_count = len(df)
-                    print(f"Counted {lead_count} leads from CSV: {final_path}")
-                except Exception as e:
-                    print(f"Warning: Could not count leads from CSV: {e}")
+            # --- DEDUPLICATION AND MERGE LOGIC ---
+            final_df = pd.DataFrame()
             
-            # Atualizar job
-            update_job_status(job_id, 'completed', progress=100, results_path=final_path, lead_count=lead_count)
+            # 1. Load all result CSVs
+            dfs = []
+            for res in results:
+                csv_path = res.get('csv_path')
+                if csv_path and os.path.exists(csv_path):
+                    try:
+                        # Assuming Main.py saves as string to match existing logic
+                        df_part = pd.read_csv(csv_path, dtype=str)
+                        dfs.append(df_part)
+                    except Exception as e:
+                        print(f"Error loading partial CSV {csv_path}: {e}")
             
+            if dfs:
+                final_df = pd.concat(dfs, ignore_index=True)
+                
+                # 2. Normalize columns (lowercase for consistent check)
+                # But we want to keep original names for export. 
+                # Let's create a map or just work with what we have.
+                # Standard scraper columns: 'name', 'phone_number', 'address', etc.
+                
+                # 3. Deduplicate
+                # Priority: Phone Number, then Name+Address
+                
+                # Create a temporary normalized phone column for deduplication if 'phone_number' exists
+                if 'phone_number' in final_df.columns:
+                     final_df['__norm_phone'] = final_df['phone_number'].astype(str).str.replace(r'\D', '', regex=True)
+                     # Treat empty phones as unique or null? 
+                     # If phone is empty, we fall back to name+address.
+                     # Let's split into two groups: with phone and without phone.
+                     
+                     # Actually, simpler: drop_duplicates by phone if valid, then remaining by name.
+                     
+                     # Separate rows with valid phone (>8 digits)
+                     mask_valid_phone = final_df['__norm_phone'].str.len() >= 8
+                     df_phones = final_df[mask_valid_phone].copy()
+                     df_others = final_df[~mask_valid_phone].copy()
+                     
+                     # Dedupe phones
+                     df_phones = df_phones.drop_duplicates(subset=['__norm_phone'], keep='first')
+                     
+                     # Dedupe others by name + address (if available)
+                     subset_cols = ['name', 'address']
+                     # Filter only existing columns
+                     subset_cols = [c for c in subset_cols if c in df_others.columns]
+                     
+                     if subset_cols:
+                         df_others = df_others.drop_duplicates(subset=subset_cols, keep='first')
+                     
+                     # Combine back
+                     final_df = pd.concat([df_phones, df_others], ignore_index=True)
+                     
+                     # Drop helper
+                     final_df.drop(columns=['__norm_phone'], inplace=True)
+                
+                else:
+                     # Fallback if no phone column: dedupe by name (and address if exists)
+                     subset_cols = ['name']
+                     if 'address' in final_df.columns:
+                         subset_cols.append('address')
+                     final_df = final_df.drop_duplicates(subset=subset_cols, keep='first')
+                
+                # 4. Save Merged CSV
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # Use same dir as first result
+                first_dir = os.path.dirname(results[0]['csv_path'])
+                merged_filename = f"Merged_Job_{job_id}_{timestamp}.csv"
+                final_path = os.path.join(first_dir, merged_filename)
+                
+                final_df.to_csv(final_path, index=False)
+                print(f"✅ Merged {len(results)} files into {final_path}. Total uniques: {len(final_df)}")
+                
+                lead_count = len(final_df)
+                
+                # Update DB
+                update_job_status(job_id, 'completed', progress=100, results_path=final_path, lead_count=lead_count)
+            else:
+                 # No valid CSVs loaded
+                 final_path = results[0].get('csv_path', '') # Fallback to first even if empty?
+                 lead_count = 0
+                 update_job_status(job_id, 'completed', progress=100, results_path=final_path, lead_count=lead_count)
+
             # Registrar no histórico imutável (anti-bypass de limite)
             if lead_count > 0:
                 try:

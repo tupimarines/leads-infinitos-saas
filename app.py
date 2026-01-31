@@ -1553,7 +1553,8 @@ def scrape():
     cycle_info = ScrapingJob.get_monthly_lead_count(current_user.id, subscription_date)
     
     # Validar limite (1500 leads por mês)
-    MONTHLY_LIMIT = 1500
+    # Validar limite (1500 leads por mês)
+    MONTHLY_LIMIT = 2000
     requested_leads = total
     
     if cycle_info['used'] + requested_leads > MONTHLY_LIMIT:
@@ -1590,7 +1591,7 @@ def scrape():
     # Start job in background (Queue)
     try:
         from worker_scraper import run_scraper_task
-        q.enqueue(run_scraper_task, job_id)
+        q.enqueue(run_scraper_task, job_id, job_timeout=3600)
         flash(f"Scraping enfileirado! Job ID: {job_id}. Você pode acompanhar o progresso na página de jobs.")
     except Exception as e:
         print(f"❌ Erro ao enfileirar job no Redis: {e}")
@@ -3239,7 +3240,9 @@ def get_dashboard_overview():
                 FROM scraping_jobs
                 WHERE user_id = %s 
                   AND status = 'completed'
-                  AND DATE(created_at) = CURRENT_DATE
+                  AND status = 'completed'
+                  AND EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+                  AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
                 """,
                 (current_user.id,)
             )

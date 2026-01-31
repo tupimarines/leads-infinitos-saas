@@ -14,7 +14,6 @@
                 <table class="table table-striped">
                     <thead>
                         <tr>
-                            <th>ID</th>
                             <th>Palavra-chave</th>
                             <th>Localizações</th>
                             <th>Status</th>
@@ -27,7 +26,6 @@
                     <tbody>
                         {% for job in jobs %}
                         <tr>
-                            <td>{{ job.id }}</td>
                             <td>{{ job.keyword }}</td>
                             <td>
                                 {{ job.locations_count }} localização(ões)
@@ -62,7 +60,7 @@
                                 -
                                 {% endif %}
                             </td>
-                            <td>{{ job.created_at }}</td>
+                            <td>{{ job.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
                             <td>
                                 <!-- Dropdown com Bootstrap 5 -->
                                 <div class="dropdown">
@@ -89,10 +87,7 @@
                                         <li>
                                             <hr class="dropdown-divider">
                                         </li>
-                                        <li><a class="dropdown-item text-danger" href="#"
-                                                onclick="deleteJob({{ job.id }}); return false;">
-                                                <i class="fas fa-trash"></i> Excluir
-                                            </a></li>
+                                        <!-- Excluir button REMOVED -->
                                         {% endif %}
                                     </ul>
                                 </div>
