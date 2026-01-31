@@ -2257,6 +2257,41 @@ def api_scraping_jobs():
     except Exception as e:
         return json.dumps({'error': str(e)}), 500
 
+@app.route('/api/campaigns/<int:campaign_id>/toggle_pause', methods=['POST'])
+@login_required
+def toggle_campaign_pause(campaign_id):
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT status FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, current_user.id))
+            campaign = cur.fetchone()
+            
+            if not campaign:
+                return json.dumps({"error": "Campanha não encontrada"}), 404
+                
+            current_status = campaign['status']
+            new_status = None
+            
+            if current_status == 'running':
+                new_status = 'paused'
+            elif current_status == 'paused':
+                new_status = 'running'
+            elif current_status == 'pending':
+                new_status = 'paused' # Allow pausing pending campaigns too
+            else:
+                 return json.dumps({"error": f"Não é possível pausar/continuar campanha com status '{current_status}'"}), 400
+            
+            cur.execute("UPDATE campaigns SET status = %s WHERE id = %s", (new_status, campaign_id))
+            
+        conn.commit()
+        conn.close()
+        
+        return json.dumps({"success": True, "new_status": new_status})
+        
+    except Exception as e:
+        print(f"Erro ao alternar pausa da campanha: {e}")
+        return json.dumps({"error": str(e)}), 500
+
 @app.route('/api/ai/generate-copy', methods=['POST'])
 @login_required
 def generate_ai_copy():
