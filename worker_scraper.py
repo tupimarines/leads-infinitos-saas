@@ -97,7 +97,11 @@ def run_scraper_task(job_id: int):
         total_results = job['total_results']
         user_id = job['user_id']
         
-        queries = [f"{keyword} in {loc}" for loc in locations]
+        if locations:
+            queries = [{'keyword': keyword, 'location': loc} for loc in locations]
+        else:
+             # Fallback if no locations (shouldn't happen per current logic but good for safety)
+             queries = [{'keyword': keyword, 'location': None}]
         
         # 3.1. Ensure STORAGE_ROOT exists (fix for FileNotFoundError)
         os.makedirs(STORAGE_ROOT, exist_ok=True)
@@ -107,7 +111,7 @@ def run_scraper_task(job_id: int):
         # 4. Run Scraper
         # Definindo callback para atualizar progresso no BD
         def progress_callback(prog, loc):
-            # Otimização: pode-se limitar updates ao BD (ex: a cada 5%)
+            # loc will be the formatted string from main.py
             update_job_status(job_id, 'running', progress=prog, current_location=loc)
 
         results = run_scraper_with_progress(

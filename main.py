@@ -201,28 +201,34 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
     
     results = []
     
-    for i, search_term in enumerate(search_list):
-        print(f"Executing Apify Actor for: {search_term} ({i+1}/{len(search_list)})")
+    for i, search_item in enumerate(search_list):
+        # Determine if input is simple string or structured dict
+        if isinstance(search_item, dict):
+            keyword = search_item.get('keyword')
+            location = search_item.get('location')
+            search_term_display = f"{keyword} in {location}"
+        else:
+            keyword = search_item
+            location = None
+            search_term_display = search_item
+
+        print(f"Executing Apify Actor for: {search_term_display} ({i+1}/{len(search_list)})")
         
         if progress_callback:
             try:
                 progress = int((i / len(search_list)) * 100)
-                progress_callback(progress, search_term)
+                progress_callback(progress, search_term_display)
             except:
                 pass
 
         # Prepare input for Apify
-        # We use the search term as valid for 'searchStringsArray'
-        # compass/crawler-google-places supports locationQuery as well, but our search_term usually includes location.
-        # Simple mode: just pass searchStringsArray
-        
         run_input = {
-            "searchStringsArray": [search_term],
+            "searchStringsArray": [keyword],
             "maxCrawledPlacesPerSearch": total,
-            "language": "pt-BR", # Force Portuguese or make configurable? User queries are in PT usually.
+            "language": "pt-BR", 
             "scrapeSocialMediaProfiles": {
                 "facebooks": False,
-                "instagrams": False, # Could enable if valuable?
+                "instagrams": False,
                 "youtubes": False,
                 "tiktoks": False,
                 "twitters": False,
@@ -231,10 +237,14 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
             "maxImages": 0,
             "countryCode": "br",
         }
+        
+        # Add locationQuery if present (stricter geographical search)
+        if location:
+            run_input["locationQuery"] = location
 
         try:
             # Run the Actor and wait for it to finish
-            print("Calling Apify Actor...")
+            print(f"Calling Apify Actor with input: keyword='{keyword}', location='{location}'")
             run = client.actor("compass/crawler-google-places").call(run_input=run_input)
             
             print(f"Apify Run Finished. Dataset ID: {run['defaultDatasetId']}")
@@ -262,7 +272,7 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
                         phone_number=item.get("phoneUnformatted") or item.get("phone"),
                         whatsapp_link=None, # Apify doesn't give WA link directly usually
                         category=category_str,
-                        location=search_term, # Or derive from address
+                        location=search_term_display, # Or derive from address
                         reviews_count=item.get("reviewsCount"),
                         reviews_average=item.get("totalScore"),
                         latitude=item.get("location", {}).get("lat"),
@@ -273,12 +283,12 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
                     print(f"Error mapping item: {map_err}")
 
             # Save results for this search term WITH STATUS COLUMN
-            safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', search_term)
+            safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', search_term_display)
             b_list.save_to_excel_with_status(safe_filename)
             b_list.save_to_csv_with_status(safe_filename)
             
             results.append({
-                "search": search_term,
+                "search": search_term_display,
                 "csv_path": f"{b_list.save_at}/{safe_filename}.csv",
                 "xlsx_path": f"{b_list.save_at}/{safe_filename}.xlsx"
             })
