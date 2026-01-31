@@ -81,7 +81,9 @@ def check_daily_limit(user_id, plan_limit):
     Verifica se o usuário já atingiu o limite diário de disparos.
     Retorna True se PODE enviar, False se atingiu o limite.
     """
-    today_str = date.today().isoformat()
+    # Define Brazil timezone
+    # Assuming the server/DB might be UTC, we want to count messages based on BRT day
+    # Adjust logic to cast timestamp to 'America/Sao_Paulo'
     
     query = """
     SELECT COUNT(cl.id) as count 
@@ -89,13 +91,13 @@ def check_daily_limit(user_id, plan_limit):
     JOIN campaigns c ON cl.campaign_id = c.id
     WHERE c.user_id = %s 
     AND cl.status = 'sent' 
-    AND date(cl.sent_at) = %s
+    AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
     """
     
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (user_id, today_str))
+            cur.execute(query, (user_id,))
             row = cur.fetchone()
         
         current_sent = row['count']
