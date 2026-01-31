@@ -5,130 +5,193 @@
 {% block body %}
 <div class="container mt-4">
     <div class="row">
-        <div class="col-12">
+        <div class="col-12 mb-4">
             <h2>Jobs de Scraping</h2>
             <p class="text-muted">Acompanhe o progresso dos seus jobs de scraping.</p>
-
-            {% if jobs %}
-            <div class="table-responsive">
-                <table class="table table-striped">
-                    <thead>
-                        <tr>
-                            <th>Palavra-chave</th>
-                            <th>Localizações</th>
-                            <th>Status</th>
-                            <th>Progresso</th>
-                            <th>Localização Atual</th>
-                            <th>Criado em</th>
-                            <th>Ações</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for job in jobs %}
-                        <tr>
-                            <td>{{ job.keyword }}</td>
-                            <td>
-                                {{ job.locations_count }} localização(ões)
-                            </td>
-                            <td>
-                                {% if job.status == 'pending' %}
-                                <span class="badge bg-warning">Pendente</span>
-                                {% elif job.status == 'running' %}
-                                <span class="badge bg-primary">Executando</span>
-                                {% elif job.status == 'completed' %}
-                                <span class="badge bg-success">Concluído</span>
-                                {% elif job.status == 'failed' %}
-                                <span class="badge bg-danger">Falhou</span>
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if job.status == 'running' %}
-                                <div class="progress" style="width: 100px;">
-                                    <div class="progress-bar" role="progressbar" style="width: {{ job.progress }}%"
-                                        aria-valuenow="{{ job.progress }}" aria-valuemin="0" aria-valuemax="100">
-                                        {{ job.progress }}%
-                                    </div>
-                                </div>
-                                {% else %}
-                                {{ job.progress }}%
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if job.current_location %}
-                                {{ job.current_location }}
-                                {% else %}
-                                -
-                                {% endif %}
-                            </td>
-                            <td>{{ job.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
-                            <td>
-                                <!-- Dropdown com Bootstrap 5 -->
-                                <div class="dropdown">
-                                    <button class="btn btn-sm btn-secondary dropdown-toggle" type="button"
-                                        id="dropdownMenuButton{{ job.id }}" data-bs-toggle="dropdown"
-                                        aria-expanded="false">
-                                        Ações
-                                    </button>
-                                    <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton{{ job.id }}">
-                                        {% if job.status == 'running' or job.status == 'pending' %}
-                                        <li><a class="dropdown-item" href="#"
-                                                onclick="refreshJob({{ job.id }}); return false;">
-                                                <i class="fas fa-sync text-primary"></i> Atualizar Status
-                                            </a></li>
-                                        {% endif %}
-
-                                        {% if job.status == 'completed' and job.results_path %}
-                                        <li><a class="dropdown-item" href="/download?path={{ job.results_path }}">
-                                                <i class="fas fa-download text-success"></i> Baixar CSV
-                                            </a></li>
-                                        {% endif %}
-
-                                        {% if job.status != 'running' %}
-                                        <li>
-                                            <hr class="dropdown-divider">
-                                        </li>
-                                        <!-- Excluir button REMOVED -->
-                                        {% endif %}
-                                    </ul>
-                                </div>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-            {% else %}
-            <div class="alert alert-info">
-                <i class="fas fa-info-circle"></i>
-                Nenhum job de scraping encontrado.
-                <a href="/" class="alert-link">Inicie um novo scraping</a>.
-            </div>
-            {% endif %}
         </div>
     </div>
+
+    {% if jobs %}
+    <div class="job-grid">
+        {% for job in jobs %}
+        <div class="card job-card" data-job-id="{{ job.id }}">
+            <div class="job-header">
+                <div class="job-title">
+                    <span class="job-keyword">{{ job.keyword }}</span>
+                    <span class="job-date">{{ job.created_at.strftime('%d/%m/%Y %H:%M') }}</span>
+                </div>
+                <div class="job-status">
+                    {% if job.status == 'pending' %}
+                    <span class="badge bg-warning text-dark">Pendente</span>
+                    {% elif job.status == 'running' %}
+                    <span class="badge bg-primary">Executando</span>
+                    {% elif job.status == 'completed' %}
+                    <span class="badge bg-success">Concluído</span>
+                    {% elif job.status == 'failed' %}
+                    <span class="badge bg-danger">Falhou</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="job-details">
+                <div class="detail-item">
+                    <span class="detail-label">Localizações:</span>
+                    <span class="detail-value">{{ job.locations_count }}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Atual:</span>
+                    <span class="detail-value text-truncate" title="{{ job.current_location }}">{{ job.current_location
+                        or '-' }}</span>
+                </div>
+            </div>
+
+            {% if job.status == 'running' %}
+            <div class="job-progress">
+                <div class="progress" style="height: 6px;">
+                    <div class="progress-bar" role="progressbar" style="width: {{ job.progress }}%"
+                        aria-valuenow="{{ job.progress }}" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+                <div class="progress-info">
+                    <span>{{ job.progress }}%</span>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="job-actions">
+                {% if job.status == 'running' or job.status == 'pending' %}
+                <button class="btn btn-sm btn-outline-primary" onclick="refreshJob({{ job.id }});"
+                    title="Atualizar Status">
+                    <i class="fas fa-sync-alt"></i> Atualizar
+                </button>
+                {% endif %}
+
+                {% if job.status == 'completed' and job.results_path %}
+                <a class="btn btn-sm btn-success" href="/download?path={{ job.results_path }}" title="Baixar CSV">
+                    <i class="fas fa-download"></i> CSV
+                </a>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <i class="fas fa-info-circle"></i>
+        Nenhum job de scraping encontrado.
+        <a href="/" class="alert-link">Inicie um novo scraping</a>.
+    </div>
+    {% endif %}
 </div>
 
 <style>
-    /* Fix for dropdown menu in dark mode */
-    .dropdown-menu {
-        background-color: #1a233a;
-        border: 1px solid rgba(79, 124, 255, 0.2);
-        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-        z-index: 9999;
+    .job-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 20px;
     }
 
-    .dropdown-item {
-        color: #e8ecf6;
+    .job-card {
+        padding: 20px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
 
-    .dropdown-item:hover {
-        background-color: rgba(79, 124, 255, 0.1);
-        color: #fff;
+    .job-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+        border-color: rgba(255, 255, 255, 0.15);
     }
 
-    .dropdown-divider {
-        border-top-color: rgba(255, 255, 255, 0.1);
+    .job-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
     }
+
+    .job-title {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .job-keyword {
+        font-weight: 700;
+        font-size: 18px;
+        color: var(--text);
+    }
+
+    .job-date {
+        font-size: 12px;
+        color: var(--muted);
+    }
+
+    .job-details {
+        display: grid;
+        gap: 4px;
+        font-size: 14px;
+    }
+
+    .detail-item {
+        display: flex;
+        justify-content: space-between;
+    }
+
+    .detail-label {
+        color: var(--muted);
+    }
+
+    .detail-value {
+        font-weight: 500;
+        max-width: 150px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-align: right;
+    }
+
+    .job-progress {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .progress-info {
+        font-size: 12px;
+        text-align: right;
+        color: var(--muted);
+    }
+
+    .job-actions {
+        margin-top: auto;
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        padding-top: 16px;
+    }
+
+    .btn-outline-primary {
+        color: var(--primary);
+        border-color: var(--primary);
+    }
+
+    .btn-outline-primary:hover {
+        background: var(--primary);
+        color: white;
+    }
+
+    .btn-success {
+        background: var(--success);
+        border: none;
+    }
+</style>
+
+<style>
+    /* Removed unused dropdown styles */
 </style>
 
 <script>
@@ -136,32 +199,32 @@
         fetch(`/api/job/${jobId}`)
             .then(response => response.json())
             .then(data => {
-                if (data.status === 'completed') {
-                    location.reload();
-                } else if (data.status === 'failed') {
+                if (data.status === 'completed' || data.status === 'failed') {
                     location.reload();
                 } else {
                     // Update progress bar
-                    // Try to find row by ID
-                    const rows = document.querySelectorAll('tbody tr');
-                    rows.forEach(row => {
-                        const idCell = row.querySelector('td:first-child');
-                        if (idCell && idCell.textContent.trim() == jobId) {
-                            const progressBar = row.querySelector('.progress-bar');
-                            if (progressBar) {
-                                progressBar.style.width = data.progress + '%';
-                                progressBar.setAttribute('aria-valuenow', data.progress);
-                                progressBar.textContent = data.progress + '%';
-                            }
+                    const card = document.querySelector(`.job-card[data-job-id="${jobId}"]`);
+                    if (card) {
+                        const progressBar = card.querySelector('.progress-bar');
+                        const progressInfo = card.querySelector('.progress-info span');
 
-                            // Update status badge if changed (simple check)
-                            const statusCell = row.querySelector('td:nth-child(4)');
-                            // Logic to update badge could be more complex, reloading is safer for status changes
-                            if (data.status !== 'running' && data.status !== 'pending') {
-                                location.reload();
-                            }
+                        if (progressBar) {
+                            progressBar.style.width = data.progress + '%';
+                            progressBar.setAttribute('aria-valuenow', data.progress);
                         }
-                    });
+                        if (progressInfo) {
+                            progressInfo.textContent = data.progress + '%';
+                        }
+
+                        // Check status change
+                        const currentBadge = card.querySelector('.badge');
+                        // If status changed meaningfully (e.g. from pending to running), reload or update badge
+                        // Simple approach: reload if status string differs from current UI class logic
+                        // But for now, just auto-refresh handles text, detailed changes reload page
+                        if (data.status !== 'running' && data.status !== 'pending') {
+                            location.reload();
+                        }
+                    }
                 }
             })
             .catch(error => {
@@ -169,54 +232,18 @@
             });
     }
 
-    function cancelJob(jobId) {
-        if (!confirm('Deseja realmente cancelar este job?')) return;
-
-        fetch(`/api/job/${jobId}/cancel`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    alert('Erro: ' + data.error);
-                } else {
-                    alert('Job cancelado com sucesso.');
-                    location.reload();
-                }
-            })
-            .catch(err => alert('Erro ao cancelar job: ' + err));
-    }
-
-    function deleteJob(jobId) {
-        if (!confirm('Deseja realmente excluir este job e seus arquivos?')) return;
-
-        fetch(`/api/job/${jobId}`, { method: 'DELETE' })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    alert('Erro: ' + data.error);
-                } else {
-                    alert('Job excluído com sucesso.');
-                    location.reload();
-                }
-            })
-            .catch(err => alert('Erro ao excluir job: ' + err));
-    }
-
     // Auto-refresh running jobs every 5 seconds
     document.addEventListener('DOMContentLoaded', function () {
-        const runningJobs = document.querySelectorAll('.progress-bar');
-        if (runningJobs.length > 0) {
-            setInterval(() => {
-                const rows = document.querySelectorAll('tbody tr');
-                rows.forEach(row => {
-                    // Find ID
-                    const idCell = row.querySelector('td:first-child');
-                    const statusBadge = row.querySelector('.badge');
-                    if (idCell && statusBadge && (statusBadge.textContent.includes('Executando') || statusBadge.textContent.includes('Pendente'))) {
-                        refreshJob(idCell.textContent.trim());
-                    }
-                });
-            }, 5000);
-        }
+        setInterval(() => {
+            const runningCards = document.querySelectorAll('.job-card');
+            runningCards.forEach(card => {
+                const badge = card.querySelector('.badge');
+                if (badge && (badge.textContent.includes('Executando') || badge.textContent.includes('Pendente'))) {
+                    const id = card.getAttribute('data-job-id');
+                    if (id) refreshJob(id);
+                }
+            });
+        }, 5000);
     });
 </script>
 {% endblock %}
