@@ -1516,7 +1516,17 @@ def scrape():
         return redirect(url_for("index"))
     
     # Limitar a 15 localizações
-    localizacoes = [loc.strip() for loc in localizacoes if loc.strip()][:15]
+    # APPEND ", Brasil" to force country context (User Request)
+    cleaned_locs = []
+    for loc in localizacoes:
+        l = loc.strip()
+        if not l: continue
+        # Avoid double suffix if user already typed it
+        if not l.lower().endswith('brasil') and not l.lower().endswith('brazil'):
+             l = f"{l}, Brasil"
+        cleaned_locs.append(l)
+    
+    localizacoes = cleaned_locs[:15]
     
     # VALIDAÇÃO: Limite mensal de 1500 leads
     # Buscar licença ativa do usuário
@@ -3376,6 +3386,36 @@ def get_campaign_leads(campaign_id):
         'page': page,
         'pages': (total + per_page - 1) // per_page
     }, default=str)
+
+
+@app.route('/api/campaigns/<int:campaign_id>/leads/<int:lead_id>', methods=['DELETE'])
+@login_required
+def delete_campaign_lead(campaign_id, lead_id):
+    """API para excluir um lead específico de uma campanha"""
+    # 1. Verificar permissão (Campanha pertence ao usuário?)
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada ou acesso negado'}), 404
+        
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # 2. Verificar se o lead pertence à campanha
+            cur.execute("SELECT id FROM campaign_leads WHERE id = %s AND campaign_id = %s", (lead_id, campaign_id))
+            if not cur.fetchone():
+                return json.dumps({'error': 'Lead não encontrado nesta campanha'}), 404
+            
+            # 3. Excluir lead
+            cur.execute("DELETE FROM campaign_leads WHERE id = %s", (lead_id,))
+            
+        conn.commit()
+    except Exception as e:
+        if 'conn' in locals(): conn.rollback()
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        if 'conn' in locals(): conn.close()
+        
+    return json.dumps({'success': True})
 
 
 @app.route('/api/templates', methods=['GET', 'POST'])
