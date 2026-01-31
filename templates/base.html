@@ -50,9 +50,10 @@
     body.themed-bg {
       background: url("{{ url_for('static', filename='img/bg-pattern.png') }}") repeat,
       linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
-      background-size: 400px auto, cover;
+      background-size: 1400px auto, cover;
       /* Adjust size as needed */
-      background-blend-mode: color-dodge, normal;
+      background-blend-mode: overlay, normal;
+      background-attachment: fixed;
     }
 
     a {
