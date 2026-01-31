@@ -42,10 +42,17 @@
       margin: 0;
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji';
       color: var(--text);
-      background:
-        radial-gradient(1200px 800px at 10% -10%, rgba(139, 92, 246, .12), transparent 50%),
+      background: radial-gradient(1200px 800px at 10% -10%, rgba(139, 92, 246, .12), transparent 50%),
         radial-gradient(1000px 700px at 90% -20%, rgba(79, 124, 255, .12), transparent 50%),
         linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
+    }
+
+    body.themed-bg {
+      background: url("{{ url_for('static', filename='img/bg-pattern.png') }}") repeat,
+      linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
+      background-size: 400px auto, cover;
+      /* Adjust size as needed */
+      background-blend-mode: color-dodge, normal;
     }
 
     a {
@@ -288,6 +295,7 @@
 
       .nav-cta.active {
         display: flex;
+        align-items: center;
       }
 
       .mobile-menu-btn {
@@ -298,9 +306,19 @@
         font-size: 32px;
       }
 
-      .btn {
-        width: 100%;
-        margin-bottom: 8px;
+      .nav-cta .btn {
+        width: 80%;
+        max-width: 300px;
+        margin-bottom: 12px;
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.2));
+        border: 1px solid rgba(139, 92, 246, 0.3);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        backdrop-filter: blur(5px);
+      }
+
+      .nav-cta .btn:hover {
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.4), rgba(168, 85, 247, 0.4));
+        border-color: rgba(139, 92, 246, 0.5);
       }
     }
 
@@ -347,7 +365,7 @@
   {% block extra_head %}{% endblock %}
 </head>
 
-<body>
+<body class="themed-bg">
   <div class="nav">
     <div class="container nav-inner">
       <div class="brand">
