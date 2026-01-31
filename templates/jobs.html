@@ -22,13 +22,17 @@
                 </div>
                 <div class="job-status">
                     {% if job.status == 'pending' %}
-                    <span class="badge bg-warning text-dark">Pendente</span>
+                    <span class="badge"
+                        style="background: rgba(255, 209, 102, 0.2); color: #ffd166; border: 1px solid rgba(255, 209, 102, 0.3);">Pendente</span>
                     {% elif job.status == 'running' %}
-                    <span class="badge bg-primary">Executando</span>
+                    <span class="badge"
+                        style="background: rgba(79, 124, 255, 0.2); color: #4f7cff; border: 1px solid rgba(79, 124, 255, 0.3);">Executando</span>
                     {% elif job.status == 'completed' %}
-                    <span class="badge bg-success">Concluído</span>
+                    <span class="badge"
+                        style="background: rgba(25, 195, 125, 0.2); color: #19c37d; border: 1px solid rgba(25, 195, 125, 0.3);">Concluído</span>
                     {% elif job.status == 'failed' %}
-                    <span class="badge bg-danger">Falhou</span>
+                    <span class="badge"
+                        style="background: rgba(255, 93, 93, 0.2); color: #ff5d5d; border: 1px solid rgba(255, 93, 93, 0.3);">Falhou</span>
                     {% endif %}
                 </div>
             </div>
@@ -37,6 +41,10 @@
                 <div class="detail-item">
                     <span class="detail-label">Localizações:</span>
                     <span class="detail-value">{{ job.locations_count }}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Leads:</span>
+                    <span class="detail-value">{{ job.lead_count }}</span>
                 </div>
                 <div class="detail-item">
                     <span class="detail-label">Atual:</span>

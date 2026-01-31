@@ -44,58 +44,59 @@
                   </div>
                 </div>
               </div>
-              <button type="button" onclick="addLocationField()"
-                style="margin-top: 8px; background: #4f7cff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                + Adicionar Localização
-              </button>
             </div>
-            <div class="field">
-              <label>Total de resultados <span class="muted">(opcional)</span></label>
-              <input type="number" name="total" min="1" max="500" placeholder="100">
-            </div>
-            <div>
-              <button class="btn btn-primary" type="submit" id="submit-btn"
-                style="width:100%; height:48px; font-weight:700;">Iniciar Extração</button>
-            </div>
+            <button type="button" onclick="addLocationField()" class="btn btn-primary"
+              style="margin-top: 8px; width: 100%; justify-content: center;">
+              Adicionar Localização
+            </button>
           </div>
-        </form>
-
-        <!-- Loading Indicator -->
-        <div id="loading-container" style="display: none; margin-top: 20px;">
-          <div style="text-align: center; padding: 40px 20px;">
-            <div class="loading-spinner"></div>
-            <h4 style="margin: 24px 0 12px; color: #4f7cff;">Processando Extração...</h4>
-            <p style="color: #666; font-size: 16px; margin: 0; line-height: 1.5;">
-              Agora é só esperar. Vá tomar um café enquanto isso... ☕
-            </p>
-            <div
-              style="margin-top: 20px; padding: 16px; background: rgba(79, 124, 255, 0.1); border-radius: 8px; border: 1px solid rgba(79, 124, 255, 0.2);">
-              <p style="margin: 0; color: #4f7cff; font-size: 14px;">
-                <strong>💡 Dica:</strong> O processo pode levar alguns minutos dependendo do número de localizações.
-              </p>
-            </div>
+          <div class="field">
+            <label>Total de resultados <span class="muted">(opcional)</span></label>
+            <input type="number" name="total" min="1" max="500" placeholder="100">
           </div>
-        </div>
+          <div>
+            <button class="btn btn-primary" type="submit" id="submit-btn"
+              style="width:100%; height:48px; font-weight:700;">Iniciar Extração</button>
+          </div>
       </div>
-      <div class="grid" style="gap: 14px;">
-        <div class="card" style="padding: 16px;">
-          <center>
-            <h4 style="margin:0 0 6px;">Passo a Passo da Prospecção</h4>
-          </center>
-          <div class="muted" style="margin-top: 10px;">
-            <ol style="padding-left: 20px; line-height: 1.6;">
-              <li>Selecione o segmento e local (preferência por bairro e cidade).</li>
-              <li>Adicione até 15 localizações diferentes.</li>
-              <li>Clique em <strong>Iniciar Extração</strong>.</li>
-              <li>Confira o resultado na aba <strong>Jobs</strong>.</li>
-              <li>Conecte seu WhatsApp.</li>
-              <li>Crie campanhas de disparos e potencialize seu B2B.</li>
-            </ol>
+      </form>
+
+      <!-- Loading Indicator -->
+      <div id="loading-container" style="display: none; margin-top: 20px;">
+        <div style="text-align: center; padding: 40px 20px;">
+          <div class="loading-spinner"></div>
+          <h4 style="margin: 24px 0 12px; color: #4f7cff;">Processando Extração...</h4>
+          <p style="color: #666; font-size: 16px; margin: 0; line-height: 1.5;">
+            Agora é só esperar. Vá tomar um café enquanto isso... ☕
+          </p>
+          <div
+            style="margin-top: 20px; padding: 16px; background: rgba(79, 124, 255, 0.1); border-radius: 8px; border: 1px solid rgba(79, 124, 255, 0.2);">
+            <p style="margin: 0; color: #4f7cff; font-size: 14px;">
+              <strong>💡 Dica:</strong> O processo pode levar alguns minutos dependendo do número de localizações.
+            </p>
           </div>
         </div>
       </div>
     </div>
+    <div class="grid" style="gap: 14px;">
+      <div class="card" style="padding: 16px;">
+        <center>
+          <h4 style="margin:0 0 6px;">Passo a Passo da Prospecção</h4>
+        </center>
+        <div class="muted" style="margin-top: 10px;">
+          <ol style="padding-left: 20px; line-height: 1.6;">
+            <li>Selecione o segmento e local (preferência por bairro e cidade).</li>
+            <li>Adicione até 15 localizações diferentes.</li>
+            <li>Clique em <strong>Iniciar Extração</strong>.</li>
+            <li>Confira o resultado na aba <strong>Jobs</strong>.</li>
+            <li>Conecte seu WhatsApp.</li>
+            <li>Crie campanhas de disparos e potencialize seu B2B.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
   </div>
+</div>
 </div>
 
 {% if current_user.is_authenticated %}
