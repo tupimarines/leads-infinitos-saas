@@ -137,6 +137,10 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
                 
             # Mega API response: { "exists": true, "jid": "..." }
             exists = data.get('exists', False)
+            
+            if not exists:
+                print(f"API Returned Exists=False. Full Data: {data}")
+                
             correct_jid = data.get('jid', phone_jid) # Use API JID if available, else fallback
             return exists, correct_jid
         else:
