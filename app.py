@@ -3051,51 +3051,52 @@ def init_whatsapp():
     if instance_name:
         safe_name = "".join(c for c in instance_name if c.isalnum() or c in ('-', '_'))
     
-    service = WhatsappService()
-    result = service.create_instance(safe_name if safe_name else None)
-    
-    if result:
-        # Check API level error
-        if result.get('error') is True:
-             pass
-
-        # Save to DB
-        instance_key = result.get('data', {}).get('instance_key')
+    try:
+        service = WhatsappService()
+        result = service.create_instance(safe_name if safe_name else None)
         
-        # Fallback 1: Top level (sometimes APIs vary)
-        if not instance_key:
-            instance_key = result.get('instance_key')
+        if result:
+            # Check API level error
+            if result.get('error') is True:
+                 pass
+
+            # Save to DB
+            instance_key = result.get('data', {}).get('instance_key')
             
-        # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
-        if not instance_key and safe_name:
-             if result.get('message') == 'Instance created' or result.get('error') is False:
-                 instance_key = safe_name
+            # Fallback 1: Top level (sometimes APIs vary)
+            if not instance_key:
+                instance_key = result.get('instance_key')
+                
+            # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
+            if not instance_key and safe_name:
+                 if result.get('message') == 'Instance created' or result.get('error') is False:
+                     instance_key = safe_name
 
-        if not instance_key:
-             print(f"Warning: No key returned from Mega API. Result: {result}")
-             return {"error": "Falha ao obter ID da instância. Resposta da API inválida."}, 500
+            if not instance_key:
+                 print(f"Warning: No key returned from Mega API. Result: {result}")
+                 return {"error": "Falha ao obter ID da instância. Resposta da API inválida."}, 500
 
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            # Upsert instance for user
-            cur.execute(
-                """
-                INSERT INTO instances (user_id, name, apikey, status)
-                VALUES (%s, %s, %s, 'disconnected')
-                ON CONFLICT (user_id) DO UPDATE 
-                SET name = EXCLUDED.name, apikey = EXCLUDED.apikey, status = 'disconnected', updated_at = CURRENT_TIMESTAMP
-                """,
-                (current_user.id, instance_name, instance_key)
-            )
-            # Ensure only one per user (double check)
-            cur.execute("DELETE FROM instances WHERE user_id = %s AND apikey != %s", (current_user.id, instance_key))
-
-        conn.commit()
-        conn.close()
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    # Simple INSERT - we already checked for existence
+                    cur.execute(
+                        """
+                        INSERT INTO instances (user_id, name, apikey, status)
+                        VALUES (%s, %s, %s, 'disconnected')
+                        """,
+                        (current_user.id, instance_name, instance_key)
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            
+            return {"status": "success", "key": instance_key, "data": result}
         
-        return {"status": "success", "key": instance_key, "data": result}
-    
-    return {"error": "Failed to create instance at provider"}, 500
+        return {"error": "Failed to create instance at provider"}, 500
+    except Exception as e:
+        print(f"Error in init_whatsapp: {e}")
+        return {"error": f"Erro interno: {str(e)}"}, 500
 
 
 @app.route("/api/whatsapp/qr/<instance_key>")
