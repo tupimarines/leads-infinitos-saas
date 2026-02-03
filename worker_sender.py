@@ -128,6 +128,37 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
         # print(f"Checking existence for {phone_jid} on instance {instance_name}...")
         response = requests.get(url, headers=headers, params=params, timeout=10)
         
+        # SELF-HEALING: If instance not found (404) or API Says Error
+        is_error = False
+        if response.status_code == 404:
+            is_error = True
+        elif response.status_code == 200:
+            try:
+                resp_json = response.json()
+                if isinstance(resp_json, dict) and resp_json.get('error') is True:
+                     is_error = True
+            except:
+                pass
+
+        if is_error:
+            print(f"⚠️ Instance {instance_name} seems invalid/disconnected (API 404/Error). Updating DB to disconnected...")
+            try:
+                with psycopg2.connect(
+                    host=os.environ.get('DB_HOST', 'localhost'),
+                    database=os.environ.get('DB_NAME', 'leads_infinitos'),
+                    user=os.environ.get('DB_USER', 'postgres'),
+                    password=os.environ.get('DB_PASSWORD', 'devpassword'),
+                    port=os.environ.get('DB_PORT', '5432')
+                ) as conn_fix:
+                    with conn_fix.cursor() as cur_fix:
+                        cur_fix.execute("UPDATE instances SET status = 'disconnected' WHERE name = %s", (instance_name,))
+                    conn_fix.commit()
+                print(f"✅ Instance {instance_name} marked as disconnected in DB.")
+            except Exception as e_db:
+                print(f"❌ Failed to auto-update DB status: {e_db}")
+            
+            return False, None
+
         if response.status_code == 200:
             data = response.json()
             
@@ -289,7 +320,7 @@ def process_campaigns():
                     # 3. Buscar instância conectada
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute(
-                            "SELECT name FROM instances WHERE user_id = %s AND status = 'connected'", 
+                            "SELECT name FROM instances WHERE user_id = %s AND status = 'connected' ORDER BY updated_at DESC LIMIT 1", 
                             (user_id,)
                         )
                         instance = cur.fetchone()

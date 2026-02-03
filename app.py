@@ -2599,7 +2599,7 @@ def create_campaign():
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s", (current_user.id,))
+            cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1", (current_user.id,))
             instance = cur.fetchone()
         conn.close()
         
