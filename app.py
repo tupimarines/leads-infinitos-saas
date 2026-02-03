@@ -2123,6 +2123,8 @@ def admin_delete_user(user_id):
             cur.execute("DELETE FROM licenses WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM instances WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM scraping_jobs WHERE user_id = %s", (user_id,))
+            # Fix: password_resets constraint
+            cur.execute("DELETE FROM password_resets WHERE user_id = %s", (user_id,))
             
             # 5. Excluir o usuário
             cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
