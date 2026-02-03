@@ -2950,7 +2950,10 @@ class WhatsappService:
             print(f"🔄 Restart API Body: {response.text}")
             
             if response.status_code == 404:
-                 return {"status": "error", "message": "Instance not found for restart"}
+                # Check if it's a real API 404 (JSON) or a Server 404 (HTML)
+                if 'text/html' in response.headers.get('Content-Type', ''):
+                    return {"error": "API Endpoint not found (404 HTML)"}
+                return {"status": "error", "message": "Instance not found for restart"}
 
             response.raise_for_status()
             return response.json()
@@ -2958,6 +2961,27 @@ class WhatsappService:
             print(f"❌ Error restarting instance: {e}")
             if e.response:
                 print(f"❌ Response: {e.response.text}")
+            return {"error": str(e)}
+
+    def logout_instance(self, instance_key: str) -> dict:
+        """Logs out WhatsApp instance"""
+        url = f"{self.base_url}/rest/instance/{instance_key}/logout"
+        print(f"🚪 [WhatsappService] Logging out {instance_key} via DELETE {url}")
+        
+        try:
+            response = requests.delete(url, headers=self.headers, timeout=15)
+            print(f"🚪 Logout API Status: {response.status_code}")
+            
+            if response.status_code == 404:
+                return {"message": "Instance already logged out or not found"}
+            
+            if response.status_code != 200:
+                print(f"🚪 Logout API Error Body: {response.text}")
+                
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Error logging out instance: {e}")
             return {"error": str(e)}
 
     def delete_instance(self, instance_key: str) -> dict:
@@ -2972,6 +2996,12 @@ class WhatsappService:
             print(f"🗑️ Delete API Body: {response.text}")
             
             if response.status_code == 404:
+                # CRITICAL FIX: Distinguish between "Instance validation failed" 404 and "Endpoint not found" 404
+                # If API returns HTML, it's likely a bad URL/Proxy error.
+                if 'text/html' in response.headers.get('Content-Type', ''):
+                    print("❌ Error: Received HTML 404 from API - Endpoint likely incorrect.")
+                    return {"error": "API Endpoint not found (404 HTML)"}
+                
                 return {"message": "Instance already deleted or not found"}
                 
             response.raise_for_status()
@@ -3010,41 +3040,9 @@ def init_whatsapp():
     conn.close()
 
     if existing_instance:
-        # User already has an instance.
-        # If the goal is to limit to 1, we should block creation of a new one unless they delete/disconnect.
-        # However, "Reconfigurar Instancia" button in UI calls this same endpoint.
-        # If the user is reconfiguring, they might be sending the SAME name or a NEW name.
-        # Validating request intent might be complex without a flag.
-        # But if the user simply clicked "Criar" (or in this case "Reconfigurar" which hits /init), 
-        # and we want to prevent creating a *duplicate* or losing the old one unintentionally?
-        
-        # User request: "return a message of 'instance already created. Instance Name: XYZ'"
-        # This implies stopping the action.
-        
-        # But wait, if I block this, the "Reconfigurar" button won't work if it hits this endpoint 
-        # to Create a new instance (which overwrites the old one in DB due to UPSERT logic below).
-        
-        # If the UI button says "Reconfigurar", maybe we destroy the old one first? 
-        # Current UI logic: 
-        # <button ... onclick="createInstance()"> ... </button>
-        # createInstance() calls /api/whatsapp/init.
-        
-        # If I return error here, reconfiguring becomes impossible without deleting first.
-        # Maybe I should only check if the connection to Mega API implies existence? 
-        
-        # Interpretation: The User wants to avoid ACCIDENTAL creation or abuse.
-        # But since we support "Reconfigurar", maybe we only block if the instance name is DIFFERENT?
-        # Or maybe we explicitly require a "force" flag?
-        
-        # User said: "limit only one instance created per user... if user tries to create... return message"
-        # I will implement the check. If the user wants to reconfigure, they might need to use a different flow 
-        # or I'll assume for now this blocks it. 
-        # NOTE: This WILL BREAK "Reconfigurar" unless we handle it. 
-        # But user asked for this limitation. I will implement as requested. 
-        # If they complain "I can't reconfigure", we can add a "force=true" param later.
-        
+        # Prevent duplicates as requested
         return {
-            "error": f"Você já possui uma instância criada. Nome: {existing_instance[0]} ({existing_instance[1]})"
+            "error": f"Você já possui uma instância criada. Nome: {existing_instance[0]}"
         }, 400
 
     
@@ -3059,14 +3057,9 @@ def init_whatsapp():
     if result:
         # Check API level error
         if result.get('error') is True:
-             # Even if 200 OK, logic error might exist
-             # But usually 'error': false means success.
-             # Note: User json shows "error": false.
              pass
 
         # Save to DB
-        # Extract key from data object
-        # structure: { ..., "data": { "instance_key": "..." }, ... }
         instance_key = result.get('data', {}).get('instance_key')
         
         # Fallback 1: Top level (sometimes APIs vary)
@@ -3075,7 +3068,6 @@ def init_whatsapp():
             
         # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
         if not instance_key and safe_name:
-             # Check if response implies success
              if result.get('message') == 'Instance created' or result.get('error') is False:
                  instance_key = safe_name
 
@@ -3085,30 +3077,18 @@ def init_whatsapp():
 
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Upsert instance for user (assuming 1 instance per user for MVP)
+            # Upsert instance for user
             cur.execute(
                 """
                 INSERT INTO instances (user_id, name, apikey, status)
                 VALUES (%s, %s, %s, 'disconnected')
-                ON CONFLICT (id) DO UPDATE 
+                ON CONFLICT (user_id) DO UPDATE 
                 SET name = EXCLUDED.name, apikey = EXCLUDED.apikey, status = 'disconnected', updated_at = CURRENT_TIMESTAMP
                 """,
                 (current_user.id, instance_name, instance_key)
             )
-            # If there's a constraint on user_id, we might want to check existence first or add unique constraint.
-            # detailed implementation: Check if user already has an instance
-            cur.execute("SELECT id FROM instances WHERE user_id = %s", (current_user.id,))
-            existing = cur.fetchone()
-            if existing:
-                 cur.execute(
-                    "UPDATE instances SET name = %s, apikey = %s, status = 'disconnected', updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                    (instance_name, instance_key, existing[0])
-                )
-            else:
-                 cur.execute(
-                    "INSERT INTO instances (user_id, name, apikey, status) VALUES (%s, %s, %s, 'disconnected')",
-                    (current_user.id, instance_name, instance_key)
-                )
+            # Ensure only one per user (double check)
+            cur.execute("DELETE FROM instances WHERE user_id = %s AND apikey != %s", (current_user.id, instance_key))
 
         conn.commit()
         conn.close()
@@ -3264,11 +3244,23 @@ def delete_whatsapp_instance(instance_key):
         
     service = WhatsappService()
     
+    # 0. Try Logout first (ensure session is killed)
+    try:
+        service.logout_instance(instance_key)
+    except:
+        pass # Continue to delete
+
     # 1. Delete from Mega API
     result = service.delete_instance(instance_key)
     print(f"🗑️ Mega API Delete Result: {result}")
     
-    # 2. Delete from DB
+    # Check if Result implies a failure (e.g. valid JSON error)
+    if result and result.get('error') and 'Endpoint not found' in str(result.get('error')):
+         return {"error": "Falha na API: Endpoint de deleção não encontrado. Contate o suporte."}, 500
+
+    # 2. Delete from DB (Only if API didn't critically fail)
+    # We proceed even if API says "not found" (idempotency)
+    
     print(f"🗑️ Removing from database...")
     conn = get_db_connection()
     with conn.cursor() as cur:
