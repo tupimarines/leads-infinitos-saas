@@ -2595,6 +2595,27 @@ def create_campaign():
     if not name or not job_id:
         return json.dumps({'error': 'Nome e Job são obrigatórios'}), 400
         
+    # NEW: Restart Instance before starting campaign to prevent API bugs
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s", (current_user.id,))
+            instance = cur.fetchone()
+        conn.close()
+        
+        if instance and instance.get('apikey'):
+            print(f"🔄 Restarting instance {instance['name']} for new campaign...")
+            service = WhatsappService()
+            # Use apikey or name? api takes 'instance_key'. 
+            # In init_whatsapp, name and apikey are saved. 
+            # Usually apikey in instances table stores the key used for API.
+            service.restart_instance(instance['apikey'])
+            import time
+            time.sleep(5) # Give it a moment
+    except Exception as e:
+        print(f"⚠️ Failed to restart instance: {e}")
+        # Continue anyway, don't block campaign creation
+        
     try:
         # 1. Obter leads do Job
         conn = get_db_connection()
