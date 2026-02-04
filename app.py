@@ -2124,9 +2124,9 @@ def admin_delete_user(user_id):
             cur.execute("DELETE FROM instances WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM scraping_jobs WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM password_resets WHERE user_id = %s", (user_id,))
-            # Fix: monthly_usage_history and purchases constraints
+            # Fix: monthly_usage_history and message_templates constraints
             cur.execute("DELETE FROM monthly_usage_history WHERE user_id = %s", (user_id,))
-            cur.execute("DELETE FROM purchases WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM message_templates WHERE user_id = %s", (user_id,))
             
             # 5. Excluir o usuário
             cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
