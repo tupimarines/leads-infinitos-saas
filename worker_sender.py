@@ -233,6 +233,59 @@ def check_daily_limit(user_id, plan_limit):
     finally:
         conn.close()
 
+def is_instance_error_message(error_msg):
+    """
+    Analisa a mensagem de erro da API para determinar se é erro de instância.
+    
+    Retorna True se o erro indica problema com a instância (desconectada, não encontrada).
+    Retorna False se o erro indica problema com o número (não registrado, inválido).
+    """
+    if not error_msg:
+        return True  # Se não há mensagem, assume erro de instância por segurança
+    
+    error_lower = str(error_msg).lower()
+    
+    # Padrões que indicam ERRO DE INSTÂNCIA (deve tentar recovery)
+    instance_error_patterns = [
+        'instance not found',
+        'not connected',
+        'disconnected',
+        'connection closed',
+        'session closed',
+        'qr code',
+        'not logged',
+        'unauthorized',
+        'authentication',
+        'timeout',
+        'socket',
+        'network'
+    ]
+    
+    # Padrões que indicam NÚMERO INVÁLIDO (não é erro de instância)
+    number_error_patterns = [
+        'not registered',
+        'not on whatsapp',
+        'invalid number',
+        'number not found',
+        'does not exist',
+        'não registrado',
+        'número inválido'
+    ]
+    
+    # Primeiro verificar se é erro de número (mais específico)
+    for pattern in number_error_patterns:
+        if pattern in error_lower:
+            return False  # Não é erro de instância, é número inválido
+    
+    # Depois verificar se é erro de instância
+    for pattern in instance_error_patterns:
+        if pattern in error_lower:
+            return True  # É erro de instância
+    
+    # Default: assume erro de instância por segurança
+    return True
+
+
 def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
     """
     Verifica se o número existe no WhatsApp usando Mega API.
@@ -260,20 +313,43 @@ def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
     try:
         response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        # Detect API/Instance errors (404 or error response)
+        # Parse response first to analyze error type
+        resp_json = None
+        try:
+            resp_json = response.json()
+        except:
+            pass
+        
+        # Detect API/Instance errors
         is_error = False
+        error_message = None
+        
         if response.status_code == 404:
             is_error = True
-        elif response.status_code == 200:
-            try:
-                resp_json = response.json()
-                if isinstance(resp_json, dict) and resp_json.get('error') is True:
-                     is_error = True
-            except:
-                pass
+            error_message = "Instance not found (404)"
+        elif response.status_code == 200 and resp_json:
+            # Handle both dict and list responses
+            data = resp_json
+            if isinstance(data, list) and len(data) > 0:
+                data = data[0]
+            
+            if isinstance(data, dict):
+                # Check if API returned error flag
+                if data.get('error') is True:
+                    error_message = data.get('message', data.get('msg', str(data)))
+                    
+                    # CRITICAL FIX: Check if error is about the NUMBER, not the INSTANCE
+                    if not is_instance_error_message(error_message):
+                        # This is a number validation error, NOT an instance error
+                        print(f"📱 Number {phone_jid} validation failed: {error_message}")
+                        return False, None, False  # is_instance_error=False, so number will be marked invalid
+                    else:
+                        is_error = True
+                        print(f"🔍 Instance error detected: {error_message}")
 
         if is_error:
             print(f"⚠️ Instance {instance_name} API error detected (retry {retry_count}/{MAX_RETRIES})...")
+            print(f"   Error details: {error_message}")
             
             # Try recovery if haven't exceeded retries
             if retry_count < MAX_RETRIES:
@@ -306,11 +382,11 @@ def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
                     return False, None, True
             else:
                 # Already retried - give up
-                print(f"❌ Max retries reached. Instance {instance_name} still disconnected.")
+                print(f"❌ Max retries reached. Instance {instance_name} still has errors.")
                 return False, None, True
 
-        if response.status_code == 200:
-            data = response.json()
+        if response.status_code == 200 and resp_json:
+            data = resp_json
             
             # Handle list response: [{ "exists": true, "jid": "..." }]
             if isinstance(data, list) and len(data) > 0:
@@ -320,7 +396,7 @@ def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
             exists = data.get('exists', False)
             
             if not exists:
-                print(f"API Returned Exists=False. Full Data: {data}")
+                print(f"📱 Number not on WhatsApp. API Response: {data}")
                 
             correct_jid = data.get('jid', phone_jid) # Use API JID if available, else fallback
             return exists, correct_jid, False
