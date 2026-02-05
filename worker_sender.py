@@ -62,6 +62,133 @@ def extract_phone_from_whatsapp_link(whatsapp_link):
     
     return None
 
+def get_instance_status_api(instance_name):
+    """
+    Verifica o status da instância via API.
+    GET /rest/instance/{instance_key}
+    Retorna: 'connected', 'disconnected', ou None se erro
+    """
+    url = f"{MEGA_API_URL}/rest/instance/{instance_name}"
+    headers = {
+        "Authorization": MEGA_API_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"❌ Status API Error: {response.status_code}")
+            return None
+            
+        data = response.json()
+        
+        # Handle array response
+        if isinstance(data, list) and len(data) > 0:
+            data = data[0]
+        
+        # Check various status indicators
+        is_connected = False
+        
+        if data.get('instance_data'):
+            is_connected = data['instance_data'].get('phone_connected', False)
+        elif 'phone_connected' in data:
+            is_connected = data.get('phone_connected', False)
+        elif data.get('status') in ['CONNECTED', 'open', 'connected']:
+            is_connected = True
+        elif isinstance(data.get('instance'), dict):
+            status_val = data['instance'].get('status')
+            if status_val in ['connected', 'CONNECTED', 'open']:
+                is_connected = True
+        
+        if data.get('error'):
+            is_connected = False
+            
+        return 'connected' if is_connected else 'disconnected'
+        
+    except Exception as e:
+        print(f"❌ Exception checking instance status: {e}")
+        return None
+
+def restart_instance_api(instance_name):
+    """
+    Reinicia a instância via API.
+    DELETE /rest/instance/{instance_key}/restart
+    Retorna: True se sucesso, False caso contrário
+    """
+    url = f"{MEGA_API_URL}/rest/instance/{instance_name}/restart"
+    headers = {
+        "Authorization": MEGA_API_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        print(f"🔄 Restarting instance {instance_name}...")
+        response = requests.delete(url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            print(f"✅ Restart command sent successfully")
+            return True
+        else:
+            print(f"❌ Restart failed: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Exception restarting instance: {e}")
+        return False
+
+def verify_and_recover_instance(instance_name):
+    """
+    Verifica status da instância e tenta recovery se necessário.
+    1. Verifica status atual
+    2. Se desconectada/erro, tenta restart
+    3. Aguarda e verifica novamente
+    
+    Retorna: True se instância está conectada, False caso contrário
+    """
+    print(f"🔍 Verifying instance {instance_name} status...")
+    
+    # 1. Check current status
+    status = get_instance_status_api(instance_name)
+    
+    if status == 'connected':
+        print(f"✅ Instance {instance_name} is connected")
+        return True
+    
+    # 2. Try restart
+    print(f"⚠️ Instance {instance_name} not connected (status: {status}). Attempting recovery...")
+    
+    if restart_instance_api(instance_name):
+        # 3. Wait for restart
+        print(f"⏳ Waiting 5s for instance recovery...")
+        time.sleep(5)
+        
+        # 4. Verify again
+        new_status = get_instance_status_api(instance_name)
+        
+        if new_status == 'connected':
+            print(f"✅ Instance {instance_name} recovered successfully!")
+            # Update DB to connected
+            try:
+                with psycopg2.connect(
+                    host=os.environ.get('DB_HOST', 'localhost'),
+                    database=os.environ.get('DB_NAME', 'leads_infinitos'),
+                    user=os.environ.get('DB_USER', 'postgres'),
+                    password=os.environ.get('DB_PASSWORD', 'devpassword'),
+                    port=os.environ.get('DB_PORT', '5432')
+                ) as conn_fix:
+                    with conn_fix.cursor() as cur_fix:
+                        cur_fix.execute("UPDATE instances SET status = 'connected', updated_at = NOW() WHERE name = %s", (instance_name,))
+                    conn_fix.commit()
+                print(f"✅ Instance {instance_name} marked as connected in DB")
+            except Exception as e:
+                print(f"⚠️ Failed to update DB status: {e}")
+            return True
+        else:
+            print(f"❌ Instance {instance_name} recovery failed (status: {new_status})")
+    
+    return False
+
 def format_jid(phone):
     """
     Formats a phone number into a WhatsApp JID.
@@ -106,16 +233,22 @@ def check_daily_limit(user_id, plan_limit):
     finally:
         conn.close()
 
-def check_phone_on_whatsapp(instance_name, phone_jid):
+def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
     """
     Verifica se o número existe no WhatsApp usando Mega API.
     GET /rest/instance/isOnWhatsApp/{nome}?jid={jid}
-    Retorna (exists, correct_jid)
+    
+    Retorna tupla: (exists, correct_jid, is_instance_error)
+    - exists: True se número existe no WhatsApp
+    - correct_jid: JID corrigido pela API
+    - is_instance_error: True se foi erro de instância (não marcar número como inválido)
     """
+    MAX_RETRIES = 1  # Permite 1 retry após recovery
+    
     if os.environ.get('MOCK_SENDER'):
         print(f"[MOCK] Checked existence for {phone_jid}: True")
         time.sleep(0.1)
-        return True, phone_jid
+        return True, phone_jid, False
 
     url = f"{MEGA_API_URL}/rest/instance/isOnWhatsApp/{instance_name}"
     headers = {
@@ -125,10 +258,9 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
     params = {"jid": phone_jid}
     
     try:
-        # print(f"Checking existence for {phone_jid} on instance {instance_name}...")
         response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        # SELF-HEALING: If instance not found (404) or API Says Error
+        # Detect API/Instance errors (404 or error response)
         is_error = False
         if response.status_code == 404:
             is_error = True
@@ -141,23 +273,41 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
                 pass
 
         if is_error:
-            print(f"⚠️ Instance {instance_name} seems invalid/disconnected (API 404/Error). Updating DB to disconnected...")
-            try:
-                with psycopg2.connect(
-                    host=os.environ.get('DB_HOST', 'localhost'),
-                    database=os.environ.get('DB_NAME', 'leads_infinitos'),
-                    user=os.environ.get('DB_USER', 'postgres'),
-                    password=os.environ.get('DB_PASSWORD', 'devpassword'),
-                    port=os.environ.get('DB_PORT', '5432')
-                ) as conn_fix:
-                    with conn_fix.cursor() as cur_fix:
-                        cur_fix.execute("UPDATE instances SET status = 'disconnected' WHERE name = %s", (instance_name,))
-                    conn_fix.commit()
-                print(f"✅ Instance {instance_name} marked as disconnected in DB.")
-            except Exception as e_db:
-                print(f"❌ Failed to auto-update DB status: {e_db}")
+            print(f"⚠️ Instance {instance_name} API error detected (retry {retry_count}/{MAX_RETRIES})...")
             
-            return False, None
+            # Try recovery if haven't exceeded retries
+            if retry_count < MAX_RETRIES:
+                print(f"🔄 Attempting instance recovery...")
+                
+                if verify_and_recover_instance(instance_name):
+                    # Recovery successful - retry the check
+                    print(f"🔄 Retrying number verification after recovery...")
+                    return check_phone_on_whatsapp(instance_name, phone_jid, retry_count + 1)
+                else:
+                    # Recovery failed - mark instance as disconnected but DON'T mark number as invalid
+                    print(f"❌ Recovery failed. Marking instance as disconnected...")
+                    try:
+                        with psycopg2.connect(
+                            host=os.environ.get('DB_HOST', 'localhost'),
+                            database=os.environ.get('DB_NAME', 'leads_infinitos'),
+                            user=os.environ.get('DB_USER', 'postgres'),
+                            password=os.environ.get('DB_PASSWORD', 'devpassword'),
+                            port=os.environ.get('DB_PORT', '5432')
+                        ) as conn_fix:
+                            with conn_fix.cursor() as cur_fix:
+                                cur_fix.execute("UPDATE instances SET status = 'disconnected', updated_at = NOW() WHERE name = %s", (instance_name,))
+                            conn_fix.commit()
+                        print(f"✅ Instance {instance_name} marked as disconnected in DB.")
+                    except Exception as e_db:
+                        print(f"❌ Failed to update DB status: {e_db}")
+                    
+                    # Return with is_instance_error=True so caller doesn't mark number as invalid
+                    print(f"⏭️ Skipping number {phone_jid} (will retry when instance reconnects)")
+                    return False, None, True
+            else:
+                # Already retried - give up
+                print(f"❌ Max retries reached. Instance {instance_name} still disconnected.")
+                return False, None, True
 
         if response.status_code == 200:
             data = response.json()
@@ -173,14 +323,14 @@ def check_phone_on_whatsapp(instance_name, phone_jid):
                 print(f"API Returned Exists=False. Full Data: {data}")
                 
             correct_jid = data.get('jid', phone_jid) # Use API JID if available, else fallback
-            return exists, correct_jid
+            return exists, correct_jid, False
         else:
             print(f"Error checking WhatsApp existence: {response.status_code} - {response.text}")
-            return False, None
+            return False, None, True  # Treat as instance error to be safe
             
     except Exception as e:
         print(f"Exception checking WhatsApp existence: {e}")
-        return False, None
+        return False, None, True  # Treat as instance error to be safe
 
 def send_message(instance_name, phone_jid, message):
     """
@@ -378,7 +528,15 @@ def process_campaigns():
                     phone_jid = format_jid(phone_to_use)
                     
                     # 6. Check WhatsApp Existence (Mega API)
-                    exists, correct_jid = check_phone_on_whatsapp(instance_name, phone_jid)
+                    exists, correct_jid, is_instance_error = check_phone_on_whatsapp(instance_name, phone_jid)
+                    
+                    if is_instance_error:
+                        # Instance error - don't mark number as invalid, just skip for now
+                        # Number stays as 'pending' and will be retried when instance reconnects
+                        print(f"⏭️ Skipping lead {lead['id']} due to instance error (will retry later)")
+                        # Set a longer cooldown since instance has issues
+                        user_next_send_time[user_id] = datetime.now() + timedelta(seconds=30)
+                        continue
                     
                     if not exists:
                         print(f"Number {phone_jid} not on WhatsApp. Marking invalid.")
@@ -424,6 +582,19 @@ def process_campaigns():
                             (new_status, str(log), lead['id'])
                         )
                     conn.commit()
+                    
+                    # 8.1 Post-send: Sync instance status if message was sent successfully
+                    if success:
+                        # Ensure instance is marked as connected in DB (message sent = instance working)
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE instances SET status = 'connected', updated_at = NOW() WHERE name = %s AND status != 'connected'",
+                                    (instance_name,)
+                                )
+                            conn.commit()
+                        except Exception as e_sync:
+                            print(f"⚠️ Failed to sync instance status: {e_sync}")
                     
                     # 9. Set Random Delay for NEXT send (Antiban)
                     # User asked for: Math.floor(Math.random() * (600 - 300 + 1) + 300) -> 300 to 600s
