@@ -1960,6 +1960,87 @@ def admin_dashboard():
                          total_campaigns=total_campaigns,
                          total_sent=total_sent)
 
+@app.route('/admin/campaigns')
+@login_required
+@admin_required
+def admin_campaigns():
+    status_filter = request.args.get('status')
+    
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # Counts for filters
+        cur.execute("SELECT COUNT(*) as count FROM campaigns")
+        count_all = cur.fetchone()['count']
+        
+        cur.execute("SELECT COUNT(*) as count FROM campaigns WHERE status = 'running'")
+        count_running = cur.fetchone()['count']
+        
+        cur.execute("SELECT COUNT(*) as count FROM campaigns WHERE status = 'pending'")
+        count_pending = cur.fetchone()['count']
+        
+        cur.execute("SELECT COUNT(*) as count FROM campaigns WHERE status = 'paused'")
+        count_paused = cur.fetchone()['count']
+        
+        cur.execute("SELECT COUNT(*) as count FROM campaigns WHERE status = 'completed'")
+        count_completed = cur.fetchone()['count']
+        
+        # Build query based on filter
+        if status_filter:
+            cur.execute("""
+                SELECT c.*, u.email as user_email,
+                       (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = c.id) as total_leads,
+                       (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = c.id AND status = 'sent') as sent_count,
+                       (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = c.id AND status = 'pending') as pending_count
+                FROM campaigns c
+                JOIN users u ON c.user_id = u.id
+                WHERE c.status = %s
+                ORDER BY c.created_at DESC
+            """, (status_filter,))
+        else:
+            cur.execute("""
+                SELECT c.*, u.email as user_email,
+                       (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = c.id) as total_leads,
+                       (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = c.id AND status = 'sent') as sent_count,
+                       (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = c.id AND status = 'pending') as pending_count
+                FROM campaigns c
+                JOIN users u ON c.user_id = u.id
+                ORDER BY c.created_at DESC
+            """)
+        
+        campaigns = cur.fetchall()
+    conn.close()
+    
+    counts = {
+        'all': count_all,
+        'running': count_running,
+        'pending': count_pending,
+        'paused': count_paused,
+        'completed': count_completed
+    }
+    
+    return render_template('admin/campaigns.html', 
+                         campaigns=campaigns,
+                         status_filter=status_filter,
+                         counts=counts)
+
+@app.route('/api/admin/campaigns/<int:campaign_id>', methods=['DELETE'])
+@login_required
+@admin_required
+def admin_delete_campaign(campaign_id):
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Delete campaign leads first
+            cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
+            # Delete campaign
+            cur.execute("DELETE FROM campaigns WHERE id = %s", (campaign_id,))
+        conn.commit()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
+        print(f"Erro ao excluir campanha: {e}")
+        return {"error": str(e)}, 500
+
 @app.route('/admin/users')
 @login_required
 @admin_required

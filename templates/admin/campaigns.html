@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}Admin - Campanhas - Leads Infinitos{% endblock %}
+
+{% block body %}
+<div class="container py-8">
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold text-white mb-2">Gerenciar Campanhas</h1>
+            <p class="text-gray-400">Todas as campanhas do sistema</p>
+        </div>
+        <div class="flex gap-4">
+            <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary">← Voltar</a>
+        </div>
+    </div>
+
+    <!-- Filtros -->
+    <div class="card p-4 mb-6">
+        <div class="flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_campaigns') }}"
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-blue-600 text-white' if not status_filter else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                Todas ({{ counts.all }})
+            </a>
+            <a href="{{ url_for('admin_campaigns', status='running') }}"
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-green-600 text-white' if status_filter == 'running' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                🟢 Ativas ({{ counts.running }})
+            </a>
+            <a href="{{ url_for('admin_campaigns', status='pending') }}"
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-yellow-600 text-white' if status_filter == 'pending' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                🟡 Pendentes ({{ counts.pending }})
+            </a>
+            <a href="{{ url_for('admin_campaigns', status='paused') }}"
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-orange-600 text-white' if status_filter == 'paused' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                ⏸️ Pausadas ({{ counts.paused }})
+            </a>
+            <a href="{{ url_for('admin_campaigns', status='completed') }}"
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-purple-600 text-white' if status_filter == 'completed' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                ✅ Concluídas ({{ counts.completed }})
+            </a>
+        </div>
+    </div>
+
+    <!-- Grid de Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {% for campaign in campaigns %}
+        <div class="card p-6 relative">
+            <!-- Status Badge -->
+            <div class="absolute top-4 right-4">
+                {% if campaign.status == 'running' %}
+                <span
+                    class="px-2 py-1 rounded text-xs font-medium bg-green-600/20 text-green-400 border border-green-500/30">🟢
+                    Ativa</span>
+                {% elif campaign.status == 'pending' %}
+                <span
+                    class="px-2 py-1 rounded text-xs font-medium bg-yellow-600/20 text-yellow-400 border border-yellow-500/30">🟡
+                    Pendente</span>
+                {% elif campaign.status == 'paused' %}
+                <span
+                    class="px-2 py-1 rounded text-xs font-medium bg-orange-600/20 text-orange-400 border border-orange-500/30">⏸️
+                    Pausada</span>
+                {% elif campaign.status == 'completed' %}
+                <span
+                    class="px-2 py-1 rounded text-xs font-medium bg-purple-600/20 text-purple-400 border border-purple-500/30">✅
+                    Concluída</span>
+                {% else %}
+                <span
+                    class="px-2 py-1 rounded text-xs font-medium bg-gray-600/20 text-gray-400 border border-gray-500/30">{{
+                    campaign.status }}</span>
+                {% endif %}
+            </div>
+
+            <!-- Info -->
+            <h3 class="text-lg font-bold text-white mb-2 pr-24">{{ campaign.name }}</h3>
+            <p class="text-sm text-gray-400 mb-4">
+                <span class="text-blue-400">{{ campaign.user_email }}</span>
+            </p>
+
+            <!-- Stats -->
+            <div class="grid grid-cols-3 gap-2 mb-4">
+                <div class="bg-gray-800/50 rounded p-2 text-center">
+                    <div class="text-xs text-gray-500">Total</div>
+                    <div class="text-lg font-bold text-white">{{ campaign.total_leads }}</div>
+                </div>
+                <div class="bg-gray-800/50 rounded p-2 text-center">
+                    <div class="text-xs text-gray-500">Enviados</div>
+                    <div class="text-lg font-bold text-green-400">{{ campaign.sent_count }}</div>
+                </div>
+                <div class="bg-gray-800/50 rounded p-2 text-center">
+                    <div class="text-xs text-gray-500">Pendentes</div>
+                    <div class="text-lg font-bold text-yellow-400">{{ campaign.pending_count }}</div>
+                </div>
+            </div>
+
+            <!-- Date -->
+            <p class="text-xs text-gray-500 mb-4">
+                Criada em: {{ campaign.created_at.strftime('%d/%m/%Y %H:%M') if campaign.created_at else 'N/A' }}
+            </p>
+
+            <!-- Actions -->
+            <div class="flex gap-2">
+                <button onclick="deleteCampaign({{ campaign.id }}, '{{ campaign.name }}')"
+                    class="flex-1 px-3 py-2 rounded text-sm font-medium bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/40 transition-colors">
+                    🗑️ Excluir
+                </button>
+            </div>
+        </div>
+        {% else %}
+        <div class="col-span-full text-center py-12 text-gray-500">
+            Nenhuma campanha encontrada.
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    async function deleteCampaign(id, name) {
+        if (!confirm(`Tem certeza que deseja excluir a campanha "${name}"?\n\nEsta ação não pode ser desfeita.`)) {
+            return;
+        }
+
+        try {
+            const res = await fetch(`/api/admin/campaigns/${id}`, {
+                method: 'DELETE'
+            });
+
+            const data = await res.json();
+
+            if (res.ok) {
+                alert('Campanha excluída com sucesso!');
+                window.location.reload();
+            } else {
+                alert('Erro: ' + (data.error || 'Falha ao excluir'));
+            }
+        } catch (err) {
+            alert('Erro: ' + err.message);
+        }
+    }
+</script>
+{% endblock %}
