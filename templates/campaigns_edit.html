@@ -379,10 +379,12 @@
                     'invalid': 'Inválido'
                 }[lead.status] || lead.status;
 
-                // Format sent_at date
+                // Format sent_at date (convert UTC to São Paulo GMT-3)
                 let logsText = '-';
                 if (lead.sent_at) {
                     const d = new Date(lead.sent_at);
+                    // Adjust for São Paulo timezone (UTC-3)
+                    d.setHours(d.getHours() - 3);
                     const months = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
                     const day = String(d.getDate()).padStart(2, '0');
                     const month = months[d.getMonth()];
