@@ -8,8 +8,14 @@ from datetime import datetime, date, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+import pytz
 
 load_dotenv()
+
+# Configuração de horário comercial (timezone América/São Paulo)
+BUSINESS_HOUR_START = 8   # 8:00 AM
+BUSINESS_HOUR_END = 20    # 8:00 PM (20:00)
+BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 
 # Configuração
 MEGA_API_URL = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
@@ -461,6 +467,16 @@ def send_message(instance_name, phone_jid, message):
         return False, error_msg
 
 
+def is_business_hours():
+    """
+    Verifica se estamos em horário comercial (8h às 20h, horário de Brasília).
+    Retorna True se pode enviar, False caso contrário.
+    """
+    now_brazil = datetime.now(BRAZIL_TZ)
+    current_hour = now_brazil.hour
+    return BUSINESS_HOUR_START <= current_hour < BUSINESS_HOUR_END
+
+
 def process_campaigns():
     """
     Loop principal do Worker de Disparo.
@@ -469,6 +485,13 @@ def process_campaigns():
     
     while True:
         try:
+            # Verificar horário comercial antes de processar
+            if not is_business_hours():
+                now_brazil = datetime.now(BRAZIL_TZ)
+                print(f"⏰ Fora do horário comercial ({now_brazil.strftime('%H:%M')} BRT). Aguardando 8h-20h...")
+                time.sleep(60)  # Verificar a cada minuto
+                continue
+            
             conn = get_db_connection()
             
             # 1. Buscar campanhas 'running' OU 'pending' que atingiram horário agendado
