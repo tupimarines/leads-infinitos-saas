@@ -561,17 +561,23 @@ def process_campaigns():
                     active_users_processed += 1
                     
                     # --- FETCH CAMPAIGN INSTANCES (multi-instance support) ---
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        # Try to get instances assigned to this specific campaign
-                        cur.execute("""
-                            SELECT i.name, i.id FROM campaign_instances ci 
-                            JOIN instances i ON ci.instance_id = i.id 
-                            WHERE ci.campaign_id = %s AND i.status = 'connected'
-                            ORDER BY i.id
-                        """, (campaign['id'],))
-                        campaign_insts = cur.fetchall()
+                    campaign_insts = []
+                    try:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            # Try to get instances assigned to this specific campaign
+                            cur.execute("""
+                                SELECT i.name, i.id FROM campaign_instances ci 
+                                JOIN instances i ON ci.instance_id = i.id 
+                                WHERE ci.campaign_id = %s AND i.status = 'connected'
+                                ORDER BY i.id
+                            """, (campaign['id'],))
+                            campaign_insts = cur.fetchall()
+                    except Exception as e_ci:
+                        # Table may not exist yet (first deploy before init_db runs)
+                        # Rollback the failed transaction to keep connection usable
+                        conn.rollback()
                     
-                    # Fallback for campaigns created before multi-instance (no campaign_instances records)
+                    # Fallback: no campaign_instances records or table doesn't exist
                     if not campaign_insts:
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(

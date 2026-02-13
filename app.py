@@ -35,7 +35,7 @@ from functools import wraps
 load_dotenv()
 
 # Super Admin email (multi-instance feature)
-SUPER_ADMIN_EMAIL = 'augusogumi@gmail.com'
+SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
 
 # Configuração Redis
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
