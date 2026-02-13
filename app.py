@@ -3283,18 +3283,47 @@ def get_whatsapp_qr(instance_key):
     result = service.get_qr_code(instance_key)
     
     if result:
-        # Check if we received HTML in 'data' field (Mega API behavior seen in logs)
-        # Format: {"data": "<!DOCTYPE html>... <img src=\"data:image/png;base64,...\"> ..."}
-        html_data = result.get('data')
-        if html_data and isinstance(html_data, str) and '<img' in html_data:
-            # Extract base64 src
-            match = re.search(r'src=["\']data:image/png;base64,([^"\']+)["\']', html_data)
-            if match:
-                return {"base64": match.group(1)}
+        print(f"📷 QR API raw response keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+        print(f"📷 QR API raw response: {str(result)[:500]}")
         
-        # Fallback: return result as is if it follows another format
-        return result
-    return {"error": "Failed to get QR code"}, 500
+        # Try multiple known response formats from Mega API
+        
+        # Format 1: Direct base64 field with actual base64 string
+        base64_val = result.get('base64')
+        if base64_val and isinstance(base64_val, str) and len(base64_val) > 50:
+            return {"base64": base64_val}
+        
+        # Format 2: qrcode field
+        qrcode_val = result.get('qrcode')
+        if qrcode_val and isinstance(qrcode_val, str) and len(qrcode_val) > 50:
+            return {"base64": qrcode_val}
+        
+        # Format 3: Nested under 'data' key
+        data_val = result.get('data')
+        if data_val and isinstance(data_val, str):
+            # Could be HTML with embedded img
+            if '<img' in data_val:
+                match = re.search(r'src=["\']data:image/png;base64,([^"\']+)["\']', data_val)
+                if match:
+                    return {"base64": match.group(1)}
+            # Could be raw base64 string
+            elif len(data_val) > 50:
+                return {"base64": data_val}
+        
+        # Format 4: Check if response itself has a 'code' or 'pairingCode' (some API versions)
+        pairing_code = result.get('pairingCode') or result.get('code')
+        if pairing_code and isinstance(pairing_code, str):
+            return {"pairingCode": pairing_code, "error": f"Use o código de pareamento: {pairing_code}"}
+        
+        # Format 5: Instance might already be connected
+        instance_data = result.get('instance', {})
+        if isinstance(instance_data, dict) and instance_data.get('status') in ('connected', 'open'):
+            return {"error": "Instância já está conectada! Não é necessário escanear QR Code."}, 200
+        
+        # If nothing matched, return descriptive error
+        print(f"⚠️ QR response format not recognized: {result}")
+        return {"error": "QR Code não disponível. Tente novamente em alguns segundos."}, 500
+    return {"error": "Falha ao obter QR code da API"}, 500
 
 
 @app.route("/api/whatsapp/status/<instance_key>")
