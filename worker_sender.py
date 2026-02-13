@@ -23,6 +23,9 @@ MEGA_API_URL = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
 # User said "header Authorization e value token contido em .env".
 MEGA_API_TOKEN = os.environ.get('MEGA_API_TOKEN')
 
+# Super Admin email (multi-instance per-instance daily limit)
+SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+
 # In-memory delay tracking PER INSTANCE for non-blocking concurrency (multi-instance rotation)
 # struct: { instance_name: datetime_when_instance_can_send_next }
 instance_next_send_time = {}
@@ -554,6 +557,21 @@ def process_campaigns():
                             l_type = lic['license_type']
                             if l_type == 'scale': user_limit = max(user_limit, 30)
                             elif l_type == 'pro': user_limit = max(user_limit, 20)
+                    
+                    # Super Admin: multiply daily limit by number of connected instances
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+                        user_row = cur.fetchone()
+                    if user_row and user_row['email'] == SUPER_ADMIN_EMAIL:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            cur.execute(
+                                "SELECT COUNT(*) as cnt FROM instances WHERE user_id = %s AND status = 'connected'",
+                                (user_id,)
+                            )
+                            inst_count = cur.fetchone()['cnt']
+                        if inst_count > 1:
+                            user_limit = user_limit * inst_count
+                            print(f"🔓 Super admin per-instance limit: {user_limit} ({user_limit // inst_count}/inst × {inst_count} instances)")
                     
                     if not check_daily_limit(user_id, user_limit):
                         continue
