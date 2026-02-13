@@ -34,6 +34,9 @@ from functools import wraps
 
 load_dotenv()
 
+# Super Admin email (multi-instance feature)
+SUPER_ADMIN_EMAIL = 'augusogumi@gmail.com'
+
 # Configuração Redis
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
 redis_conn = redis.from_url(REDIS_URL)
@@ -323,6 +326,25 @@ def init_db() -> None:
         """
     )
 
+    # Tabela de junção: instâncias vinculadas a campanhas (multi-instance)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS campaign_instances (
+            id SERIAL PRIMARY KEY,
+            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+            instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+            UNIQUE(campaign_id, instance_id)
+        );
+        """
+    )
+
+    # Adicionar coluna rotation_mode em campaigns (migração)
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS rotation_mode TEXT DEFAULT 'single';
+        """
+    )
+
     
     # Inserir configuração inicial da Hotmart se não existir
     cur.execute(
@@ -488,6 +510,11 @@ def admin_required(f):
             return redirect(url_for('index'))
         return f(*args, **kwargs)
     return decorated_function
+
+def is_super_admin(user=None):
+    """Verifica se o usuário é o super admin (multi-instance feature)"""
+    u = user or current_user
+    return u.is_authenticated and u.email == SUPER_ADMIN_EMAIL
 
 class Campaign:
     def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0):
@@ -2444,7 +2471,16 @@ def admin_update_user(user_id):
 @app.route('/campaigns/new')
 @login_required
 def new_campaign():
-    return render_template('campaigns_new.html')
+    # Fetch user's instances for multi-instance selection
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT id, name, status FROM instances WHERE user_id = %s ORDER BY id ASC", (current_user.id,))
+        user_instances = cur.fetchall()
+    conn.close()
+    
+    return render_template('campaigns_new.html', 
+                           instances=user_instances,
+                           is_super_admin=is_super_admin())
 
 @app.route('/api/scraping-jobs')
 @login_required
@@ -2667,6 +2703,14 @@ def create_campaign():
     # NEW: Get scheduled_start from request (optional)
     scheduled_start = data.get('scheduled_start')  # ISO format string or None
     
+    # NEW: Get instance_ids and rotation_mode (multi-instance)
+    instance_ids = data.get('instance_ids', [])  # list of instance IDs
+    rotation_mode = data.get('rotation_mode', 'single')  # 'single' or 'round_robin'
+    
+    # Validate rotation_mode
+    if rotation_mode not in ('single', 'round_robin'):
+        rotation_mode = 'single'
+    
     # NEW: Validate scheduled_start if provided
     if scheduled_start:
         try:
@@ -2680,25 +2724,34 @@ def create_campaign():
     if not name or not job_id:
         return json.dumps({'error': 'Nome e Job são obrigatórios'}), 400
         
-    # NEW: Restart Instance before starting campaign to prevent API bugs
+    # NEW: Restart Instance(s) before starting campaign to prevent API bugs
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1", (current_user.id,))
-            instance = cur.fetchone()
+            if instance_ids:
+                # Restart selected instances
+                cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s AND id = ANY(%s)", 
+                           (current_user.id, instance_ids))
+            else:
+                # Fallback: restart the default instance
+                cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1", 
+                           (current_user.id,))
+            instances_to_restart = cur.fetchall()
         conn.close()
         
-        if instance and instance.get('apikey'):
-            print(f"🔄 Restarting instance {instance['name']} for new campaign...")
-            service = WhatsappService()
-            # Use apikey or name? api takes 'instance_key'. 
-            # In init_whatsapp, name and apikey are saved. 
-            # Usually apikey in instances table stores the key used for API.
-            service.restart_instance(instance['apikey'])
+        service = WhatsappService()
+        for inst in instances_to_restart:
+            if inst.get('apikey'):
+                print(f"🔄 Restarting instance {inst['name']} for new campaign...")
+                try:
+                    service.restart_instance(inst['apikey'])
+                except Exception as e:
+                    print(f"⚠️ Failed to restart instance {inst['name']}: {e}")
+        if instances_to_restart:
             import time
-            time.sleep(5) # Give it a moment
+            time.sleep(5)  # Give instances a moment after restart
     except Exception as e:
-        print(f"⚠️ Failed to restart instance: {e}")
+        print(f"⚠️ Failed to restart instances: {e}")
         # Continue anyway, don't block campaign creation
         
     try:
@@ -2793,7 +2846,7 @@ def create_campaign():
             return json.dumps({'error': 'Nenhum lead válido encontrado na lista'}), 400
 
         # 4. Criar Campanha
-        # NEW: Create campaign with scheduled_start and dynamic status
+        # NEW: Create campaign with scheduled_start, dynamic status, and rotation_mode
         conn = get_db_connection()
         with conn.cursor() as cur:
             # Determine initial status based on scheduled_start
@@ -2801,14 +2854,36 @@ def create_campaign():
             
             cur.execute(
                 """
-                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, created_at
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
                 """,
-                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status)
+                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status, rotation_mode)
             )
             row = cur.fetchone()
             campaign_id = row[0]
             created_at = row[1]
+            
+            # NEW: Insert campaign_instances associations
+            if instance_ids:
+                # Validate that all instance_ids belong to this user
+                cur.execute("SELECT id FROM instances WHERE user_id = %s AND id = ANY(%s)", 
+                           (current_user.id, instance_ids))
+                valid_ids = [r[0] for r in cur.fetchall()]
+                for inst_id in valid_ids:
+                    cur.execute(
+                        "INSERT INTO campaign_instances (campaign_id, instance_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (campaign_id, inst_id)
+                    )
+            else:
+                # Backward compatible: auto-associate user's default instance
+                cur.execute("SELECT id FROM instances WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1", 
+                           (current_user.id,))
+                default_inst = cur.fetchone()
+                if default_inst:
+                    cur.execute(
+                        "INSERT INTO campaign_instances (campaign_id, instance_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (campaign_id, default_inst[0])
+                    )
         conn.commit()
         conn.close()
         
@@ -3101,14 +3176,20 @@ class WhatsappService:
 @app.route("/whatsapp")
 @login_required
 def whatsapp_config():
-    """Page to configure WhatsApp instance"""
+    """Page to configure WhatsApp instance(s)"""
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM instances WHERE user_id = %s", (current_user.id,))
-        instance = cur.fetchone()
+        cur.execute("SELECT * FROM instances WHERE user_id = %s ORDER BY id ASC", (current_user.id,))
+        instances = cur.fetchall()
     conn.close()
     
-    return render_template("whatsapp_config.html", instance=instance)
+    # Backward compatibility: pass first instance as 'instance' for non-super-admin template
+    instance = instances[0] if instances else None
+    
+    return render_template("whatsapp_config.html", 
+                           instance=instance, 
+                           instances=instances,
+                           is_super_admin=is_super_admin())
 
 
 @app.route("/api/whatsapp/init", methods=["POST"])
@@ -3117,17 +3198,17 @@ def init_whatsapp():
     """API to initialize a WhatsApp instance"""
     instance_name = request.json.get("instance_name") or ""
     
-    # Check if user already has an instance
+    # Check if user already has an instance (skip for super admin)
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute("SELECT name, apikey FROM instances WHERE user_id = %s", (current_user.id,))
-        existing_instance = cur.fetchone()
+        existing_instances = cur.fetchall()
     conn.close()
 
-    if existing_instance:
-        # Prevent duplicates as requested
+    if existing_instances and not is_super_admin():
+        # Prevent duplicates for normal users
         return {
-            "error": f"Você já possui uma instância criada. Nome: {existing_instance[0]}"
+            "error": f"Você já possui uma instância criada. Nome: {existing_instances[0][0]}"
         }, 400
 
     

@@ -23,9 +23,13 @@ MEGA_API_URL = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
 # User said "header Authorization e value token contido em .env".
 MEGA_API_TOKEN = os.environ.get('MEGA_API_TOKEN')
 
-# In-memory delay tracking for non-blocking concurrency
-# struct: { user_id: datetime_when_user_can_send_next }
-user_next_send_time = {}
+# In-memory delay tracking PER INSTANCE for non-blocking concurrency (multi-instance rotation)
+# struct: { instance_name: datetime_when_instance_can_send_next }
+instance_next_send_time = {}
+
+# Round-robin index per campaign
+# struct: { campaign_id: last_used_index }
+campaign_instance_index = {}
 
 def get_db_connection():
     conn = psycopg2.connect(
@@ -536,20 +540,10 @@ def process_campaigns():
             for campaign in campaigns:
                 user_id = campaign['user_id']
                 
-                # --- CHECK COOLDOWN (Non-blocking delay) ---
-                if user_id in user_next_send_time:
-                    if datetime.now() < user_next_send_time[user_id]:
-                        # Still in cooldown, skip this user
-                        continue
-                
-                # --- PROCESS USER ---
-                active_users_processed += 1
-                
                 conn = get_db_connection()
                 try:
                     # 2. Verificar Daily Limit
-                     # Determine limit based on licenses (cached or queried)
-                    user_limit = 10 # Default
+                    user_limit = 10  # Default (Starter)
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute(
                             "SELECT license_type FROM licenses WHERE user_id = %s AND status = 'active' AND expires_at > NOW()", 
@@ -562,23 +556,66 @@ def process_campaigns():
                             elif l_type == 'pro': user_limit = max(user_limit, 20)
                     
                     if not check_daily_limit(user_id, user_limit):
-                        # print(f"User {user_id} limit reached. Skipping.")
-                        # Should we pause the campaign? Maybe not, just wait for tomorrow.
                         continue
                     
-                    # 3. Buscar instância conectada
+                    active_users_processed += 1
+                    
+                    # --- FETCH CAMPAIGN INSTANCES (multi-instance support) ---
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        cur.execute(
-                            "SELECT name FROM instances WHERE user_id = %s AND status = 'connected' ORDER BY updated_at DESC LIMIT 1", 
-                            (user_id,)
-                        )
-                        instance = cur.fetchone()
+                        # Try to get instances assigned to this specific campaign
+                        cur.execute("""
+                            SELECT i.name, i.id FROM campaign_instances ci 
+                            JOIN instances i ON ci.instance_id = i.id 
+                            WHERE ci.campaign_id = %s AND i.status = 'connected'
+                            ORDER BY i.id
+                        """, (campaign['id'],))
+                        campaign_insts = cur.fetchall()
                     
-                    if not instance:
-                        # print(f"User {user_id} no connected instance.")
+                    # Fallback for campaigns created before multi-instance (no campaign_instances records)
+                    if not campaign_insts:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            cur.execute(
+                                "SELECT name, id FROM instances WHERE user_id = %s AND status = 'connected' ORDER BY updated_at DESC LIMIT 1", 
+                                (user_id,)
+                            )
+                            fallback = cur.fetchone()
+                        if fallback:
+                            campaign_insts = [fallback]
+                    
+                    if not campaign_insts:
+                        # No connected instance for this campaign
                         continue
-                        
-                    instance_name = instance['name']
+                    
+                    # --- ROUND-ROBIN: Select next available instance ---
+                    rotation_mode = campaign.get('rotation_mode', 'single')
+                    selected_instance = None
+                    
+                    if rotation_mode == 'round_robin' and len(campaign_insts) > 1:
+                        # Round-robin: try each instance starting from the next in rotation
+                        last_idx = campaign_instance_index.get(campaign['id'], -1)
+                        for offset in range(len(campaign_insts)):
+                            idx = (last_idx + 1 + offset) % len(campaign_insts)
+                            candidate = campaign_insts[idx]
+                            # Check instance-level cooldown
+                            if candidate['name'] in instance_next_send_time:
+                                if datetime.now() < instance_next_send_time[candidate['name']]:
+                                    continue  # Instance still in cooldown, try next
+                            selected_instance = candidate
+                            campaign_instance_index[campaign['id']] = idx
+                            break
+                    else:
+                        # Single instance mode
+                        inst = campaign_insts[0]
+                        if inst['name'] in instance_next_send_time:
+                            if datetime.now() < instance_next_send_time[inst['name']]:
+                                continue  # Instance in cooldown
+                        selected_instance = inst
+                    
+                    if not selected_instance:
+                        # All instances in cooldown
+                        continue
+                    
+                    instance_name = selected_instance['name']
 
                     # 4. Pegar 1 lead pendente (FIFO)
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -633,8 +670,8 @@ def process_campaigns():
                         # Instance error - don't mark number as invalid, just skip for now
                         # Number stays as 'pending' and will be retried when instance reconnects
                         print(f"⏭️ Skipping lead {lead['id']} due to instance error (will retry later)")
-                        # Set a longer cooldown since instance has issues
-                        user_next_send_time[user_id] = datetime.now() + timedelta(seconds=30)
+                        # Set a longer cooldown for THIS INSTANCE since it has issues
+                        instance_next_send_time[instance_name] = datetime.now() + timedelta(seconds=30)
                         continue
                     
                     if not exists:
@@ -645,8 +682,8 @@ def process_campaigns():
                                 (lead['id'],)
                             )
                         conn.commit()
-                        # Short delay for invalid numbers
-                        user_next_send_time[user_id] = datetime.now() + timedelta(seconds=2) 
+                        # Short delay for invalid numbers (per instance)
+                        instance_next_send_time[instance_name] = datetime.now() + timedelta(seconds=2) 
                         continue
                     
                     # Use the corrected JID from API (e.g. might handle the extra 9 digit automatically)
@@ -695,17 +732,15 @@ def process_campaigns():
                         except Exception as e_sync:
                             print(f"⚠️ Failed to sync instance status: {e_sync}")
                     
-                    # 9. Set Random Delay for NEXT send (Antiban)
-                    # User asked for: Math.floor(Math.random() * (600 - 300 + 1) + 300) -> 300 to 600s
-                    # For testing we might want smaller. But let's respect the prompt's algorithm.
+                    # 9. Set Random Delay for NEXT send PER INSTANCE (Antiban)
                     delay_seconds = random.randint(300, 600)
                     
-                    # FOR TESTING: Override to smaller manually if needed, but I will stick to logic.
+                    # FOR TESTING: Override to smaller manually if needed
                     # Uncomment below for fast local testing:
                     # delay_seconds = random.randint(10, 30) 
                     
-                    user_next_send_time[user_id] = datetime.now() + timedelta(seconds=delay_seconds)
-                    print(f"User {user_id} cooldown set for {delay_seconds}s.")
+                    instance_next_send_time[instance_name] = datetime.now() + timedelta(seconds=delay_seconds)
+                    print(f"Instance {instance_name} cooldown set for {delay_seconds}s.")
                     
                 except Exception as e_inner:
                     print(f"Error processing user {user_id}: {e_inner}")

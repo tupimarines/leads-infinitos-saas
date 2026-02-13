@@ -216,6 +216,62 @@
                     </div>
                 </div>
 
+                {% if is_super_admin and instances|length > 0 %}
+                <!-- Seleção de Instâncias (Super Admin Only) -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
+                    <div class="flex justify-between items-center mb-3">
+                        <label class="block text-sm font-semibold text-gray-300">
+                            📱 Instâncias de WhatsApp
+                            <span class="text-xs font-normal text-blue-400 ml-2">(Multi-instância)</span>
+                        </label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs text-gray-400">Rotação</span>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="rotation_toggle" class="sr-only peer">
+                                <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                                    peer-checked:after:translate-x-full peer-checked:after:border-white 
+                                    after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
+                                    after:bg-white after:border-gray-300 after:border after:rounded-full 
+                                    after:h-4 after:w-4 after:transition-all 
+                                    peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div id="instances-checkboxes" class="space-y-2">
+                        {% for inst in instances %}
+                        <label class="flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors
+                            hover:bg-white/5 border border-transparent instance-checkbox-label"
+                            data-instance-id="{{ inst.id }}">
+                            <input type="checkbox" name="instance_ids" value="{{ inst.id }}"
+                                class="instance-checkbox rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
+                                {% if instances|length==1 %}checked{% endif %}>
+                            <div class="flex-1 flex items-center justify-between">
+                                <span class="text-sm text-gray-200">{{ inst.name }}</span>
+                                <span class="text-xs px-2 py-0.5 rounded-full
+                                    {% if inst.status == 'connected' %}
+                                    bg-green-500/10 text-green-400 border border-green-500/30
+                                    {% else %}
+                                    bg-red-500/10 text-red-400 border border-red-500/30
+                                    {% endif %}">
+                                    {{ '● Conectado' if inst.status == 'connected' else '○ Desconectado' }}
+                                </span>
+                            </div>
+                        </label>
+                        {% endfor %}
+                    </div>
+
+                    <p id="rotation-info" class="text-xs text-gray-500 mt-2">
+                        {% if instances|length > 1 %}
+                        Selecione as instâncias para esta campanha. Ative a rotação para alternar entre elas.
+                        {% else %}
+                        Instância única selecionada automaticamente.
+                        {% endif %}
+                    </p>
+                </div>
+                {% endif %}
+
                 <!-- Submit Button -->
                 <div class="pt-4">
                     <button type="submit" id="submitBtn"
@@ -515,6 +571,14 @@
             message_templates: messageTemplates, // Envia lista
             scheduled_start: scheduledStartUTC  // Send UTC
         };
+
+        // Multi-instance support (super admin only)
+        const instanceCheckboxes = document.querySelectorAll('input[name="instance_ids"]:checked');
+        if (instanceCheckboxes.length > 0) {
+            data.instance_ids = Array.from(instanceCheckboxes).map(cb => parseInt(cb.value));
+            const rotationToggle = document.getElementById('rotation_toggle');
+            data.rotation_mode = (rotationToggle && rotationToggle.checked) ? 'round_robin' : 'single';
+        }
 
         try {
             const res = await fetch('/api/campaigns', {
