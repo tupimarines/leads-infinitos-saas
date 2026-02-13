@@ -571,7 +571,6 @@ def process_campaigns():
                             inst_count = cur.fetchone()['cnt']
                         if inst_count > 1:
                             user_limit = user_limit * inst_count
-                            print(f"🔓 Super admin per-instance limit: {user_limit} ({user_limit // inst_count}/inst × {inst_count} instances)")
                     
                     if not check_daily_limit(user_id, user_limit):
                         continue
