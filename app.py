@@ -517,7 +517,7 @@ def is_super_admin(user=None):
     return u.is_authenticated and u.email == SUPER_ADMIN_EMAIL
 
 class Campaign:
-    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0):
+    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0, rotation_mode='single', **kwargs):
         self.id = id
         self.user_id = user_id
         self.name = name
@@ -528,6 +528,7 @@ class Campaign:
         self.closed_deals = closed_deals
         self.scheduled_start = scheduled_start
         self.sent_today = sent_today
+        self.rotation_mode = rotation_mode
 
     @staticmethod
     def create(user_id: int, name: str, message_template: str, daily_limit: int) -> "Campaign":
