@@ -326,6 +326,13 @@ def init_db() -> None:
         """
     )
 
+    # Adicionar coluna sent_by_instance para rastrear qual instância enviou (migração)
+    cur.execute(
+        """
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS sent_by_instance VARCHAR(255);
+        """
+    )
+
     # Tabela de junção: instâncias vinculadas a campanhas (multi-instance)
     cur.execute(
         """

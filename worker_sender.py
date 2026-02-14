@@ -246,6 +246,33 @@ def check_daily_limit(user_id, plan_limit):
     finally:
         conn.close()
 
+def check_instance_daily_limit(user_id, instance_name, plan_limit):
+    """
+    Verifica se uma instância específica já atingiu o limite diário de disparos.
+    Conta apenas mensagens enviadas por esta instância hoje.
+    Retorna True se PODE enviar, False se atingiu o limite.
+    """
+    query = """
+    SELECT COUNT(cl.id) as count 
+    FROM campaign_leads cl
+    JOIN campaigns c ON cl.campaign_id = c.id
+    WHERE c.user_id = %s 
+    AND cl.status = 'sent' 
+    AND cl.sent_by_instance = %s
+    AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
+    """
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (user_id, instance_name))
+            row = cur.fetchone()
+        
+        current_sent = row['count']
+        return current_sent < plan_limit
+    finally:
+        conn.close()
+
 def is_instance_error_message(error_msg):
     """
     Analisa a mensagem de erro da API para determinar se é erro de instância.
@@ -558,22 +585,18 @@ def process_campaigns():
                             if l_type == 'scale': user_limit = max(user_limit, 30)
                             elif l_type == 'pro': user_limit = max(user_limit, 20)
                     
-                    # Super Admin: multiply daily limit by number of connected instances
+                    # Check if super admin (per-instance limit check happens AFTER instance selection)
+                    is_sa = False
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
                         user_row = cur.fetchone()
                     if user_row and user_row['email'] == SUPER_ADMIN_EMAIL:
-                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                            cur.execute(
-                                "SELECT COUNT(*) as cnt FROM instances WHERE user_id = %s AND status = 'connected'",
-                                (user_id,)
-                            )
-                            inst_count = cur.fetchone()['cnt']
-                        if inst_count > 1:
-                            user_limit = user_limit * inst_count
+                        is_sa = True
                     
-                    if not check_daily_limit(user_id, user_limit):
-                        continue
+                    # For regular users: check global daily limit
+                    if not is_sa:
+                        if not check_daily_limit(user_id, user_limit):
+                            continue
                     
                     active_users_processed += 1
                     
@@ -639,6 +662,22 @@ def process_campaigns():
                         continue
                     
                     instance_name = selected_instance['name']
+                    
+                    # Super Admin: per-instance daily limit check
+                    if is_sa:
+                        if not check_instance_daily_limit(user_id, instance_name, user_limit):
+                            # This instance hit its daily limit, try to find another
+                            found_available = False
+                            for alt_inst in campaign_insts:
+                                if alt_inst['name'] != instance_name:
+                                    if check_instance_daily_limit(user_id, alt_inst['name'], user_limit):
+                                        selected_instance = alt_inst
+                                        instance_name = alt_inst['name']
+                                        found_available = True
+                                        break
+                            if not found_available:
+                                # All instances hit their daily limit
+                                continue
 
                     # 4. Pegar 1 lead pendente (FIFO)
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -737,8 +776,8 @@ def process_campaigns():
                     new_status = 'sent' if success else 'failed'
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE campaign_leads SET status = %s, sent_at = NOW(), log = %s WHERE id = %s",
-                            (new_status, str(log), lead['id'])
+                            "UPDATE campaign_leads SET status = %s, sent_at = NOW(), log = %s, sent_by_instance = %s WHERE id = %s",
+                            (new_status, str(log), instance_name, lead['id'])
                         )
                     conn.commit()
                     
