@@ -4501,8 +4501,6 @@ def sync_chatwoot_snooze_route():
                          continue
                         
                     try:
-                if conv_id:
-                    try:
                         url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/conversations/{conv_id}/toggle_status"
                         payload = {
                             "status": "snoozed",
