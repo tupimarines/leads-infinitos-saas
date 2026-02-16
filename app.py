@@ -4411,37 +4411,35 @@ def sync_chatwoot_snooze_route():
                         clean_phone = re.sub(r'\D', '', str(phone or ''))
                         contact_id = None
                         
-                        # Strategy 1: Search by raw phone digits
-                        if clean_phone and not contact_id:
-                            search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
-                            search_resp = requests.get(search_url, params={'q': clean_phone}, headers=headers, timeout=5)
-                            if search_resp.status_code == 200:
-                                data = search_resp.json()
-                                if data.get('payload'):
-                                    contact_id = data['payload'][0]['id']
-                                    # log.append(f"<li>🔍 Lead #{lead['id']}: Found by raw phone {clean_phone}</li>")
+                        strategies = []
+                        if clean_phone:
+                            strategies.append(('Raw', clean_phone))
+                            strategies.append(('+Phone', f"+{clean_phone}"))
+                            # Try last 9 digits (no country/area code sometimes)
+                            if len(clean_phone) >= 9:
+                                strategies.append(('Last9', clean_phone[-9:]))
+                            # Try last 8 digits (very broad match)
+                            if len(clean_phone) >= 8:
+                                strategies.append(('Last8', clean_phone[-8:]))
                         
-                        # Strategy 2: Search by +phone
-                        if clean_phone and not contact_id:
-                            search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
-                            search_resp = requests.get(search_url, params={'q': f"+{clean_phone}"}, headers=headers, timeout=5)
-                            if search_resp.status_code == 200:
-                                data = search_resp.json()
-                                if data.get('payload'):
-                                    contact_id = data['payload'][0]['id']
-                                    # log.append(f"<li>🔍 Lead #{lead['id']}: Found by +phone +{clean_phone}</li>")
+                        if name:
+                            strategies.append(('Name', name))
 
-                        # Strategy 3: Search by Name (Fallback)
-                        if not contact_id and name:
-                            search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
-                            search_resp = requests.get(search_url, params={'q': name}, headers=headers, timeout=5)
-                            if search_resp.status_code == 200:
-                                data = search_resp.json()
-                                if data.get('payload'):
-                                    # Pick the first match
-                                    match = data['payload'][0]
-                                    contact_id = match['id']
-                                    log.append(f"<li>⚠️ Lead #{lead['id']}: Found by Name '{name}' (Phone failed)</li>")
+                        for label, query_val in strategies:
+                            if contact_id: break # Found!
+                            
+                            try:
+                                search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
+                                search_resp = requests.get(search_url, params={'q': query_val}, headers=headers, timeout=5)
+                                if search_resp.status_code == 200:
+                                    data = search_resp.json()
+                                    if data.get('payload'):
+                                        # Use the first one
+                                        match = data['payload'][0]
+                                        contact_id = match['id']
+                                        # log.append(f"<li>🔍 Lead #{lead['id']}: Found by {label} ('{query_val}')</li>")
+                            except:
+                                pass
 
                         if contact_id:
                             # Get Conversations for Contact
@@ -4461,12 +4459,12 @@ def sync_chatwoot_snooze_route():
                                     conn2.commit()
                                     conn2.close()
                                     linked_count += 1
-                                    log.append(f"<li>🔗 Lead #{lead['id']} ({name}): Vinculado à conversa {conv_id}</li>")
+                                    log.append(f"<li>🔗 Lead #{lead['id']} ({name}): Vinculado à conversa {conv_id} (via {label})</li>")
                                 else:
                                      # Contact exists but no conversation? Create one? (Skipping for now)
                                      log.append(f"<li>❓ Lead #{lead['id']}: Contato encontrado (ID {contact_id}) mas sem conversas.</li>")
                         else:
-                            log.append(f"<li>❌ Lead #{lead['id']} ({name}): Não encontrado no Chatwoot (Tel/Ref: {clean_phone})</li>")
+                            log.append(f"<li>❌ Lead #{lead['id']} ({name}): Não encontrado no Chatwoot (Tentado: {clean_phone})</li>")
                             
                     except Exception as e_discovery:
                          log.append(f"<li>⚠️ Discovery Error Lead #{lead['id']}: {str(e_discovery)}</li>")
