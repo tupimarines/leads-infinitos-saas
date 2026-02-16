@@ -77,6 +77,101 @@
     h3 {
         color: #e8ecf6;
     }
+
+    /* Cadence Accordion */
+    .cadence-step {
+        border: 1px solid rgba(79, 124, 255, 0.15);
+        background: rgba(12, 20, 48, 0.5);
+        border-radius: 12px;
+        overflow: hidden;
+        transition: all 0.3s ease;
+    }
+
+    .cadence-step.active {
+        border-color: rgba(79, 124, 255, 0.4);
+        box-shadow: 0 0 20px rgba(79, 124, 255, 0.08);
+    }
+
+    .cadence-step-header {
+        cursor: pointer;
+        padding: 14px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        transition: background 0.2s;
+    }
+
+    .cadence-step-header:hover {
+        background: rgba(79, 124, 255, 0.05);
+    }
+
+    .cadence-step-body {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.35s ease;
+    }
+
+    .cadence-step-body.open {
+        max-height: 600px;
+    }
+
+    .cadence-step-body-inner {
+        padding: 0 16px 16px;
+    }
+
+    .step-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.75rem;
+        padding: 2px 10px;
+        border-radius: 9999px;
+        font-weight: 600;
+    }
+
+    .media-preview {
+        max-width: 120px;
+        max-height: 80px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        object-fit: cover;
+    }
+
+    .terms-card {
+        background: rgba(234, 179, 8, 0.06);
+        border: 1px solid rgba(234, 179, 8, 0.25);
+        border-radius: 12px;
+    }
+
+    .cadence-toggle-track {
+        width: 44px;
+        height: 24px;
+        background: #374151;
+        border-radius: 9999px;
+        position: relative;
+        cursor: pointer;
+        transition: background 0.3s;
+    }
+
+    .cadence-toggle-track.on {
+        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+    }
+
+    .cadence-toggle-thumb {
+        width: 20px;
+        height: 20px;
+        background: white;
+        border-radius: 50%;
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        transition: transform 0.3s;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+
+    .cadence-toggle-track.on .cadence-toggle-thumb {
+        transform: translateX(20px);
+    }
 </style>
 {% endblock %}
 
@@ -206,6 +301,277 @@
                         bloqueios.</p>
                 </div>
 
+                <!-- ============================================ -->
+                <!-- CADENCE TOGGLE -->
+                <!-- ============================================ -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(139, 92, 246, 0.04); border: 1px solid rgba(139, 92, 246, 0.2);">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300">
+                                🔄 Cadência de Follow-up
+                            </label>
+                            <p class="text-xs text-gray-500 mt-1">Ative para enviar mensagens de acompanhamento
+                                automaticamente</p>
+                        </div>
+                        <div class="cadence-toggle-track" id="cadenceToggle" onclick="toggleCadence()">
+                            <div class="cadence-toggle-thumb"></div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="enable_cadence" value="false">
+                </div>
+
+                <!-- ============================================ -->
+                <!-- CADENCE STEPS (hidden by default) -->
+                <!-- ============================================ -->
+                <div id="cadenceStepsContainer" class="space-y-3" style="display: none;">
+
+                    <!-- Step 1: Mensagem Inicial -->
+                    <div class="cadence-step active" data-step="1">
+                        <div class="cadence-step-header" onclick="toggleStep(1)">
+                            <div class="flex items-center gap-3">
+                                <span class="step-badge bg-blue-500/20 text-blue-400 border border-blue-500/30">Etapa
+                                    1</span>
+                                <span class="text-sm font-semibold text-gray-200">Mensagem Inicial</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 0</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="1"
+                                    viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd"
+                                        d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                                        clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body open" data-step-body="1">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <p class="text-xs text-gray-500">Primeira mensagem de prospecção. Usa os templates
+                                    configurados acima.</p>
+                                <div class="flex items-center gap-3">
+                                    <label class="text-xs text-gray-400">Mídia (opcional):</label>
+                                    <input type="file" id="media_step_1" accept="image/*,video/*" class="hidden"
+                                        onchange="handleMediaUpload(1, this)">
+                                    <button type="button" onclick="document.getElementById('media_step_1').click()"
+                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                            </path>
+                                        </svg>
+                                        Anexar imagem/vídeo
+                                    </button>
+                                    <div id="mediaPreview_1" class="hidden flex items-center gap-2">
+                                        <img id="mediaThumb_1" class="media-preview" src="" alt="">
+                                        <button type="button" onclick="removeMedia(1)"
+                                            class="text-xs text-red-400 hover:text-red-300">✕</button>
+                                    </div>
+                                </div>
+                                <input type="hidden" id="mediaData_1" value="">
+                                <input type="hidden" id="mediaName_1" value="">
+                                <input type="hidden" id="mediaType_1" value="">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Follow-up 1 -->
+                    <div class="cadence-step" data-step="2">
+                        <div class="cadence-step-header" onclick="toggleStep(2)">
+                            <div class="flex items-center gap-3">
+                                <span
+                                    class="step-badge bg-purple-500/20 text-purple-400 border border-purple-500/30">Etapa
+                                    2</span>
+                                <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 3</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="2"
+                                    viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd"
+                                        d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                                        clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body" data-step-body="2">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
+                                            anterior:</label>
+                                        <input type="number" id="delay_step_2" value="3" min="1" max="30"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                    </div>
+                                    <button type="button" onclick="generateCadenceCopy(2)"
+                                        class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1 mt-4">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                        </svg>
+                                        Criar com IA
+                                    </button>
+                                </div>
+                                <textarea id="msg_step_2" rows="3"
+                                    placeholder="Olá {nome}, te mandei uma mensagem outro dia sobre..."
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                <div class="flex items-center gap-3">
+                                    <input type="file" id="media_step_2" accept="image/*,video/*" class="hidden"
+                                        onchange="handleMediaUpload(2, this)">
+                                    <button type="button" onclick="document.getElementById('media_step_2').click()"
+                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                            </path>
+                                        </svg>
+                                        Anexar
+                                    </button>
+                                    <div id="mediaPreview_2" class="hidden flex items-center gap-2">
+                                        <img id="mediaThumb_2" class="media-preview" src="" alt="">
+                                        <button type="button" onclick="removeMedia(2)"
+                                            class="text-xs text-red-400 hover:text-red-300">✕</button>
+                                    </div>
+                                </div>
+                                <input type="hidden" id="mediaData_2" value="">
+                                <input type="hidden" id="mediaName_2" value="">
+                                <input type="hidden" id="mediaType_2" value="">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Follow-up 2 -->
+                    <div class="cadence-step" data-step="3">
+                        <div class="cadence-step-header" onclick="toggleStep(3)">
+                            <div class="flex items-center gap-3">
+                                <span
+                                    class="step-badge bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">Etapa
+                                    3</span>
+                                <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 7</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="3"
+                                    viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd"
+                                        d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                                        clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body" data-step-body="3">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
+                                            anterior:</label>
+                                        <input type="number" id="delay_step_3" value="4" min="1" max="30"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                    </div>
+                                    <button type="button" onclick="generateCadenceCopy(3)"
+                                        class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1 mt-4">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                        </svg>
+                                        Criar com IA
+                                    </button>
+                                </div>
+                                <textarea id="msg_step_3" rows="3"
+                                    placeholder="{nome}, tudo bem? Notei que ainda não respondeu..."
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                <div class="flex items-center gap-3">
+                                    <input type="file" id="media_step_3" accept="image/*,video/*" class="hidden"
+                                        onchange="handleMediaUpload(3, this)">
+                                    <button type="button" onclick="document.getElementById('media_step_3').click()"
+                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                            </path>
+                                        </svg>
+                                        Anexar
+                                    </button>
+                                    <div id="mediaPreview_3" class="hidden flex items-center gap-2">
+                                        <img id="mediaThumb_3" class="media-preview" src="" alt="">
+                                        <button type="button" onclick="removeMedia(3)"
+                                            class="text-xs text-red-400 hover:text-red-300">✕</button>
+                                    </div>
+                                </div>
+                                <input type="hidden" id="mediaData_3" value="">
+                                <input type="hidden" id="mediaName_3" value="">
+                                <input type="hidden" id="mediaType_3" value="">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: Break-up -->
+                    <div class="cadence-step" data-step="4">
+                        <div class="cadence-step-header" onclick="toggleStep(4)">
+                            <div class="flex items-center gap-3">
+                                <span class="step-badge bg-red-500/20 text-red-400 border border-red-500/30">Etapa
+                                    4</span>
+                                <span class="text-sm font-semibold text-gray-200">Break-up</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 8</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="4"
+                                    viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd"
+                                        d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                                        clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body" data-step-body="4">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
+                                            anterior:</label>
+                                        <input type="number" id="delay_step_4" value="1" min="1" max="30"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                    </div>
+                                    <button type="button" onclick="generateCadenceCopy(4)"
+                                        class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1 mt-4">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                        </svg>
+                                        Criar com IA
+                                    </button>
+                                </div>
+                                <textarea id="msg_step_4" rows="3"
+                                    placeholder="{nome}, como não tive retorno, entendo que talvez não seja o momento..."
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                <p class="text-xs text-yellow-500/80">⚠️ Última tentativa. Após 24h sem resposta, o lead
+                                    será marcado como "Perdido".</p>
+                                <div class="flex items-center gap-3">
+                                    <input type="file" id="media_step_4" accept="image/*,video/*" class="hidden"
+                                        onchange="handleMediaUpload(4, this)">
+                                    <button type="button" onclick="document.getElementById('media_step_4').click()"
+                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                            </path>
+                                        </svg>
+                                        Anexar
+                                    </button>
+                                    <div id="mediaPreview_4" class="hidden flex items-center gap-2">
+                                        <img id="mediaThumb_4" class="media-preview" src="" alt="">
+                                        <button type="button" onclick="removeMedia(4)"
+                                            class="text-xs text-red-400 hover:text-red-300">✕</button>
+                                    </div>
+                                </div>
+                                <input type="hidden" id="mediaData_4" value="">
+                                <input type="hidden" id="mediaName_4" value="">
+                                <input type="hidden" id="mediaType_4" value="">
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
                 <!-- Agendamento (Visual Only for now) -->
                 <div class="grid grid-cols-2 gap-4">
                     <div>
@@ -271,6 +637,39 @@
                     </p>
                 </div>
                 {% endif %}
+
+                <!-- ============================================ -->
+                <!-- TERMS OF RESPONSIBILITY (always visible) -->
+                <!-- ============================================ -->
+                <div id="termsCard" class="terms-card p-5">
+                    <div class="flex items-start gap-3 mb-3">
+                        <span class="text-xl">⚠️</span>
+                        <div>
+                            <h3 class="text-sm font-bold text-yellow-400">Termos de Responsabilidade</h3>
+                            <p class="text-xs text-gray-400 mt-1 leading-relaxed">
+                                Ao criar esta campanha, você declara estar ciente de que:
+                            </p>
+                        </div>
+                    </div>
+                    <ul class="text-xs text-gray-400 space-y-2 ml-8 mb-4">
+                        <li>• O envio excessivo de mensagens pode levar ao <strong class="text-yellow-400">bloqueio
+                                temporário ou permanente</strong> do seu número de WhatsApp.</li>
+                        <li>• A <strong class="text-yellow-400">responsabilidade pelo uso</strong> da ferramenta é
+                            exclusivamente sua.</li>
+                        <li>• Recomendamos usar mensagens personalizadas e respeitar os limites diários.</li>
+                        <li>• Follow-ups automáticos <strong class="text-yellow-400">param automaticamente</strong> se o
+                            lead responder ou for marcado no Chatwoot.</li>
+                        <li>• O Lead's Infinitos não se responsabiliza por bloqueios resultantes do uso da
+                            ferramenta.</li>
+                    </ul>
+                    <label
+                        class="flex items-center gap-3 cursor-pointer p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
+                        <input type="checkbox" id="termsAccepted"
+                            class="rounded border-yellow-500/50 bg-gray-800 text-yellow-500 focus:ring-yellow-500 focus:ring-offset-0">
+                        <span class="text-xs text-yellow-300 font-medium">Li e aceito os termos de responsabilidade
+                            para disparo de mensagens</span>
+                    </label>
+                </div>
 
                 <!-- Submit Button -->
                 <div class="pt-4">
@@ -572,6 +971,65 @@
             scheduled_start: scheduledStartUTC  // Send UTC
         };
 
+        // TERMS: always validate terms checkbox
+        if (!document.getElementById('termsAccepted').checked) {
+            alert('Aceite os termos de responsabilidade para continuar.');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            return;
+        }
+
+        // CADENCE: include cadence data if enabled
+        const cadenceEnabled = document.getElementById('enable_cadence').value === 'true';
+        if (cadenceEnabled) {
+
+            // Validate at least steps 2-4 have messages
+            let missingSteps = [];
+            for (let s = 2; s <= 4; s++) {
+                const ta = document.getElementById(`msg_step_${s}`);
+                if (!ta || !ta.value.trim()) missingSteps.push(s);
+            }
+            if (missingSteps.length > 0) {
+                alert(`Preencha a mensagem das etapas: ${missingSteps.join(', ')}`);
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
+
+            data.enable_cadence = true;
+            data.terms_accepted = true;
+            data.steps = [];
+
+            // Step 1: uses main message_templates, delay 0
+            const step1Media = document.getElementById('mediaData_1').value;
+            data.steps.push({
+                step_number: 1,
+                step_label: 'Mensagem Inicial',
+                message_templates: messageTemplates,
+                delay_days: 0,
+                media_base64: step1Media || null,
+                media_name: document.getElementById('mediaName_1').value || null,
+                media_type: document.getElementById('mediaType_1').value || null
+            });
+
+            // Steps 2-4: separate messages
+            const stepLabels = { 2: 'Follow-up 1', 3: 'Follow-up 2', 4: 'Break-up' };
+            for (let s = 2; s <= 4; s++) {
+                const msg = document.getElementById(`msg_step_${s}`).value.trim();
+                const delay = parseInt(document.getElementById(`delay_step_${s}`).value) || 3;
+                const mediaB64 = document.getElementById(`mediaData_${s}`).value;
+                data.steps.push({
+                    step_number: s,
+                    step_label: stepLabels[s],
+                    message_templates: [msg],
+                    delay_days: delay,
+                    media_base64: mediaB64 || null,
+                    media_name: document.getElementById(`mediaName_${s}`).value || null,
+                    media_type: document.getElementById(`mediaType_${s}`).value || null
+                });
+            }
+        }
+
         // Multi-instance support (super admin only)
         const instanceCheckboxes = document.querySelectorAll('input[name="instance_ids"]:checked');
         if (instanceCheckboxes.length > 0) {
@@ -692,6 +1150,159 @@
 
     // Initialize
     loadTemplates();
+
+    // ============================================================
+    // CADENCE FUNCTIONS
+    // ============================================================
+
+    // Toggle cadence on/off
+    function toggleCadence() {
+        const track = document.getElementById('cadenceToggle');
+        const hidden = document.getElementById('enable_cadence');
+        const stepsContainer = document.getElementById('cadenceStepsContainer');
+        const isOn = track.classList.toggle('on');
+        hidden.value = isOn ? 'true' : 'false';
+        stepsContainer.style.display = isOn ? 'block' : 'none';
+        // Terms card stays always visible — no toggle needed
+    }
+
+    // Expand/collapse a step
+    function toggleStep(stepNum) {
+        const body = document.querySelector(`[data-step-body="${stepNum}"]`);
+        const chevron = document.querySelector(`.step-chevron[data-step="${stepNum}"]`);
+        const isOpen = body.classList.toggle('open');
+        if (chevron) {
+            chevron.style.transform = isOpen ? 'rotate(180deg)' : '';
+        }
+    }
+
+    // Handle media file selection → encode as base64 + show preview
+    function handleMediaUpload(stepNum, input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        // Validate size (max 16MB)
+        if (file.size > 16 * 1024 * 1024) {
+            alert('Arquivo muito grande. Máximo: 16MB.');
+            input.value = '';
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = function (e) {
+            const base64Full = e.target.result; // data:mime;base64,xxxx
+            const base64Data = base64Full.split(',')[1]; // just the base64 part
+            const mimeType = file.type;
+
+            // Store in hidden fields
+            document.getElementById(`mediaData_${stepNum}`).value = base64Data;
+            document.getElementById(`mediaName_${stepNum}`).value = file.name;
+            document.getElementById(`mediaType_${stepNum}`).value = mimeType.startsWith('video') ? 'video' : 'image';
+
+            // Show preview
+            const preview = document.getElementById(`mediaPreview_${stepNum}`);
+            const thumb = document.getElementById(`mediaThumb_${stepNum}`);
+
+            if (mimeType.startsWith('image')) {
+                thumb.src = base64Full;
+                thumb.style.display = 'block';
+            } else {
+                thumb.src = '';
+                thumb.style.display = 'none';
+                // Add a video icon indicator instead
+                preview.innerHTML = `
+                    <div class="flex items-center gap-2 px-3 py-2 bg-gray-800/50 rounded-lg border border-gray-600/30">
+                        <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                        <span class="text-xs text-gray-300">${file.name}</span>
+                        <button type="button" onclick="removeMedia(${stepNum})" class="text-xs text-red-400 hover:text-red-300">✕</button>
+                    </div>`;
+            }
+            preview.classList.remove('hidden');
+        };
+        reader.readAsDataURL(file);
+    }
+
+    // Remove media from a step
+    function removeMedia(stepNum) {
+        document.getElementById(`mediaData_${stepNum}`).value = '';
+        document.getElementById(`mediaName_${stepNum}`).value = '';
+        document.getElementById(`mediaType_${stepNum}`).value = '';
+        document.getElementById(`mediaPreview_${stepNum}`).classList.add('hidden');
+
+        const thumb = document.getElementById(`mediaThumb_${stepNum}`);
+        if (thumb) {
+            thumb.src = '';
+            // Restore original preview structure
+            const preview = document.getElementById(`mediaPreview_${stepNum}`);
+            preview.innerHTML = `
+                <img id="mediaThumb_${stepNum}" class="media-preview" src="" alt="">
+                <button type="button" onclick="removeMedia(${stepNum})" class="text-xs text-red-400 hover:text-red-300">✕</button>`;
+        }
+
+        // Reset file input
+        const fileInput = document.getElementById(`media_step_${stepNum}`);
+        if (fileInput) fileInput.value = '';
+    }
+
+    // Generate AI copy for a cadence step
+    async function generateCadenceCopy(stepNum) {
+        const businessContext = document.getElementById('business_context').value.trim();
+        if (!businessContext) {
+            alert('Descreva seu negócio no campo acima para a IA gerar mensagens.');
+            document.getElementById('business_context').focus();
+            return;
+        }
+
+        const textarea = document.getElementById(`msg_step_${stepNum}`);
+        if (!textarea) return;
+
+        const stepLabels = { 2: 'follow-up 1', 3: 'follow-up 2', 4: 'break-up (última tentativa)' };
+        const stepLabel = stepLabels[stepNum] || 'mensagem';
+
+        const originalPlaceholder = textarea.placeholder;
+        textarea.disabled = true;
+        textarea.placeholder = '✨ IA gerando mensagem de ' + stepLabel + '...';
+
+        try {
+            const res = await fetch('/api/ai/generate-copy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    business_context: businessContext + `\n\nGere uma mensagem de ${stepLabel}. O lead já recebeu mensagens anteriores e não respondeu. Seja breve e direto.`
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.message) {
+                textarea.value = data.message;
+                textarea.style.borderColor = '#10b981';
+                setTimeout(() => { textarea.style.borderColor = ''; }, 1000);
+            } else {
+                throw new Error(data.error || 'Erro desconhecido');
+            }
+        } catch (err) {
+            alert(`Erro ao gerar copy: ${err.message}`);
+        } finally {
+            textarea.placeholder = originalPlaceholder;
+            textarea.disabled = false;
+        }
+    }
+
+    // Terms checkbox controls submit state — always required
+    function updateSubmitState() {
+        const submitBtn = document.getElementById('submitBtn');
+        const termsCheckbox = document.getElementById('termsAccepted');
+        submitBtn.disabled = !termsCheckbox.checked;
+        submitBtn.style.opacity = termsCheckbox.checked ? '1' : '0.5';
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const termsCheckbox = document.getElementById('termsAccepted');
+        if (termsCheckbox) {
+            termsCheckbox.addEventListener('change', updateSubmitState);
+        }
+        // Initialize: button starts disabled until terms accepted
+        updateSubmitState();
+    });
 
 </script>
 {% endblock %}

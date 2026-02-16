@@ -793,6 +793,28 @@ def process_campaigns():
                             conn.commit()
                         except Exception as e_sync:
                             print(f"⚠️ Failed to sync instance status: {e_sync}")
+                        
+                        # 8.2 Cadence: If campaign has cadence enabled, initialize snooze for follow-ups
+                        try:
+                            if campaign.get('enable_cadence'):
+                                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                                    # Get step 2 delay (next follow-up)
+                                    cur.execute(
+                                        "SELECT delay_days FROM campaign_steps WHERE campaign_id = %s AND step_number = 2 LIMIT 1",
+                                        (campaign['id'],)
+                                    )
+                                    step2 = cur.fetchone()
+                                    if step2:
+                                        delay = step2['delay_days'] or 1
+                                        snooze_until = datetime.now() + timedelta(days=delay)
+                                        cur.execute(
+                                            "UPDATE campaign_leads SET current_step = 1, cadence_status = 'snoozed', snooze_until = %s, last_message_sent_at = NOW() WHERE id = %s",
+                                            (snooze_until, lead['id'])
+                                        )
+                                        conn.commit()
+                                        print(f"  🔄 Cadence: Lead #{lead['id']} snoozed until {snooze_until.strftime('%d/%m %H:%M')}")
+                        except Exception as e_cadence:
+                            print(f"⚠️ Failed to set cadence snooze: {e_cadence}")
                     
                     # 9. Set Random Delay for NEXT send PER INSTANCE (Antiban)
                     delay_seconds = random.randint(300, 600)

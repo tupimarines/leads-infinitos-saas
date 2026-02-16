@@ -352,7 +352,53 @@ def init_db() -> None:
         """
     )
 
-    
+    # ============================================================
+    # CADENCE FEATURE MIGRATIONS
+    # ============================================================
+
+    # Cadence toggle + config on campaigns
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS enable_cadence BOOLEAN DEFAULT FALSE;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS cadence_config JSONB DEFAULT '{}';
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS terms_accepted BOOLEAN DEFAULT FALSE;
+        """
+    )
+
+    # Campaign Steps table — stores message content per cadence step
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS campaign_steps (
+            id SERIAL PRIMARY KEY,
+            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+            step_number INTEGER NOT NULL,
+            step_label TEXT NOT NULL DEFAULT '',
+            message_template TEXT NOT NULL DEFAULT '[]',
+            media_path TEXT,
+            media_type TEXT,
+            delay_days INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(campaign_id, step_number)
+        );
+        """
+    )
+
+    # Cadence tracking columns on campaign_leads
+    cur.execute(
+        """
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS current_step INTEGER DEFAULT 1;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS cadence_status TEXT DEFAULT 'pending';
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMP;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_message_sent_at TIMESTAMP;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS chatwoot_conversation_id INTEGER;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS campaign_tags TEXT[] DEFAULT '{}';
+        """
+    )
+
+    # ============================================================
+    # END CADENCE FEATURE MIGRATIONS
+    # ============================================================
+
     # Inserir configuração inicial da Hotmart se não existir
     cur.execute(
         """
@@ -524,7 +570,7 @@ def is_super_admin(user=None):
     return u.is_authenticated and u.email == SUPER_ADMIN_EMAIL
 
 class Campaign:
-    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0, rotation_mode='single', **kwargs):
+    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0, rotation_mode='single', enable_cadence=False, terms_accepted=False, cadence_config=None, **kwargs):
         self.id = id
         self.user_id = user_id
         self.name = name
@@ -536,6 +582,9 @@ class Campaign:
         self.scheduled_start = scheduled_start
         self.sent_today = sent_today
         self.rotation_mode = rotation_mode
+        self.enable_cadence = enable_cadence or False
+        self.terms_accepted = terms_accepted or False
+        self.cadence_config = cadence_config or {}
 
     @staticmethod
     def create(user_id: int, name: str, message_template: str, daily_limit: int) -> "Campaign":
@@ -1966,6 +2015,95 @@ def delete_campaign(campaign_id):
         
     return redirect(url_for('campaigns'))
 
+# --- Kanban Board Routes ---
+
+@app.route('/campaigns/<int:campaign_id>/kanban')
+@login_required
+def campaign_kanban(campaign_id):
+    """Render the Kanban board for a campaign"""
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        flash("Campanha não encontrada.", "error")
+        return redirect(url_for('campaigns'))
+    
+    # Get total lead count
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
+        total_leads = cur.fetchone()[0]
+    conn.close()
+    
+    return render_template('campaigns_kanban.html', campaign=campaign, total_leads=total_leads)
+
+
+@app.route('/api/campaigns/<int:campaign_id>/kanban-data')
+@login_required
+def campaign_kanban_data(campaign_id):
+    """API: Get all leads for the kanban board"""
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+    
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT id, phone, name, status, current_step, cadence_status, 
+                   snooze_until, last_message_sent_at, chatwoot_conversation_id,
+                   sent_at, whatsapp_link
+            FROM campaign_leads 
+            WHERE campaign_id = %s 
+            ORDER BY current_step ASC, name ASC
+        """, (campaign_id,))
+        leads = cur.fetchall()
+    conn.close()
+    
+    # Serialize datetime objects
+    serialized = []
+    for lead in leads:
+        row = dict(lead)
+        for key in ['snooze_until', 'last_message_sent_at', 'sent_at']:
+            if row.get(key):
+                row[key] = row[key].isoformat()
+        serialized.append(row)
+    
+    return json.dumps({'leads': serialized, 'campaign_id': campaign_id})
+
+
+@app.route('/api/campaigns/<int:campaign_id>/leads/<int:lead_id>/move', methods=['POST'])
+@login_required
+def move_campaign_lead(campaign_id, lead_id):
+    """API: Move a lead to a different step or status on the kanban board"""
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+    
+    data = request.json
+    target_step = data.get('target_step', 1)
+    target_status = data.get('target_status', 'active')
+    
+    # Validate target_status
+    valid_statuses = ['pending', 'active', 'snoozed', 'converted', 'lost', 'stopped', 'replied']
+    if target_status not in valid_statuses:
+        return json.dumps({'error': f'Status inválido: {target_status}'}), 400
+    
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        # Verify lead belongs to this campaign
+        cur.execute("SELECT id FROM campaign_leads WHERE id = %s AND campaign_id = %s", (lead_id, campaign_id))
+        if not cur.fetchone():
+            conn.close()
+            return json.dumps({'error': 'Lead não encontrado'}), 404
+        
+        cur.execute("""
+            UPDATE campaign_leads 
+            SET current_step = %s, cadence_status = %s
+            WHERE id = %s AND campaign_id = %s
+        """, (target_step, target_status, lead_id, campaign_id))
+    conn.commit()
+    conn.close()
+    
+    return json.dumps({'success': True, 'lead_id': lead_id, 'new_step': target_step, 'new_status': target_status})
+
 # --- Rotas de Admin ---
 
 @app.route('/admin')
@@ -2892,6 +3030,70 @@ def create_campaign():
                         "INSERT INTO campaign_instances (campaign_id, instance_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                         (campaign_id, default_inst[0])
                     )
+            
+            # ============================================================
+            # CADENCE: Save steps, media, and flags
+            # ============================================================
+            enable_cadence = data.get('enable_cadence', False)
+            terms_accepted = data.get('terms_accepted', False)
+            steps = data.get('steps', [])
+            
+            if enable_cadence and steps:
+                # Update campaign flags
+                cur.execute(
+                    "UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = %s WHERE id = %s",
+                    (terms_accepted, campaign_id)
+                )
+                
+                # Media storage directory
+                media_dir = os.path.join('storage', str(current_user.id), 'campaign_media')
+                os.makedirs(media_dir, exist_ok=True)
+                
+                for step in steps:
+                    step_number = step.get('step_number', 1)
+                    step_label = step.get('step_label', '')
+                    step_messages = step.get('message_templates', [])
+                    delay_days = step.get('delay_days', 0)
+                    media_base64 = step.get('media_base64')
+                    media_name = step.get('media_name')
+                    media_type = step.get('media_type')  # 'image' or 'video'
+                    
+                    media_path = None
+                    if media_base64 and media_name:
+                        import base64, uuid
+                        # Generate unique filename
+                        ext = os.path.splitext(media_name)[1] or '.bin'
+                        unique_name = f"camp_{campaign_id}_step_{step_number}_{uuid.uuid4().hex[:8]}{ext}"
+                        media_path = os.path.join(media_dir, unique_name)
+                        
+                        # Decode and save
+                        try:
+                            with open(media_path, 'wb') as f:
+                                f.write(base64.b64decode(media_base64))
+                        except Exception as e:
+                            print(f"⚠️ Failed to save media for step {step_number}: {e}")
+                            media_path = None
+                    
+                    # Serialize step messages as JSON
+                    step_template_json = json.dumps(step_messages)
+                    
+                    cur.execute(
+                        """
+                        INSERT INTO campaign_steps (campaign_id, step_number, step_label, message_template, media_path, media_type, delay_days)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (campaign_id, step_number) DO UPDATE SET
+                            step_label = EXCLUDED.step_label,
+                            message_template = EXCLUDED.message_template,
+                            media_path = EXCLUDED.media_path,
+                            media_type = EXCLUDED.media_type,
+                            delay_days = EXCLUDED.delay_days
+                        """,
+                        (campaign_id, step_number, step_label, step_template_json, media_path, media_type, delay_days)
+                    )
+            # ============================================================
+            # END CADENCE
+            # ============================================================
+            
         conn.commit()
         conn.close()
         

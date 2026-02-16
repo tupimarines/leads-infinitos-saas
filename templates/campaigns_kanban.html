@@ -1,0 +1,430 @@
+{% extends "base.html" %}
+
+{% block title %}Kanban - {{ campaign.name }} - Leads Infinitos{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    bg: '#0b1020',
+                    card: '#0f1630',
+                    primary: '#4f7cff',
+                    accent: '#8b5cf6'
+                }
+            }
+        }
+    }
+</script>
+<style>
+    body {
+        background: #0b1020;
+        color: #e8ecf6;
+    }
+
+    .kanban-board {
+        display: flex;
+        gap: 12px;
+        overflow-x: auto;
+        padding-bottom: 16px;
+        min-height: calc(100vh - 200px);
+    }
+
+    .kanban-column {
+        min-width: 240px;
+        max-width: 280px;
+        flex: 1;
+        background: rgba(15, 22, 48, 0.6);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 16px;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .kanban-column-header {
+        padding: 14px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .kanban-column-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px;
+        min-height: 100px;
+    }
+
+    .kanban-column-body.drag-over {
+        background: rgba(79, 124, 255, 0.06);
+        border-radius: 0 0 16px 16px;
+    }
+
+    .lead-card {
+        background: rgba(12, 20, 48, 0.8);
+        border: 1px solid rgba(79, 124, 255, 0.12);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        cursor: grab;
+        transition: all 0.2s;
+        user-select: none;
+    }
+
+    .lead-card:hover {
+        border-color: rgba(79, 124, 255, 0.35);
+        box-shadow: 0 2px 12px rgba(79, 124, 255, 0.1);
+    }
+
+    .lead-card.dragging {
+        opacity: 0.5;
+        transform: rotate(2deg);
+    }
+
+    .column-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 22px;
+        height: 22px;
+        padding: 0 6px;
+        border-radius: 9999px;
+        font-size: 0.7rem;
+        font-weight: 700;
+    }
+
+    .kanban-column-body::-webkit-scrollbar {
+        width: 4px;
+    }
+
+    .kanban-column-body::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    .kanban-column-body::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+    }
+
+    /* Toast notification */
+    .toast {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        padding: 12px 20px;
+        border-radius: 10px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        opacity: 0;
+        transform: translateY(10px);
+        transition: all 0.3s;
+        z-index: 999;
+    }
+
+    .toast.show {
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+    .toast.success {
+        background: rgba(16, 185, 129, 0.15);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        color: #6ee7b7;
+    }
+
+    .toast.error {
+        background: rgba(239, 68, 68, 0.15);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        color: #fca5a5;
+    }
+
+    h1,
+    h2,
+    h3 {
+        color: #e8ecf6;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-[1600px] mx-auto px-4 py-6">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+        <div class="flex items-center gap-4">
+            <a href="/campaigns" class="text-gray-400 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                </svg>
+            </a>
+            <div>
+                <h1 class="text-xl font-bold text-white">{{ campaign.name }}</h1>
+                <p class="text-xs text-gray-500 mt-0.5">
+                    Kanban de cadência •
+                    <span id="totalLeads">{{ total_leads }}</span> leads
+                    {% if campaign.enable_cadence %}
+                    • <span class="text-purple-400">Cadência ativa</span>
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+        <div class="flex items-center gap-3">
+            <button onclick="refreshBoard()"
+                class="text-xs bg-gray-800/50 text-gray-300 px-3 py-2 rounded-lg border border-gray-700/50 hover:bg-gray-700/50 transition-colors flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                    </path>
+                </svg>
+                Atualizar
+            </button>
+        </div>
+    </div>
+
+    <!-- Kanban Board -->
+    <div class="kanban-board" id="kanbanBoard">
+        <!-- Column: Etapa 1 - Inicial -->
+        <div class="kanban-column" data-step="1" data-status="pending">
+            <div class="kanban-column-header">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+                    <span class="text-sm font-semibold text-gray-200">Inicial</span>
+                </div>
+                <span class="column-badge bg-blue-500/15 text-blue-400 border border-blue-500/20"
+                    data-count-step="1">0</span>
+            </div>
+            <div class="kanban-column-body" data-drop="1" ondragover="handleDragOver(event)"
+                ondrop="handleDrop(event, 1, 'active')" ondragleave="handleDragLeave(event)">
+            </div>
+        </div>
+
+        <!-- Column: Etapa 2 - Follow-up 1 -->
+        <div class="kanban-column" data-step="2" data-status="active">
+            <div class="kanban-column-header">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-purple-400"></span>
+                    <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
+                </div>
+                <span class="column-badge bg-purple-500/15 text-purple-400 border border-purple-500/20"
+                    data-count-step="2">0</span>
+            </div>
+            <div class="kanban-column-body" data-drop="2" ondragover="handleDragOver(event)"
+                ondrop="handleDrop(event, 2, 'active')" ondragleave="handleDragLeave(event)">
+            </div>
+        </div>
+
+        <!-- Column: Etapa 3 - Follow-up 2 -->
+        <div class="kanban-column" data-step="3" data-status="active">
+            <div class="kanban-column-header">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
+                    <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
+                </div>
+                <span class="column-badge bg-indigo-500/15 text-indigo-400 border border-indigo-500/20"
+                    data-count-step="3">0</span>
+            </div>
+            <div class="kanban-column-body" data-drop="3" ondragover="handleDragOver(event)"
+                ondrop="handleDrop(event, 3, 'active')" ondragleave="handleDragLeave(event)">
+            </div>
+        </div>
+
+        <!-- Column: Etapa 4 - Break-up -->
+        <div class="kanban-column" data-step="4" data-status="active">
+            <div class="kanban-column-header">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-yellow-400"></span>
+                    <span class="text-sm font-semibold text-gray-200">Break-up</span>
+                </div>
+                <span class="column-badge bg-yellow-500/15 text-yellow-400 border border-yellow-500/20"
+                    data-count-step="4">0</span>
+            </div>
+            <div class="kanban-column-body" data-drop="4" ondragover="handleDragOver(event)"
+                ondrop="handleDrop(event, 4, 'active')" ondragleave="handleDragLeave(event)">
+            </div>
+        </div>
+
+        <!-- Column: Convertido -->
+        <div class="kanban-column" data-step="converted" data-status="converted"
+            style="border-color: rgba(16, 185, 129, 0.15);">
+            <div class="kanban-column-header">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-green-400"></span>
+                    <span class="text-sm font-semibold text-gray-200">Convertido</span>
+                </div>
+                <span class="column-badge bg-green-500/15 text-green-400 border border-green-500/20"
+                    data-count-step="converted">0</span>
+            </div>
+            <div class="kanban-column-body" data-drop="converted" ondragover="handleDragOver(event)"
+                ondrop="handleDrop(event, 0, 'converted')" ondragleave="handleDragLeave(event)">
+            </div>
+        </div>
+
+        <!-- Column: Perdido -->
+        <div class="kanban-column" data-step="lost" data-status="lost" style="border-color: rgba(239, 68, 68, 0.1);">
+            <div class="kanban-column-header">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-red-400"></span>
+                    <span class="text-sm font-semibold text-gray-200">Perdido</span>
+                </div>
+                <span class="column-badge bg-red-500/15 text-red-400 border border-red-500/20"
+                    data-count-step="lost">0</span>
+            </div>
+            <div class="kanban-column-body" data-drop="lost" ondragover="handleDragOver(event)"
+                ondrop="handleDrop(event, 0, 'lost')" ondragleave="handleDragLeave(event)">
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script>
+    const CAMPAIGN_ID = {{ campaign.id }};
+
+    // Create a lead card element
+    function createLeadCard(lead) {
+        const div = document.createElement('div');
+        div.className = 'lead-card';
+        div.draggable = true;
+        div.dataset.leadId = lead.id;
+        div.dataset.step = lead.current_step;
+        div.dataset.status = lead.cadence_status || lead.status;
+
+        const sentAt = lead.last_message_sent_at ? new Date(lead.last_message_sent_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+
+        div.innerHTML = `
+            <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-200 truncate">${lead.name || 'Sem nome'}</p>
+                    <p class="text-xs text-gray-500 truncate mt-0.5">${formatPhone(lead.phone)}</p>
+                </div>
+                ${sentAt ? `<span class="text-[10px] text-gray-600 whitespace-nowrap ml-2">${sentAt}</span>` : ''}
+            </div>
+            ${lead.cadence_status === 'snoozed' ? '<span class="text-[10px] text-yellow-500 mt-1 inline-block">⏸ Em espera</span>' : ''}
+        `;
+
+        div.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', lead.id);
+            div.classList.add('dragging');
+        });
+        div.addEventListener('dragend', () => {
+            div.classList.remove('dragging');
+            document.querySelectorAll('.kanban-column-body.drag-over').forEach(el => el.classList.remove('drag-over'));
+        });
+
+        return div;
+    }
+
+    function formatPhone(phone) {
+        if (!phone) return '';
+        if (phone.length === 13) { // +55 XX 9XXXX-XXXX
+            return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
+        }
+        return phone;
+    }
+
+    // Drag & Drop handlers
+    function handleDragOver(e) {
+        e.preventDefault();
+        e.currentTarget.classList.add('drag-over');
+    }
+
+    function handleDragLeave(e) {
+        e.currentTarget.classList.remove('drag-over');
+    }
+
+    async function handleDrop(e, targetStep, targetStatus) {
+        e.preventDefault();
+        e.currentTarget.classList.remove('drag-over');
+        const leadId = e.dataTransfer.getData('text/plain');
+        if (!leadId) return;
+
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/leads/${leadId}/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_step: targetStep, target_status: targetStatus })
+            });
+
+            if (res.ok) {
+                showToast('Lead movido com sucesso', 'success');
+                refreshBoard();
+            } else {
+                const err = await res.json();
+                showToast(err.error || 'Erro ao mover lead', 'error');
+            }
+        } catch (err) {
+            showToast('Erro de conexão', 'error');
+        }
+    }
+
+    // Load board data
+    async function refreshBoard() {
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/kanban-data`);
+            const data = await res.json();
+
+            if (!res.ok) {
+                showToast(data.error || 'Erro ao carregar dados', 'error');
+                return;
+            }
+
+            // Clear all columns
+            document.querySelectorAll('.kanban-column-body').forEach(col => col.innerHTML = '');
+
+            // Populate columns
+            const leads = data.leads || [];
+            const counts = { 1: 0, 2: 0, 3: 0, 4: 0, converted: 0, lost: 0 };
+
+            leads.forEach(lead => {
+                const cadenceStatus = lead.cadence_status || lead.status;
+                const step = lead.current_step || 1;
+                let targetDrop;
+
+                if (cadenceStatus === 'converted' || cadenceStatus === 'replied') {
+                    targetDrop = 'converted';
+                    counts['converted']++;
+                } else if (cadenceStatus === 'lost' || cadenceStatus === 'stopped') {
+                    targetDrop = 'lost';
+                    counts['lost']++;
+                } else {
+                    targetDrop = String(step);
+                    counts[step] = (counts[step] || 0) + 1;
+                }
+
+                const col = document.querySelector(`[data-drop="${targetDrop}"]`);
+                if (col) {
+                    col.appendChild(createLeadCard(lead));
+                }
+            });
+
+            // Update counts
+            Object.keys(counts).forEach(key => {
+                const badge = document.querySelector(`[data-count-step="${key}"]`);
+                if (badge) badge.textContent = counts[key];
+            });
+
+            document.getElementById('totalLeads').textContent = leads.length;
+
+        } catch (err) {
+            console.error('Board refresh error:', err);
+            showToast('Erro ao carregar board', 'error');
+        }
+    }
+
+    // Toast notification
+    function showToast(msg, type = 'success') {
+        const toast = document.getElementById('toast');
+        toast.textContent = msg;
+        toast.className = `toast ${type} show`;
+        setTimeout(() => { toast.classList.remove('show'); }, 2500);
+    }
+
+    // Initial load
+    document.addEventListener('DOMContentLoaded', refreshBoard);
+</script>
+{% endblock %}
