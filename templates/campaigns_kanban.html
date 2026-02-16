@@ -705,6 +705,10 @@
     }
 
     function getMapLink(lead) {
+        // Prioritize searching by Name to show the official business profile
+        if (lead.name && lead.name !== 'Visitante') {
+            return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lead.name)}`;
+        }
         if (lead.latitude && lead.longitude) {
             return `https://www.google.com/maps/search/?api=1&query=${lead.latitude},${lead.longitude}`;
         }
