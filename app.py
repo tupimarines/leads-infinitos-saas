@@ -4362,7 +4362,7 @@ def sync_chatwoot_snooze_route():
         if not chatwoot_token:
             return "Error: CHATWOOT_ACCESS_TOKEN not properly configured in env variables", 500
 
-    log = ["<h1>Log de Sincronização Chatwoot (Snooze + Discovery)</h1>"]
+    log = ["<h1>Log de Sincronização Chatwoot (Snooze + Discovery v2)</h1>"]
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -4388,8 +4388,6 @@ def sync_chatwoot_snooze_route():
             log.append(f"<p>Encontrados <strong>{len(leads)} leads</strong> em estado 'snoozed' localmente.</p><ul>")
             
             # Calculate tomorrow 8 AM timestamp for Chatwoot
-            # Chatwoot expects just status 'snoozed' or optional snoozed_until
-            # We will use snoozed_until = tomorrow 8am
             tomorrow_8am = (datetime.now() + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
             snooze_timestamp = int(tomorrow_8am.timestamp())
             log.append(f"<p>Horário de retorno definido para: <strong>{tomorrow_8am.strftime('%d/%m/%Y %H:%M')}</strong></p>")
@@ -4405,24 +4403,48 @@ def sync_chatwoot_snooze_route():
             for lead in leads:
                 conv_id = lead['chatwoot_conversation_id']
                 phone = lead['phone']
+                name = lead['name']
                 
                 # If no conversation ID, try to find it
-                if not conv_id and phone:
+                if not conv_id:
                     try:
-                        # 1. Search Contact by Phone
-                        # Clean phone for search (try both with/without +)
-                        clean_phone = re.sub(r'\D', '', str(phone))
-                        search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
-                        search_resp = requests.get(search_url, params={'q': clean_phone}, headers=headers, timeout=5)
-                        
+                        clean_phone = re.sub(r'\D', '', str(phone or ''))
                         contact_id = None
-                        if search_resp.status_code == 200:
-                            data = search_resp.json()
-                            if data.get('payload'):
-                                contact_id = data['payload'][0]['id']
                         
+                        # Strategy 1: Search by raw phone digits
+                        if clean_phone and not contact_id:
+                            search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
+                            search_resp = requests.get(search_url, params={'q': clean_phone}, headers=headers, timeout=5)
+                            if search_resp.status_code == 200:
+                                data = search_resp.json()
+                                if data.get('payload'):
+                                    contact_id = data['payload'][0]['id']
+                                    # log.append(f"<li>🔍 Lead #{lead['id']}: Found by raw phone {clean_phone}</li>")
+                        
+                        # Strategy 2: Search by +phone
+                        if clean_phone and not contact_id:
+                            search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
+                            search_resp = requests.get(search_url, params={'q': f"+{clean_phone}"}, headers=headers, timeout=5)
+                            if search_resp.status_code == 200:
+                                data = search_resp.json()
+                                if data.get('payload'):
+                                    contact_id = data['payload'][0]['id']
+                                    # log.append(f"<li>🔍 Lead #{lead['id']}: Found by +phone +{clean_phone}</li>")
+
+                        # Strategy 3: Search by Name (Fallback)
+                        if not contact_id and name:
+                            search_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/search"
+                            search_resp = requests.get(search_url, params={'q': name}, headers=headers, timeout=5)
+                            if search_resp.status_code == 200:
+                                data = search_resp.json()
+                                if data.get('payload'):
+                                    # Pick the first match
+                                    match = data['payload'][0]
+                                    contact_id = match['id']
+                                    log.append(f"<li>⚠️ Lead #{lead['id']}: Found by Name '{name}' (Phone failed)</li>")
+
                         if contact_id:
-                            # 2. Get Conversations for Contact
+                            # Get Conversations for Contact
                             conv_url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/contacts/{contact_id}/conversations"
                             conv_resp = requests.get(conv_url, headers=headers, timeout=5)
                             
@@ -4439,7 +4461,13 @@ def sync_chatwoot_snooze_route():
                                     conn2.commit()
                                     conn2.close()
                                     linked_count += 1
-                                    log.append(f"<li>🔗 Lead #{lead['id']} ({lead['name']}): Vinculado à conversa {conv_id}</li>")
+                                    log.append(f"<li>🔗 Lead #{lead['id']} ({name}): Vinculado à conversa {conv_id}</li>")
+                                else:
+                                     # Contact exists but no conversation? Create one? (Skipping for now)
+                                     log.append(f"<li>❓ Lead #{lead['id']}: Contato encontrado (ID {contact_id}) mas sem conversas.</li>")
+                        else:
+                            log.append(f"<li>❌ Lead #{lead['id']} ({name}): Não encontrado no Chatwoot (Tel/Ref: {clean_phone})</li>")
+                            
                     except Exception as e_discovery:
                          log.append(f"<li>⚠️ Discovery Error Lead #{lead['id']}: {str(e_discovery)}</li>")
 
@@ -4460,15 +4488,13 @@ def sync_chatwoot_snooze_route():
                         elif resp.status_code == 404:
                              log.append(f"<li>⚠️ Lead #{lead['id']} (Conv {conv_id}): Chatwoot 404 (Not Found)</li>")
                         else:
-                            log.append(f"<li>❌ Lead #{lead['id']} (Conv {conv_id}): Error {resp.status_code} - {resp.text}</li>")
+                            log.append(f"<li>❌ Lead #{lead['id']} (Conv {conv_id}): API Error {resp.status_code} - {resp.text}</li>")
                             
                     except Exception as ex:
                         log.append(f"<li>❌ Lead #{lead['id']} (Conv {conv_id}): Exception - {str(ex)}</li>")
-                else:
-                     log.append(f"<li>❓ Lead #{lead['id']} ({lead['name']}): Conversa não encontrada no Chatwoot (Tel: {phone})</li>")
                 
                 # Rate limit safety
-                time.sleep(0.2)
+                time.sleep(0.1)
                 
             log.append("</ul>")
             log.append(f"<h3>Resumo: {success_count}/{len(leads)} processados. {linked_count} novos vínculos.</h3>")
