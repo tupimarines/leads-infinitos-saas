@@ -650,7 +650,7 @@ class CampaignLead:
     def add_leads(campaign_id: int, leads: list[dict]):
         """
         Adiciona leads à campanha em lote.
-        leads = [{'phone': '...', 'name': '...', 'whatsapp_link': '...' (opcional)}]
+        leads = [{'phone': '...', 'name': '...', 'whatsapp_link': '...', 'address': '...', ...}]
         """
         if not leads:
             return
@@ -659,12 +659,20 @@ class CampaignLead:
         try:
             with conn.cursor() as cur:
                 # Incluir status='pending' explicitamente para garantir processamento pelo worker
+                # Novas colunas de enriquecimento
                 args_str = ','.join(
-                    cur.mogrify("(%s, %s, %s, %s, %s)", 
-                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending')).decode('utf-8') 
+                    cur.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", 
+                               (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending',
+                                l.get('address'), l.get('website'), l.get('category'), l.get('location'),
+                                l.get('reviews_count'), l.get('reviews_rating'), l.get('latitude'), l.get('longitude')
+                               )).decode('utf-8') 
                     for l in leads
                 )
-                cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link, status) VALUES " + args_str)
+                cur.execute("""
+                    INSERT INTO campaign_leads 
+                    (campaign_id, phone, name, whatsapp_link, status, address, website, category, location, reviews_count, reviews_rating, latitude, longitude) 
+                    VALUES 
+                """ + args_str)
             conn.commit()
         except Exception as e:
             print(f"Erro ao adicionar leads: {e}")
@@ -2040,6 +2048,7 @@ def campaign_kanban_data(campaign_id):
             SELECT id, phone, name, status, current_step, cadence_status, 
                    snooze_until, last_message_sent_at, chatwoot_conversation_id,
                    sent_at, whatsapp_link, notes,
+                   address, website, category, location, reviews_count, reviews_rating, latitude, longitude,
                    CASE 
                        WHEN cadence_status IN ('snoozed', 'active') THEN 1
                        WHEN status IN ('sent', 'pending') THEN 2
@@ -2969,6 +2978,16 @@ def create_campaign():
             whatsapp_link_col = next((c for c in cols if c == 'whatsapp_link'), None)
             status_col = next((c for c in cols if c == 'status'), None)
             
+            # Enrichment Columns
+            address_col = next((c for c in cols if 'address' in c or 'endereço' in c), None)
+            website_col = next((c for c in cols if 'website' in c or 'site' in c), None)
+            category_col = next((c for c in cols if 'category' in c or 'categoria' in c), None)
+            location_col = next((c for c in cols if 'location' in c or 'localização' in c), None)
+            reviews_count_col = next((c for c in cols if 'reviews_count' in c or 'avaliações' in c), None)
+            reviews_rating_col = next((c for c in cols if 'reviews_average' in c or 'rating' in c or 'nota' in c), None)
+            latitude_col = next((c for c in cols if 'latitude' in c or 'lat' == c), None)
+            longitude_col = next((c for c in cols if 'longitude' in c or 'lon' == c or 'lng' == c), None)
+            
             # Check availability: Need either phone_col OR whatsapp_link_col
             if not phone_col and not whatsapp_link_col:
                  return json.dumps({'error': 'Nenhuma coluna de telefone ou link de WhatsApp encontrada no arquivo'}), 400
@@ -3007,7 +3026,15 @@ def create_campaign():
                     valid_leads.append({
                         'phone': final_phone,
                         'name': raw_name,
-                        'whatsapp_link': raw_whatsapp_link
+                        'whatsapp_link': raw_whatsapp_link,
+                        'address': str(row[address_col]) if address_col and pd.notna(row[address_col]) else None,
+                        'website': str(row[website_col]) if website_col and pd.notna(row[website_col]) else None,
+                        'category': str(row[category_col]) if category_col and pd.notna(row[category_col]) else None,
+                        'location': str(row[location_col]) if location_col and pd.notna(row[location_col]) else None,
+                        'reviews_count': str(row[reviews_count_col]) if reviews_count_col and pd.notna(row[reviews_count_col]) else None,
+                        'reviews_rating': str(row[reviews_rating_col]) if reviews_rating_col and pd.notna(row[reviews_rating_col]) else None,
+                        'latitude': str(row[latitude_col]) if latitude_col and pd.notna(row[latitude_col]) else None,
+                        'longitude': str(row[longitude_col]) if longitude_col and pd.notna(row[longitude_col]) else None
                     })
 
         except Exception as e:
