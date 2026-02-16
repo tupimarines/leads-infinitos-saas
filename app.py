@@ -4103,6 +4103,94 @@ def update_campaign(campaign_id):
         conn.close()
 
 
+@app.route('/api/campaigns/<int:campaign_id>/steps/<int:step_number>', methods=['GET'])
+@login_required
+def get_step_template(campaign_id, step_number):
+    """Retorna o template de mensagem de um passo específico"""
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+        
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT message_template 
+                FROM campaign_steps 
+                WHERE campaign_id = %s AND step_number = %s
+            """, (campaign_id, step_number))
+            row = cur.fetchone()
+            
+            if not row:
+                return json.dumps({'error': 'Passo não encontrado'}), 404
+                
+            # Parse template (handle string or list)
+            tpl = row['message_template']
+            if not tpl:
+                tpl = []
+            elif isinstance(tpl, str):
+                try:
+                    loaded = json.loads(tpl)
+                    if isinstance(loaded, list):
+                        tpl = loaded
+                    else:
+                        tpl = [tpl] # Legacy string format
+                except:
+                    tpl = [tpl] # Legacy plain string
+            
+            return json.dumps({'template': tpl})
+            
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/campaigns/<int:campaign_id>/steps/<int:step_number>', methods=['POST'])
+@login_required
+def update_step_template(campaign_id, step_number):
+    """Atualiza o template de mensagem de um passo específico"""
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+        
+    data = request.json
+    template_list = data.get('template')
+    
+    if not isinstance(template_list, list):
+        return json.dumps({'error': 'Formato inválido. Esperado lista de mensagens.'}), 400
+        
+    # Filter empty strings
+    template_list = [t.strip() for t in template_list if t and t.strip()]
+    
+    if not template_list:
+        return json.dumps({'error': 'A mensagem não pode estar vazia.'}), 400
+        
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if step exists
+            cur.execute("SELECT 1 FROM campaign_steps WHERE campaign_id = %s AND step_number = %s", (campaign_id, step_number))
+            if not cur.fetchone():
+                return json.dumps({'error': 'Passo não encontrado'}), 404
+            
+            # Update
+            json_tpl = json.dumps(template_list, ensure_ascii=False)
+            cur.execute("""
+                UPDATE campaign_steps 
+                SET message_template = %s 
+                WHERE campaign_id = %s AND step_number = %s
+            """, (json_tpl, campaign_id, step_number))
+            
+        conn.commit()
+        return json.dumps({'success': True})
+            
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/api/campaigns/<int:campaign_id>/replace-leads', methods=['POST'])
 @login_required
 def replace_leads(campaign_id):

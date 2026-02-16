@@ -193,8 +193,18 @@
                     <span class="w-2 h-2 rounded-full bg-blue-400"></span>
                     <span class="text-sm font-semibold text-gray-200">Inicial</span>
                 </div>
-                <span class="column-badge bg-blue-500/15 text-blue-400 border border-blue-500/20"
-                    data-count-step="1">0</span>
+                <div class="flex items-center gap-2">
+                    <button onclick="openMessageModal(1, 'Inicial')"
+                        class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z">
+                            </path>
+                        </svg>
+                    </button>
+                    <span class="column-badge bg-blue-500/15 text-blue-400 border border-blue-500/20"
+                        data-count-step="1">0</span>
+                </div>
             </div>
             <div class="kanban-column-body" data-drop="1" ondragover="handleDragOver(event)"
                 ondrop="handleDrop(event, 1, 'active')" ondragleave="handleDragLeave(event)">
@@ -208,8 +218,18 @@
                     <span class="w-2 h-2 rounded-full bg-purple-400"></span>
                     <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
                 </div>
-                <span class="column-badge bg-purple-500/15 text-purple-400 border border-purple-500/20"
-                    data-count-step="2">0</span>
+                <div class="flex items-center gap-2">
+                    <button onclick="openMessageModal(2, 'Follow-up 1')"
+                        class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z">
+                            </path>
+                        </svg>
+                    </button>
+                    <span class="column-badge bg-purple-500/15 text-purple-400 border border-purple-500/20"
+                        data-count-step="2">0</span>
+                </div>
             </div>
             <div class="kanban-column-body" data-drop="2" ondragover="handleDragOver(event)"
                 ondrop="handleDrop(event, 2, 'active')" ondragleave="handleDragLeave(event)">
@@ -223,8 +243,18 @@
                     <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
                     <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
                 </div>
-                <span class="column-badge bg-indigo-500/15 text-indigo-400 border border-indigo-500/20"
-                    data-count-step="3">0</span>
+                <div class="flex items-center gap-2">
+                    <button onclick="openMessageModal(3, 'Follow-up 2')"
+                        class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z">
+                            </path>
+                        </svg>
+                    </button>
+                    <span class="column-badge bg-indigo-500/15 text-indigo-400 border border-indigo-500/20"
+                        data-count-step="3">0</span>
+                </div>
             </div>
             <div class="kanban-column-body" data-drop="3" ondragover="handleDragOver(event)"
                 ondrop="handleDrop(event, 3, 'active')" ondragleave="handleDragLeave(event)">
@@ -238,8 +268,18 @@
                     <span class="w-2 h-2 rounded-full bg-yellow-400"></span>
                     <span class="text-sm font-semibold text-gray-200">Break-up</span>
                 </div>
-                <span class="column-badge bg-yellow-500/15 text-yellow-400 border border-yellow-500/20"
-                    data-count-step="4">0</span>
+                <div class="flex items-center gap-2">
+                    <button onclick="openMessageModal(4, 'Break-up')"
+                        class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z">
+                            </path>
+                        </svg>
+                    </button>
+                    <span class="column-badge bg-yellow-500/15 text-yellow-400 border border-yellow-500/20"
+                        data-count-step="4">0</span>
+                </div>
             </div>
             <div class="kanban-column-body" data-drop="4" ondragover="handleDragOver(event)"
                 ondrop="handleDrop(event, 4, 'active')" ondragleave="handleDragLeave(event)">
@@ -395,10 +435,164 @@
     </div>
 </div>
 
+<!-- Message Template Modal -->
+<div id="messageModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50">
+    <div
+        class="bg-[#0f1630] border border-gray-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4">
+        <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
+            <h3 class="text-lg font-bold text-white">Editar Mensagem - <span id="msgModalStepName"></span></h3>
+            <button onclick="closeMessageModal()" class="text-gray-400 hover:text-white transition-colors">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
+                    </path>
+                </svg>
+            </button>
+        </div>
+
+        <div class="p-6 overflow-y-auto flex-1 space-y-4">
+            <div class="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
+                <p class="text-xs text-blue-300">
+                    <strong>Dica:</strong> Adicione múltiplas variações. O sistema escolherá uma aleatoriamente para
+                    cada envio.
+                    Use variáveis como <code class="bg-blue-900/50 px-1 rounded">{nome}</code>, <code
+                        class="bg-blue-900/50 px-1 rounded">{empresa}</code>.
+                    Spintax também é suportado (ex: <code>{Olá|Oi}</code>).
+                </p>
+            </div>
+
+            <div id="msgVariationsContainer" class="space-y-3">
+                <!-- Variations inserted here -->
+            </div>
+
+            <button onclick="addVariation()"
+                class="w-full py-2 border-2 border-dashed border-gray-700 hover:border-gray-500 text-gray-500 hover:text-gray-300 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                </svg>
+                Adicionar Variação
+            </button>
+        </div>
+
+        <div class="p-4 border-t border-gray-700 bg-gray-900/50 flex justify-end gap-3">
+            <button onclick="closeMessageModal()"
+                class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancelar</button>
+            <button onclick="saveMessageTemplate()" id="btnSaveMsg"
+                class="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-blue-500/20 flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                </svg>
+                Salvar Alterações
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
 <script>
+    let CURRENT_STEP_NUMBER = null;
+
+    // --- Message Modal Logic ---
+    async function openMessageModal(stepNumber, stepName) {
+        CURRENT_STEP_NUMBER = stepNumber;
+        document.getElementById('msgModalStepName').textContent = stepName;
+        document.getElementById('msgVariationsContainer').innerHTML = '<div class="text-center text-gray-500 py-4">Carregando...</div>';
+        document.getElementById('messageModal').classList.remove('hidden');
+
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/steps/${stepNumber}`);
+            const data = await res.json();
+
+            if (res.ok) {
+                renderVariations(data.template || []);
+            } else {
+                showToast(data.error || 'Erro ao carregar mensagem', 'error');
+                renderVariations([]);
+            }
+        } catch (e) {
+            showToast('Erro de conexão', 'error');
+            renderVariations([]);
+        }
+    }
+
+    function closeMessageModal() {
+        document.getElementById('messageModal').classList.add('hidden');
+        CURRENT_STEP_NUMBER = null;
+    }
+
+    function renderVariations(variations) {
+        const container = document.getElementById('msgVariationsContainer');
+        container.innerHTML = '';
+
+        if (!variations || variations.length === 0) {
+            variations = ['']; // Start with one empty slot
+        }
+
+        variations.forEach(text => addVariation(text));
+    }
+
+    function addVariation(value = '') {
+        const container = document.getElementById('msgVariationsContainer');
+        const div = document.createElement('div');
+        div.className = 'flex gap-2 items-start animate-fade-in';
+
+        div.innerHTML = `
+            <textarea class="msg-variation-input w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary h-24 resize-none placeholder-gray-600 transition-colors"
+                placeholder="Digite a mensagem...">${value}</textarea>
+            <button onclick="removeVariation(this)" class="text-gray-500 hover:text-red-400 p-2 rounded hover:bg-red-500/10 transition-colors" title="Remover variação">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+            </button>
+        `;
+        container.appendChild(div);
+    }
+
+    function removeVariation(btn) {
+        const container = document.getElementById('msgVariationsContainer');
+        if (container.children.length <= 1) {
+            showToast('É necessário ter pelo menos uma variação.', 'error');
+            return;
+        }
+        btn.parentElement.remove();
+    }
+
+    async function saveMessageTemplate() {
+        if (!CURRENT_STEP_NUMBER) return;
+
+        const inputs = document.querySelectorAll('.msg-variation-input');
+        const variations = Array.from(inputs).map(input => input.value.trim()).filter(v => v.length > 0);
+
+        if (variations.length === 0) {
+            showToast('A mensagem não pode estar vazia.', 'error');
+            return;
+        }
+
+        const btn = document.getElementById('btnSaveMsg');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<span class="animate-spin">⌛</span> Salvando...';
+        btn.disabled = true;
+
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/steps/${CURRENT_STEP_NUMBER}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ template: variations })
+            });
+
+            if (res.ok) {
+                showToast('Mensagem salva com sucesso!');
+                closeMessageModal();
+            } else {
+                const data = await res.json();
+                showToast(data.error || 'Erro ao salvar', 'error');
+            }
+        } catch (e) {
+            showToast('Erro de conexão', 'error');
+        } finally {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+    }
     const CAMPAIGN_ID = {{ campaign.id }};
     let ALL_LEADS = {};
     let CURRENT_LEAD_ID = null;
