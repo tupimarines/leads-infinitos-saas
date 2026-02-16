@@ -4382,6 +4382,27 @@ def sync_chatwoot_snooze_route():
                 AND cl.cadence_status = 'snoozed'
                 AND cl.snooze_until > NOW()
             """
+            # ==========================================
+            # MANUAL CORRECTIONS (User provided)
+            # ==========================================
+            manual_fixes = {
+                6386: 890,
+                6388: 895,
+                6389: 900,
+                6393: 907,
+                6617: 877,
+                6618: 880,
+                6622: 887,
+                6624: 891, # Rule: Check reply/human
+                6626: 901,
+                6627: 903  # Rule: Label check
+            }
+            
+            for l_id, c_id in manual_fixes.items():
+                cur.execute("UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s", (c_id, l_id))
+            conn.commit()
+            
+            # Re-fetch leads after update
             cur.execute(query, (user_id,))
             leads = cur.fetchall()
             
@@ -4404,6 +4425,7 @@ def sync_chatwoot_snooze_route():
                 conv_id = lead['chatwoot_conversation_id']
                 phone = lead['phone']
                 name = lead['name']
+                lead_id = lead['id']
                 
                 # If no conversation ID, try to find it
                 if not conv_id:
@@ -4437,7 +4459,6 @@ def sync_chatwoot_snooze_route():
                                         # Use the first one
                                         match = data['payload'][0]
                                         contact_id = match['id']
-                                        # log.append(f"<li>🔍 Lead #{lead['id']}: Found by {label} ('{query_val}')</li>")
                             except:
                                 pass
 
@@ -4455,21 +4476,31 @@ def sync_chatwoot_snooze_route():
                                     # Update Database
                                     conn2 = get_db_connection()
                                     with conn2.cursor() as cur2:
-                                        cur2.execute("UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s", (conv_id, lead['id']))
+                                        cur2.execute("UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s", (conv_id, lead_id))
                                     conn2.commit()
                                     conn2.close()
                                     linked_count += 1
-                                    log.append(f"<li>🔗 Lead #{lead['id']} ({name}): Vinculado à conversa {conv_id} (via {label})</li>")
+                                    log.append(f"<li>🔗 Lead #{lead_id} ({name}): Vinculado à conversa {conv_id} (via {label})</li>")
                                 else:
-                                     # Contact exists but no conversation? Create one? (Skipping for now)
-                                     log.append(f"<li>❓ Lead #{lead['id']}: Contato encontrado (ID {contact_id}) mas sem conversas.</li>")
+                                     log.append(f"<li>❓ Lead #{lead_id}: Contato encontrado (ID {contact_id}) mas sem conversas.</li>")
                         else:
-                            log.append(f"<li>❌ Lead #{lead['id']} ({name}): Não encontrado no Chatwoot (Tentado: {clean_phone})</li>")
+                            log.append(f"<li>❌ Lead #{lead_id} ({name}): Não encontrado no Chatwoot (Tentado: {clean_phone})</li>")
                             
                     except Exception as e_discovery:
-                         log.append(f"<li>⚠️ Discovery Error Lead #{lead['id']}: {str(e_discovery)}</li>")
+                         log.append(f"<li>⚠️ Discovery Error Lead #{lead_id}: {str(e_discovery)}</li>")
 
                 # If we have a conversation ID (either existing or just found), snooze it
+                if conv_id:
+                    # SPECIAL RULES (Manual Overrides)
+                    if lead_id == 6624:
+                        log.append(f"<li>🛑 Lead #{lead_id} (Conv {conv_id}): <strong>Skipped Snooze</strong> (Rule: Reply/Human check required)</li>")
+                        continue
+                        
+                    if lead_id == 6627:
+                         log.append(f"<li>🛑 Lead #{lead_id} (Conv {conv_id}): <strong>Skipped Snooze</strong> (Rule: Label check required)</li>")
+                         continue
+                        
+                    try:
                 if conv_id:
                     try:
                         url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/conversations/{conv_id}/toggle_status"
