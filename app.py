@@ -4312,3 +4312,30 @@ def migrate_notes_route():
         return f"Error: {str(e)}", 500
     finally:
         conn.close()
+
+
+@app.route('/migrate_enrichment')
+@login_required
+def migrate_enrichment_route():
+    # Security check: only super admin
+    if current_user.email != SUPER_ADMIN_EMAIL:
+        return "Unauthorized", 403
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS address TEXT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS website TEXT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS category TEXT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS location TEXT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS reviews_count FLOAT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS reviews_rating FLOAT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS latitude FLOAT;")
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS longitude FLOAT;")
+        conn.commit()
+        return "Enrichment Migration executed successfully."
+    except Exception as e:
+        conn.rollback()
+        return f"Error: {str(e)}", 500
+    finally:
+        conn.close()
