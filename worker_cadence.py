@@ -439,10 +439,21 @@ def process_campaign_sends(campaign, conn):
              
         phone_jid = format_jid(phone)
         
-        templates = json.loads(step_config['message_template']) if step_config['message_template'] else []
-        if not templates: continue
-        
-        message = random.choice(templates)
+        raw_template = step_config['message_template']
+        if not raw_template: continue
+
+        message = ""
+        try:
+            parsed = json.loads(raw_template)
+            if isinstance(parsed, list):
+                message = random.choice(parsed)
+            elif isinstance(parsed, str):
+                message = parsed
+            else:
+                message = str(parsed)
+        except:
+            # If not JSON, use as plain string
+            message = raw_template
         lead_name = lead.get('name', 'Visitante')
         message = message.replace('{{nome}}', lead_name).replace('{{name}}', lead_name)
 

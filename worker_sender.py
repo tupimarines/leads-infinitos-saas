@@ -757,11 +757,15 @@ def process_campaigns():
                     message_text = "Olá!"
                     if campaign['message_template']:
                         try:
-                            templates = json.loads(campaign['message_template'])
-                            if isinstance(templates, list):
-                                message_text = random.choice(templates)
+                            # Try to parse as JSON list or string
+                            parsed = json.loads(campaign['message_template'])
+                            if isinstance(parsed, list):
+                                message_text = random.choice(parsed)
+                            elif isinstance(parsed, str):
+                                message_text = parsed
                         except:
-                            pass
+                            # If not JSON, use as plain string
+                            message_text = campaign['message_template']
                     
                     # Replace variables
                     if lead.get('name'):
