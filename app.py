@@ -392,6 +392,7 @@ def init_db() -> None:
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_message_sent_at TIMESTAMP;
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS chatwoot_conversation_id INTEGER;
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS campaign_tags TEXT[] DEFAULT '{}';
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS notes TEXT;
         """
     )
 
@@ -2038,10 +2039,15 @@ def campaign_kanban_data(campaign_id):
         cur.execute("""
             SELECT id, phone, name, status, current_step, cadence_status, 
                    snooze_until, last_message_sent_at, chatwoot_conversation_id,
-                   sent_at, whatsapp_link
+                   sent_at, whatsapp_link, notes,
+                   CASE 
+                       WHEN cadence_status IN ('snoozed', 'active') THEN 1
+                       WHEN status IN ('sent', 'pending') THEN 2
+                       ELSE 3
+                   END as status_priority
             FROM campaign_leads 
             WHERE campaign_id = %s 
-            ORDER BY current_step ASC, name ASC
+            ORDER BY current_step ASC, status_priority ASC, last_message_sent_at DESC NULLS LAST, name ASC
         """, (campaign_id,))
         leads = cur.fetchall()
     conn.close()
@@ -2092,6 +2098,37 @@ def move_campaign_lead(campaign_id, lead_id):
     conn.close()
     
     return json.dumps({'success': True, 'lead_id': lead_id, 'new_step': target_step, 'new_status': target_status})
+
+
+@app.route('/api/leads/<int:lead_id>/note', methods=['POST'])
+@login_required
+def update_lead_note(lead_id):
+    """API: Update note for a specific lead"""
+    data = request.json
+    note = data.get('note', '')
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Security check: ensure lead belongs to a campaign owned by user
+            cur.execute("""
+                SELECT cl.id FROM campaign_leads cl
+                JOIN campaigns c ON cl.campaign_id = c.id
+                WHERE cl.id = %s AND c.user_id = %s
+            """, (lead_id, current_user.id))
+            
+            if not cur.fetchone():
+                return json.dumps({'error': 'Lead não encontrado ou acesso negado'}), 404
+            
+            cur.execute("UPDATE campaign_leads SET notes = %s WHERE id = %s", (note, lead_id))
+        conn.commit()
+        return json.dumps({'success': True})
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
 
 # --- Rotas de Admin ---
 
@@ -4223,6 +4260,26 @@ def migrate_cadence_route():
                 
         conn.commit()
         return "".join(log)
+    except Exception as e:
+        conn.rollback()
+        return f"Error: {str(e)}", 500
+    finally:
+        conn.close()
+
+
+@app.route('/migrate_notes')
+@login_required
+def migrate_notes_route():
+    # Security check: only super admin
+    if current_user.email != SUPER_ADMIN_EMAIL:
+        return "Unauthorized", 403
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS notes TEXT;")
+        conn.commit()
+        return "Migration notes executed successfully."
     except Exception as e:
         conn.rollback()
         return f"Error: {str(e)}", 500

@@ -279,11 +279,92 @@
     </div>
 </div>
 
+</div>
+
+<!-- Lead Details Modal -->
+<div id="leadModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50">
+    <div
+        class="bg-[#0f1630] border border-gray-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4">
+        <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
+            <h3 class="text-lg font-bold text-white">Detalhes do Lead</h3>
+            <button onclick="closeLeadModal()" class="text-gray-400 hover:text-white transition-colors">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
+                    </path>
+                </svg>
+            </button>
+        </div>
+        <div class="p-6 overflow-y-auto flex-1 space-y-6">
+            <!-- Header Info -->
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-xs text-gray-500 uppercase tracking-wider">Nome</label>
+                    <p class="text-gray-200 font-medium text-lg" id="modalName">-</p>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 uppercase tracking-wider">Telefone</label>
+                    <div class="flex items-center gap-2">
+                        <p class="text-gray-200 font-medium" id="modalPhone">-</p>
+                        <a href="#" target="_blank" id="modalLink"
+                            class="text-blue-400 hover:text-blue-300 text-xs bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">Abrir
+                            WhatsApp</a>
+                    </div>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 uppercase tracking-wider">Status</label>
+                    <p class="text-gray-200" id="modalStatus">-</p>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 uppercase tracking-wider">Última Interação</label>
+                    <p class="text-gray-200" id="modalLastSent">-</p>
+                </div>
+            </div>
+
+            <!-- Notes -->
+            <div class="bg-gray-900/30 p-4 rounded-xl border border-gray-700/50">
+                <label class="text-xs text-gray-500 uppercase tracking-wider mb-2 block font-semibold">Anotações</label>
+                <textarea id="modalNotes"
+                    class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary h-32 resize-none placeholder-gray-600 transition-colors"
+                    placeholder="Escreva observações importantes sobre este lead..."></textarea>
+                <div class="flex justify-end mt-3">
+                    <button onclick="saveNote()" id="btnSaveNote"
+                        class="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-blue-500/20 flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7">
+                            </path>
+                        </svg>
+                        Salvar Nota
+                    </button>
+                </div>
+            </div>
+
+            <!-- Metadata -->
+            <div class="border-t border-gray-700/50 pt-4">
+                <details class="group">
+                    <summary
+                        class="flex items-center gap-2 cursor-pointer text-xs text-gray-500 hover:text-gray-300 transition-colors select-none">
+                        <svg class="w-4 h-4 transition-transform group-open:rotate-90" fill="none" stroke="currentColor"
+                            viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7">
+                            </path>
+                        </svg>
+                        Ver dados técnicos (JSON)
+                    </summary>
+                    <pre id="modalRaw"
+                        class="mt-3 bg-gray-950 p-4 rounded-lg text-[10px] text-gray-400 overflow-x-auto font-mono border border-gray-800"></pre>
+                </details>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
 <script>
     const CAMPAIGN_ID = {{ campaign.id }};
+    let ALL_LEADS = {};
+    let CURRENT_LEAD_ID = null;
 
     // Create a lead card element
     function createLeadCard(lead) {
@@ -307,6 +388,13 @@
             ${lead.cadence_status === 'snoozed' ? '<span class="text-[10px] text-yellow-500 mt-1 inline-block">⏸ Em espera</span>' : ''}
         `;
 
+        // Open modal on click (ignore if dragging)
+        div.onclick = (e) => {
+            if (!div.classList.contains('dragging') && !e.target.closest('button')) {
+                openLeadModal(lead.id);
+            }
+        };
+
         div.addEventListener('dragstart', (e) => {
             e.dataTransfer.setData('text/plain', lead.id);
             div.classList.add('dragging');
@@ -319,13 +407,7 @@
         return div;
     }
 
-    function formatPhone(phone) {
-        if (!phone) return '';
-        if (phone.length === 13) { // +55 XX 9XXXX-XXXX
-            return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
-        }
-        return phone;
-    }
+
 
     // Drag & Drop handlers
     function handleDragOver(e) {
@@ -375,12 +457,15 @@
 
             // Clear all columns
             document.querySelectorAll('.kanban-column-body').forEach(col => col.innerHTML = '');
+            ALL_LEADS = {}; // Reset cache
 
             // Populate columns
             const leads = data.leads || [];
             const counts = { 1: 0, 2: 0, 3: 0, 4: 0, converted: 0, lost: 0 };
 
             leads.forEach(lead => {
+                ALL_LEADS[lead.id] = lead; // Cache lead data
+
                 const cadenceStatus = lead.cadence_status || lead.status;
                 const step = lead.current_step || 1;
                 let targetDrop;
@@ -422,6 +507,97 @@
         toast.textContent = msg;
         toast.className = `toast ${type} show`;
         setTimeout(() => { toast.classList.remove('show'); }, 2500);
+    }
+
+    // --- Modal Logic ---
+    function openLeadModal(leadId) {
+        const lead = ALL_LEADS[leadId];
+        if (!lead) return;
+
+        CURRENT_LEAD_ID = leadId;
+
+        // Populate fields
+        document.getElementById('modalName').textContent = lead.name || 'Sem nome';
+        document.getElementById('modalPhone').textContent = formatPhone(lead.phone);
+        document.getElementById('modalStatus').textContent = (lead.cadence_status || lead.status).toUpperCase();
+
+        const sentAt = lead.last_message_sent_at ? new Date(lead.last_message_sent_at).toLocaleString() : '-';
+        document.getElementById('modalLastSent').textContent = sentAt;
+
+        const link = lead.whatsapp_link || `https://wa.me/${lead.phone}`;
+        const linkEl = document.getElementById('modalLink');
+        linkEl.href = link;
+
+        // Notes
+        document.getElementById('modalNotes').value = lead.notes || '';
+
+        // Raw Data
+        document.getElementById('modalRaw').textContent = JSON.stringify(lead, null, 2);
+
+        // Show
+        document.getElementById('leadModal').classList.remove('hidden');
+    }
+
+    function closeLeadModal() {
+        document.getElementById('leadModal').classList.add('hidden');
+        CURRENT_LEAD_ID = null;
+    }
+
+    async function saveNote() {
+        if (!CURRENT_LEAD_ID) return;
+
+        const note = document.getElementById('modalNotes').value.trim();
+        const btn = document.getElementById('btnSaveNote');
+        const originalText = btn.innerHTML;
+
+        btn.innerHTML = '<span class="animate-spin">⌛</span> Salvando...';
+        btn.disabled = true;
+
+        try {
+            const res = await fetch(`/api/leads/${CURRENT_LEAD_ID}/note`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ note: note })
+            });
+
+            if (res.ok) {
+                // Update local cache
+                if (ALL_LEADS[CURRENT_LEAD_ID]) {
+                    ALL_LEADS[CURRENT_LEAD_ID].notes = note;
+                }
+                showToast('Nota salva com sucesso!');
+                // Optional: close modal? No, let user keep editing.
+            } else {
+                showToast('Erro ao salvar nota', 'error');
+            }
+        } catch (e) {
+            showToast('Erro de conexão', 'error');
+        } finally {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+    }
+
+    // Close on escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeLeadModal();
+    });
+
+    // Close on click outside
+    document.getElementById('leadModal').addEventListener('click', (e) => {
+        if (e.target.id === 'leadModal') closeLeadModal();
+    });
+
+    // Format phone helper
+    function formatPhone(phone) {
+        if (!phone) return '-';
+        const cleaned = phone.replace(/\D/g, '');
+        if (cleaned.length === 11) {
+            return `(${cleaned.substring(0, 2)}) ${cleaned.substring(2, 7)}-${cleaned.substring(7)}`;
+        } else if (cleaned.length === 10) {
+            return `(${cleaned.substring(0, 2)}) ${cleaned.substring(2, 6)}-${cleaned.substring(6)}`;
+        }
+        return phone;
     }
 
     // Initial load
