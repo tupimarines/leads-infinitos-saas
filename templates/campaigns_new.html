@@ -582,8 +582,8 @@
                     </div>
                 </div>
 
-                {% if is_super_admin and instances|length > 0 %}
-                <!-- Seleção de Instâncias (Super Admin Only) -->
+                {% if instances|length > 0 %}
+                <!-- Seleção de Instâncias (Multi-instância) -->
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
                     <div class="flex justify-between items-center mb-3">
@@ -591,6 +591,7 @@
                             📱 Instâncias de WhatsApp
                             <span class="text-xs font-normal text-blue-400 ml-2">(Multi-instância)</span>
                         </label>
+                        {% if is_super_admin %}
                         <div class="flex items-center gap-2">
                             <span class="text-xs text-gray-400">Rotação</span>
                             <label class="relative inline-flex items-center cursor-pointer">
@@ -603,6 +604,7 @@
                                     peer-checked:bg-blue-600"></div>
                             </label>
                         </div>
+                        {% endif %}
                     </div>
 
                     <div id="instances-checkboxes" class="space-y-2">
@@ -1031,11 +1033,24 @@
         }
 
         // Multi-instance support (super admin only)
+        // Instance Validation (Required for everyone)
         const instanceCheckboxes = document.querySelectorAll('input[name="instance_ids"]:checked');
-        if (instanceCheckboxes.length > 0) {
-            data.instance_ids = Array.from(instanceCheckboxes).map(cb => parseInt(cb.value));
-            const rotationToggle = document.getElementById('rotation_toggle');
-            data.rotation_mode = (rotationToggle && rotationToggle.checked) ? 'round_robin' : 'single';
+        if (instanceCheckboxes.length === 0) {
+            alert('Selecione pelo menos uma instância de WhatsApp.');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            return;
+        }
+
+        const instanceIds = Array.from(instanceCheckboxes).map(cb => parseInt(cb.value));
+        data.instance_ids = instanceIds;
+
+        // Rotation mode (only if toggle exists, default single)
+        const rotationToggle = document.getElementById('rotation_toggle');
+        if (rotationToggle && rotationToggle.checked) {
+            data.rotation_mode = 'round_robin';
+        } else {
+            data.rotation_mode = 'single';
         }
 
         try {

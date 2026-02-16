@@ -1250,17 +1250,6 @@ class ScrapingJob:
         if current_location is not None:
             update_fields.append("current_location = %s")
             params.append(current_location)
-        
-        if error_message is not None:
-            update_fields.append("error_message = %s")
-            params.append(error_message)
-        
-        if status == 'running' and 'started_at' not in [f.split(' = ')[0] for f in update_fields]:
-            update_fields.append("started_at = %s")
-            params.append(datetime.now().isoformat())
-        
-        if status in ['completed', 'failed']:
-            update_fields.append("completed_at = %s")
             params.append(datetime.now().isoformat())
         
         params.append(job_id)
@@ -4155,3 +4144,87 @@ def replace_leads(campaign_id):
     except Exception as e:
         if 'conn' in locals(): conn.close()
         return json.dumps({'error': str(e)}), 500
+
+# ==========================================
+# MIGRATION ROUTE (TEMPORARY - REMOVE AFTER USE)
+# ==========================================
+@app.route('/migrate_cadence')
+@login_required
+def migrate_cadence_route():
+    # Security check: only super admin
+    if current_user.email != SUPER_ADMIN_EMAIL:
+        return "Unauthorized", 403
+    
+    conn = get_db_connection()
+    log = ["<h1>Relatório de Migração de Cadência</h1>"]
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Get Super Admin ID
+            cur.execute("SELECT id FROM users WHERE email = %s", (SUPER_ADMIN_EMAIL,))
+            user = cur.fetchone()
+            if not user:
+                return "Super admin ({}) not found".format(SUPER_ADMIN_EMAIL), 404
+            
+            user_id = user['id']
+            log.append(f"<p><strong>Super Admin ID:</strong> {user_id}</p>")
+            
+            # 2. Get all campaigns
+            cur.execute("SELECT id, name FROM campaigns WHERE user_id = %s", (user_id,))
+            campaigns = cur.fetchall()
+            
+            log.append(f"<p>Encontradas {len(campaigns)} campanhas.</p><ul>")
+            
+            for camp in campaigns:
+                cid = camp['id']
+                cname = camp['name']
+                log.append(f"<li><strong>Campanha {cid} ({cname}):</strong>")
+                
+                # Enable cadence
+                cur.execute("UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = TRUE WHERE id = %s", (cid,))
+                
+                # Check steps
+                cur.execute("SELECT count(*) as count FROM campaign_steps WHERE campaign_id = %s", (cid,))
+                count = cur.fetchone()['count']
+                
+                if count == 0:
+                    steps = [
+                        (1, "Mensagem Inicial", "[]", 0),
+                        (2, "Follow-up 1", "Olá, conseguiu ver minha mensagem anterior?", 1),
+                        (3, "Follow-up 2", "Oi novamente! Imagino que esteja corrido. Se tiver interesse, estou por aqui.", 2),
+                        (4, "Break-up", "Última tentativa. Vou encerrar meu contato por enquanto.", 3)
+                    ]
+                    for s_num, s_label, s_msg, s_delay in steps:
+                        cur.execute("""
+                            INSERT INTO campaign_steps (campaign_id, step_number, step_label, message_template, delay_days)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (cid, s_num, s_label, s_msg, s_delay))
+                    log.append(" <span style='color:green'>Steps criados.</span>")
+                else:
+                    log.append(" <span style='color:gray'>Steps já existem.</span>")
+                
+                # Update leads
+                cur.execute("""
+                    UPDATE campaign_leads
+                    SET current_step = 1,
+                        cadence_status = 'snoozed',
+                        snooze_until = NOW() + INTERVAL '1 day',
+                        last_message_sent_at = COALESCE(last_message_sent_at, NOW())
+                    WHERE campaign_id = %s
+                      AND status = 'sent'
+                      AND (cadence_status IS NULL OR cadence_status = 'pending')
+                """, (cid,))
+                leads_count = cur.rowcount
+                if leads_count > 0:
+                    log.append(f" <span style='color:blue'>{leads_count} leads movidos para cadência (snoozed 1 day).</span>")
+                
+                log.append("</li>")
+            
+            log.append("</ul><p><strong>Migração concluída com sucesso!</strong></p>")
+                
+        conn.commit()
+        return "".join(log)
+    except Exception as e:
+        conn.rollback()
+        return f"Error: {str(e)}", 500
+    finally:
+        conn.close()

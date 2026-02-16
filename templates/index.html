@@ -245,6 +245,13 @@
 
   // Confirmation popup
   function showExtractionConfirmPopup() {
+    const totalInput = document.querySelector('input[name="total"]');
+    if (!totalInput || !totalInput.value) {
+      alert('Por favor, informe a quantidade de resultados desejada.');
+      totalInput.focus();
+      return;
+    }
+
     // Create modal overlay
     const overlay = document.createElement('div');
     overlay.id = 'extraction-confirm-overlay';
