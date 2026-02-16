@@ -4339,3 +4339,89 @@ def migrate_enrichment_route():
         return f"Error: {str(e)}", 500
     finally:
         conn.close()
+
+# ==========================================
+# SYNC SNOOZED CONVERSATIONS TO CHATWOOT
+# ==========================================
+@app.route('/sync_chatwoot_snooze')
+@login_required
+def sync_chatwoot_snooze_route():
+    # Security check: only super admin (Augusto)
+    if current_user.email != SUPER_ADMIN_EMAIL:
+        return "Unauthorized: Only Super Admin can run this sync", 403
+        
+    chatwoot_url = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
+    chatwoot_token = os.environ.get('CHATWOOT_ACCESS_TOKEN')
+    chatwoot_account_id = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
+    
+    if not chatwoot_token:
+        # Try to load from .env if not in os.environ (for local dev)
+        from dotenv import load_dotenv
+        load_dotenv()
+        chatwoot_token = os.environ.get('CHATWOOT_ACCESS_TOKEN')
+        if not chatwoot_token:
+            return "Error: CHATWOOT_ACCESS_TOKEN not properly configured in env variables", 500
+
+    log = ["<h1>Log de Sincronização Chatwoot (Snooze)</h1>"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Get User ID
+            cur.execute("SELECT id FROM users WHERE email = %s", (SUPER_ADMIN_EMAIL,))
+            user = cur.fetchone()
+            if not user:
+                return f"Super admin ({SUPER_ADMIN_EMAIL}) not found", 404
+            user_id = user['id']
+            
+            # 2. Find Snoozed Leads
+            query = """
+                SELECT cl.id, cl.chatwoot_conversation_id, cl.snooze_until, c.name as campaign_name
+                FROM campaign_leads cl
+                JOIN campaigns c ON cl.campaign_id = c.id
+                WHERE c.user_id = %s
+                AND cl.cadence_status = 'snoozed'
+                AND cl.snooze_until > NOW()
+                AND cl.chatwoot_conversation_id IS NOT NULL
+            """
+            cur.execute(query, (user_id,))
+            leads = cur.fetchall()
+            
+            log.append(f"<p>Encontrados <strong>{len(leads)} leads</strong> em estado 'snoozed' localmente.</p><ul>")
+            
+            success_count = 0
+            for lead in leads:
+                conv_id = lead['chatwoot_conversation_id']
+                try:
+                    # Call Chatwoot API
+                    url = f"{chatwoot_url}/api/v1/accounts/{chatwoot_account_id}/conversations/{conv_id}/toggle_status"
+                    headers = {
+                        "api_access_token": chatwoot_token,
+                        "Content-Type": "application/json"
+                    }
+                    payload = {"status": "snoozed"}
+                    
+                    resp = requests.post(url, json=payload, headers=headers, timeout=5)
+                    
+                    if resp.status_code == 200:
+                        success_count += 1
+                        log.append(f"<li>✅ Lead #{lead['id']} (Conv {conv_id}): <span style='color:green'>Snoozed</span></li>")
+                    elif resp.status_code == 404:
+                         log.append(f"<li>⚠️ Lead #{lead['id']} (Conv {conv_id}): Not found in Chatwoot (404)</li>")
+                    else:
+                        log.append(f"<li>❌ Lead #{lead['id']} (Conv {conv_id}): API Error {resp.status_code} - {resp.text}</li>")
+                        
+                except Exception as ex:
+                    log.append(f"<li>❌ Lead #{lead['id']} (Conv {conv_id}): Exception - {str(ex)}</li>")
+                
+                # Rate limit safety
+                time.sleep(0.2)
+                
+            log.append("</ul>")
+            log.append(f"<h3>Resumo: {success_count}/{len(leads)} conversas adiadas com sucesso.</h3>")
+            
+        return "".join(log)
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+    finally:
+        conn.close()
+
