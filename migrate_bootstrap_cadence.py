@@ -207,6 +207,22 @@ def send_media_message(instance_name, phone_jid, media_path, media_type, caption
         return False
 
 
+
+def get_chatwoot_conversation_messages(conversation_id):
+    """Fetches messages for a conversation."""
+    if not conversation_id: return []
+    url = f"{CHATWOOT_API_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+    headers = {"api_access_token": CHATWOOT_ACCESS_TOKEN}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            payload = resp.json()
+            return payload.get('payload', [])
+    except Exception:
+        pass
+    return []
+
+
 # ── Main Migration ───────────────────────────────────────────────────
 
 def run_migration():
@@ -365,7 +381,7 @@ def run_migration():
                     unread = cw_data.get('unread_count', 0)
                     cw_labels = cw_data.get('labels', [])
                     cw_status = cw_data.get('status')
-
+                    
                     # Check stop labels
                     stop_labels = ['01-interessado', '02-demo', '03-negociacao', '04-ganho', '05-perdido']
                     matched_labels = set(cw_labels) & set(stop_labels)
@@ -376,11 +392,25 @@ def run_migration():
                     elif unread > 0:
                         should_stop = True
                         print(f"    🛑 STOP: Has {unread} unread messages (replied)")
-                    elif cw_status == 'open':
-                        should_stop = True
-                        print(f"    🛑 STOP: Conversation is OPEN (being handled)")
                     else:
-                        print(f"    ✅ Chatwoot: status={cw_status}, unread=0, no stop labels")
+                        # Check last message type (ignore activities)
+                        messages = get_chatwoot_conversation_messages(conv_id)
+                        last_message_type = None
+                        
+                        # Iterate backwards to find last actual message (0=incoming, 1=outgoing)
+                        if messages:
+                            for msg in reversed(messages):
+                                mtype = msg.get('message_type')
+                                if mtype in [0, 1]:
+                                    last_message_type = mtype
+                                    break
+                        
+                        if last_message_type == 0:
+                            should_stop = True
+                            print(f"    🛑 STOP: Last message was from contact (type 0)")
+                        else:
+                            print(f"    ✅ Chatwoot: Last msg not from contact (type={last_message_type}). Status={cw_status}. Continuing...")
+
 
             if should_stop:
                 total_stopped += 1

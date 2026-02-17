@@ -129,6 +129,20 @@ def add_chatwoot_labels(conversation_id, labels):
 
 # --- CHATWOOT DISCOVERY ---
 
+def get_chatwoot_conversation_messages(conversation_id):
+    """Fetches messages for a conversation."""
+    if not conversation_id: return []
+    url = f"{CHATWOOT_API_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+    headers = {"api_access_token": CHATWOOT_ACCESS_TOKEN}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            payload = resp.json()
+            return payload.get('payload', [])
+    except Exception:
+        pass
+    return []
+
 def discover_chatwoot_conversation(phone, name=None):
     """
     Discovers the Chatwoot conversation ID for a lead.
@@ -350,20 +364,20 @@ def check_monitoring_leads(conn):
         if cw_data:
             unread = cw_data.get('unread_count', 0)
             status = cw_data.get('status')
-            messages = cw_data.get('messages', [])
-            
-            last_msg_is_contact = False
-            if messages:
-                last_msg = messages[-1]
-                if last_msg.get('message_type') == 0:  # 0 = Incoming
-                    last_msg_is_contact = True
-            
             if unread > 0:
                 abort_snooze = True
                 abort_reason = f"Unread count is {unread}"
-            elif last_msg_is_contact:
-                abort_snooze = True
-                abort_reason = "Last message is from Contact"
+            else:
+                messages = get_chatwoot_conversation_messages(conv_id)
+                if messages:
+                    # Check last actual message (0=incoming, 1=outgoing)
+                    for msg in reversed(messages):
+                        mtype = msg.get('message_type')
+                        if mtype in [0, 1]:
+                            if mtype == 0:
+                                abort_snooze = True
+                                abort_reason = "Last message is from Contact"
+                            break
         else:
             if conv_id:
                 print(f"  ⚠️ Lead #{lead_id}: Could not fetch Chatwoot details. Proceeding with snooze.")
@@ -542,16 +556,24 @@ def process_campaign_sends(campaign, conn):
             
             # B. Check Context (Smart Pause)
             if not state_stop:
-                if cw_status == 'open':
-                    print(f"    ⏸️ Lead #{lead_id}: Status is OPEN. Pausing.")
-                    continue 
-                
-                # If Resolved/Snoozed, check who sent last message
-                messages = cw_data.get('messages', [])
+                if unread > 0:
+                    print(f"    ⏸️ Lead #{lead_id}: Has {unread} unread messages. Pausing.")
+                    continue
+
+                # Check last message sender
+                messages = get_chatwoot_conversation_messages(conv_id)
+                last_sender_is_contact = False
                 if messages:
-                    last_msg = messages[-1]
-                    if last_msg.get('message_type') == 0:  # 0 = Incoming (Contact)
-                         pass  # Contact replied but status is resolved/snoozed -> PROCEED
+                    for msg in reversed(messages):
+                        mtype = msg.get('message_type')
+                        if mtype in [0, 1]:
+                            if mtype == 0:
+                                last_sender_is_contact = True
+                            break
+                
+                if last_sender_is_contact:
+                    print(f"    ⏸️ Lead #{lead_id}: Last message is from contact. Pausing.")
+                    continue
         else:
             if not conv_id:
                 pass  # No Chatwoot ID yet, proceed with WhatsApp-only send
