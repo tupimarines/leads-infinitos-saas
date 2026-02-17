@@ -43,7 +43,11 @@ SAFETY_BUFFER_MINUTES = 5
 
 def get_db_connection():
     return psycopg2.connect(
-        os.environ.get('DATABASE_URL'),
+        host=os.environ.get('DB_HOST', 'localhost'),
+        database=os.environ.get('DB_NAME', 'leads_infinitos'),
+        user=os.environ.get('DB_USER', 'postgres'),
+        password=os.environ.get('DB_PASSWORD'),
+        port=os.environ.get('DB_PORT', '5432'),
         cursor_factory=RealDictCursor
     )
 
