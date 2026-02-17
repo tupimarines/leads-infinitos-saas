@@ -19,9 +19,12 @@ BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 
 # Configuração
 MEGA_API_URL = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
-# Token might be needed if it's not passed per instance, but usually instance has its own key or we use a global token.
-# User said "header Authorization e value token contido em .env".
 MEGA_API_TOKEN = os.environ.get('MEGA_API_TOKEN')
+
+# Chatwoot Config
+CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
+CHATWOOT_ACCESS_TOKEN = os.environ.get('CHATWOOT_ACCESS_TOKEN')
+CHATWOOT_ACCOUNT_ID = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
 
 # Super Admin email (multi-instance per-instance daily limit)
 SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
@@ -501,6 +504,78 @@ def send_message(instance_name, phone_jid, message):
         return False, error_msg
 
 
+def discover_chatwoot_conversation(phone, name=None):
+    """
+    Discovers the Chatwoot conversation ID for a lead after message send.
+    Searches by phone number (multiple formats) and name as fallbacks.
+    Returns conversation_id or None.
+    """
+    if not CHATWOOT_ACCESS_TOKEN:
+        return None
+    
+    headers = {
+        "api_access_token": CHATWOOT_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    clean_phone = re.sub(r'\D', '', str(phone or ''))
+    if not clean_phone and not name:
+        return None
+    
+    # Build search strategies (ordered by specificity)
+    strategies = []
+    if clean_phone:
+        # 1. Full number with + prefix (how Chatwoot stores WhatsApp contacts)
+        strategies.append(('Phone+', f'+{clean_phone}'))
+        # 2. Raw number 
+        strategies.append(('PhoneRaw', clean_phone))
+        # 3. WhatsApp JID format
+        strategies.append(('JID', f'{clean_phone}@s.whatsapp.net'))
+        # 4. Last 9 digits (without country/area code in some cases)
+        if len(clean_phone) >= 9:
+            strategies.append(('Last9', clean_phone[-9:]))
+        # 5. Last 8 digits (very broad)
+        if len(clean_phone) >= 8:
+            strategies.append(('Last8', clean_phone[-8:]))
+    if name and name.strip() and name.strip() != '.':
+        strategies.append(('Name', name.strip()))
+    
+    contact_id = None
+    matched_via = None
+    
+    for label, query_val in strategies:
+        if contact_id:
+            break
+        try:
+            search_url = f"{CHATWOOT_API_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/search"
+            resp = requests.get(search_url, params={'q': query_val}, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('payload') and len(data['payload']) > 0:
+                    contact_id = data['payload'][0]['id']
+                    matched_via = label
+        except Exception as e:
+            print(f"  ⚠️ Chatwoot search error ({label}): {e}")
+    
+    if not contact_id:
+        return None
+    
+    # Get conversations for this contact
+    try:
+        conv_url = f"{CHATWOOT_API_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/{contact_id}/conversations"
+        resp = requests.get(conv_url, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            conv_data = resp.json()
+            if conv_data.get('payload') and len(conv_data['payload']) > 0:
+                conv_id = conv_data['payload'][0]['id']
+                print(f"  🔗 Chatwoot: Found conversation {conv_id} (via {matched_via}) for contact {contact_id}")
+                return conv_id
+    except Exception as e:
+        print(f"  ⚠️ Chatwoot conversation fetch error: {e}")
+    
+    return None
+
+
 def is_business_hours():
     """
     Verifica se estamos em horário comercial (8h às 20h, horário de Brasília).
@@ -810,7 +885,7 @@ def process_campaigns():
                                     step2 = cur.fetchone()
                                     if step2:
                                         delay = step2['delay_days'] or 1
-                                        snooze_until = datetime.now() + timedelta(days=delay)
+                                        snooze_until = datetime.now(BRAZIL_TZ) + timedelta(days=delay)
                                         cur.execute(
                                             "UPDATE campaign_leads SET current_step = 1, cadence_status = 'snoozed', snooze_until = %s, last_message_sent_at = NOW() WHERE id = %s",
                                             (snooze_until, lead['id'])
@@ -819,6 +894,25 @@ def process_campaigns():
                                         print(f"  🔄 Cadence: Lead #{lead['id']} snoozed until {snooze_until.strftime('%d/%m %H:%M')}")
                         except Exception as e_cadence:
                             print(f"⚠️ Failed to set cadence snooze: {e_cadence}")
+                        
+                        # 8.3 Chatwoot Discovery: Link lead to Chatwoot conversation
+                        try:
+                            if campaign.get('enable_cadence'):
+                                # Wait a bit for Chatwoot to process the incoming message
+                                time.sleep(3)
+                                conv_id = discover_chatwoot_conversation(phone_to_use, lead.get('name'))
+                                if conv_id:
+                                    with conn.cursor() as cur:
+                                        cur.execute(
+                                            "UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s AND chatwoot_conversation_id IS NULL",
+                                            (conv_id, lead['id'])
+                                        )
+                                    conn.commit()
+                                    print(f"  🔗 Lead #{lead['id']}: Linked to Chatwoot conversation {conv_id}")
+                                else:
+                                    print(f"  ⚠️ Lead #{lead['id']}: No Chatwoot conversation found for {phone_to_use}")
+                        except Exception as e_cw:
+                            print(f"⚠️ Failed to discover Chatwoot conversation: {e_cw}")
                     
                     # 9. Set Random Delay for NEXT send PER INSTANCE (Antiban)
                     delay_seconds = random.randint(300, 600)

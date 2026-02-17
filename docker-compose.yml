@@ -77,6 +77,32 @@ services:
       - HOTMART_PRODUCT_ID=${HOTMART_PRODUCT_ID}
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
+      - CHATWOOT_API_URL=${CHATWOOT_API_URL}
+      - CHATWOOT_ACCESS_TOKEN=${CHATWOOT_ACCESS_TOKEN}
+      - CHATWOOT_ACCOUNT_ID=${CHATWOOT_ACCOUNT_ID}
+    restart: always
+    networks:
+      - dokploy-network
+
+  cadence:
+    build: .
+    container_name: "leads_infinitos_cadence"
+    command: python worker_cadence.py
+    volumes:
+      - storage_data:/app/storage
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - MEGA_API_URL=${MEGA_API_URL}
+      - MEGA_API_TOKEN=${MEGA_API_TOKEN}
+      - CHATWOOT_API_URL=${CHATWOOT_API_URL}
+      - CHATWOOT_ACCESS_TOKEN=${CHATWOOT_ACCESS_TOKEN}
+      - CHATWOOT_ACCOUNT_ID=${CHATWOOT_ACCOUNT_ID}
     restart: always
     networks:
       - dokploy-network

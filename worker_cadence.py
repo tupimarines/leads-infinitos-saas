@@ -80,9 +80,10 @@ def get_chatwoot_conversation_details(conversation_id):
         print(f"  ❌ [Chatwoot] Details Error: {e}")
         return None
 
-def toggle_chatwoot_status(conversation_id, status):
+def toggle_chatwoot_status(conversation_id, status, snoozed_until=None):
     """
     Toggles conversation status ('snoozed', 'open', 'resolved').
+    If status is 'snoozed' and snoozed_until is provided, includes the timestamp.
     """
     if not conversation_id: return False
     
@@ -90,10 +91,20 @@ def toggle_chatwoot_status(conversation_id, status):
     headers = {"api_access_token": CHATWOOT_ACCESS_TOKEN, "Content-Type": "application/json"}
     payload = {"status": status}
     
+    if status == 'snoozed' and snoozed_until:
+        # Chatwoot expects Unix timestamp for snoozed_until
+        if hasattr(snoozed_until, 'timestamp'):
+            payload["snoozed_until"] = int(snoozed_until.timestamp())
+        else:
+            payload["snoozed_until"] = int(snoozed_until)
+    
     try:
-        requests.post(url, json=payload, headers=headers, timeout=10)
-        return True
-    except:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            print(f"  ✅ Chatwoot status set to '{status}' for conv {conversation_id}")
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"  ❌ Chatwoot toggle error: {e}")
         return False
 
 def add_chatwoot_labels(conversation_id, labels):
@@ -111,6 +122,74 @@ def add_chatwoot_labels(conversation_id, labels):
         return True
     except:
         return False
+
+# --- CHATWOOT DISCOVERY ---
+
+def discover_chatwoot_conversation(phone, name=None):
+    """
+    Discovers the Chatwoot conversation ID for a lead.
+    Searches by phone number (multiple formats) and name as fallbacks.
+    Returns conversation_id or None.
+    """
+    if not CHATWOOT_ACCESS_TOKEN:
+        return None
+    
+    headers = {
+        "api_access_token": CHATWOOT_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    clean_phone = re.sub(r'\D', '', str(phone or ''))
+    if not clean_phone and not name:
+        return None
+    
+    # Build search strategies (ordered by specificity)
+    strategies = []
+    if clean_phone:
+        strategies.append(('Phone+', f'+{clean_phone}'))
+        strategies.append(('PhoneRaw', clean_phone))
+        strategies.append(('JID', f'{clean_phone}@s.whatsapp.net'))
+        if len(clean_phone) >= 9:
+            strategies.append(('Last9', clean_phone[-9:]))
+        if len(clean_phone) >= 8:
+            strategies.append(('Last8', clean_phone[-8:]))
+    if name and name.strip() and name.strip() != '.':
+        strategies.append(('Name', name.strip()))
+    
+    contact_id = None
+    matched_via = None
+    
+    for label, query_val in strategies:
+        if contact_id:
+            break
+        try:
+            search_url = f"{CHATWOOT_API_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/search"
+            resp = requests.get(search_url, params={'q': query_val}, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('payload') and len(data['payload']) > 0:
+                    contact_id = data['payload'][0]['id']
+                    matched_via = label
+        except Exception as e:
+            pass  # Silent, will try next strategy
+    
+    if not contact_id:
+        return None
+    
+    try:
+        conv_url = f"{CHATWOOT_API_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/{contact_id}/conversations"
+        resp = requests.get(conv_url, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            conv_data = resp.json()
+            if conv_data.get('payload') and len(conv_data['payload']) > 0:
+                conv_id = conv_data['payload'][0]['id']
+                print(f"  🔗 Chatwoot: Found conv {conv_id} (via {matched_via}) for contact {contact_id}")
+                return conv_id
+    except Exception as e:
+        print(f"  ⚠️ Chatwoot conv fetch error: {e}")
+    
+    return None
+
 
 # --- MEGA API HELPERS ---
 
@@ -195,7 +274,7 @@ def process_cadence():
                     SELECT c.id, c.name, c.user_id 
                     FROM campaigns c
                     WHERE c.enable_cadence = TRUE
-                      AND c.status IN ('running', 'pending')
+                      AND c.status IN ('running', 'pending', 'completed')
                       AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
                 """)
                 campaigns = cur.fetchall()
@@ -206,7 +285,10 @@ def process_cadence():
                 continue
 
             for campaign in campaigns:
+                # Part B.1: Process leads with expired snooze (ready for next follow-up)
                 process_campaign_sends(campaign, conn)
+                # Part B.2: Bootstrap leads that were sent but never entered cadence
+                bootstrap_pending_leads(campaign, conn)
 
             conn.close()
             time.sleep(CADENCE_POLL_INTERVAL)
@@ -226,12 +308,9 @@ def check_monitoring_leads(conn):
       - If reply: ABORT SNOOZE (Set 'stopped').
       - If safe: SNOOZE in Chatwoot + Schedule Next Step.
     """
-    buffer_time = datetime.now() - timedelta(minutes=SAFETY_BUFFER_MINUTES)
+    buffer_time = datetime.now(BRAZIL_TZ) - timedelta(minutes=SAFETY_BUFFER_MINUTES)
     
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        # Fetch leads in monitoring that are 'ripe' (sent > 5 mins ago)
-        # Note: 'monitoring' status might be custom, ensure it maps to cadence_status column or use a specific flag
-        # We'll assume cadence_status can be 'monitoring'
         cur.execute("""
             SELECT cl.id, cl.chatwoot_conversation_id, cl.campaign_id, cl.current_step, 
                    cl.last_message_sent_at, cl.phone, cl.name
@@ -250,6 +329,14 @@ def check_monitoring_leads(conn):
         lead_id = lead['id']
         conv_id = lead['chatwoot_conversation_id']
         
+        # If no Chatwoot conversation, try to discover it
+        if not conv_id:
+            conv_id = discover_chatwoot_conversation(lead['phone'], lead.get('name'))
+            if conv_id:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s", (conv_id, lead_id))
+                conn.commit()
+        
         # 1. Check Chatwoot Context
         cw_data = get_chatwoot_conversation_details(conv_id)
         
@@ -257,16 +344,14 @@ def check_monitoring_leads(conn):
         abort_reason = ""
 
         if cw_data:
-            # Check unread count
             unread = cw_data.get('unread_count', 0)
             status = cw_data.get('status')
             messages = cw_data.get('messages', [])
             
-            # Check last message sender
             last_msg_is_contact = False
             if messages:
-                last_msg = messages[-1] # Usually sorted, verify API behavior if needed
-                if last_msg.get('message_type') == 0: # 0 = Incoming, 1 = Outgoing
+                last_msg = messages[-1]
+                if last_msg.get('message_type') == 0:  # 0 = Incoming
                     last_msg_is_contact = True
             
             if unread > 0:
@@ -276,13 +361,11 @@ def check_monitoring_leads(conn):
                 abort_snooze = True
                 abort_reason = "Last message is from Contact"
         else:
-            # If we can't check Chatwoot, what to do?
-            # Safe bet: Assume safe OR retry? Let's assume safe to keep flow moving, but log warning.
-            print(f"  ⚠️ Lead #{lead_id}: Could not fetch Chatwoot details. Proceeding with snooze.")
+            if conv_id:
+                print(f"  ⚠️ Lead #{lead_id}: Could not fetch Chatwoot details. Proceeding with snooze.")
 
         with conn.cursor() as cur:
             if abort_snooze:
-                # ABORT: Mark as stopped, leave conversation OPEN
                 cur.execute("""
                     UPDATE campaign_leads SET cadence_status = 'stopped', log = %s WHERE id = %s
                 """, (f"Safety Buffer Abort: {abort_reason}", lead_id))
@@ -290,7 +373,6 @@ def check_monitoring_leads(conn):
                 print(f"  🛑 Lead #{lead_id}: Snooze ABORTED. {abort_reason}")
             else:
                 # SAFE: Execute Snooze + Schedule Next Step
-                # Determine next step delay
                 cur.execute("""
                     SELECT delay_days FROM campaign_steps 
                     WHERE campaign_id = %s AND step_number = %s
@@ -298,27 +380,91 @@ def check_monitoring_leads(conn):
                 next_step_row = cur.fetchone()
                 
                 if next_step_row:
-                    delay = next_step_row['delay_days']
+                    delay = next_step_row['delay_days'] or 1
                     snooze_until = datetime.now(BRAZIL_TZ) + timedelta(days=delay)
                     new_status = 'snoozed'
                     
-                    # Update DB
                     cur.execute("""
                         UPDATE campaign_leads 
                         SET cadence_status = %s, snooze_until = %s 
                         WHERE id = %s
                     """, (new_status, snooze_until, lead_id))
                     
-                    # Execute Chatwoot Snooze
-                    toggle_chatwoot_status(conv_id, 'snoozed')
+                    # Execute Chatwoot Snooze with timestamp
+                    toggle_chatwoot_status(conv_id, 'snoozed', snoozed_until=snooze_until)
                     
                     print(f"  💤 Lead #{lead_id}: Safety Check passed. Snoozed until {snooze_until.strftime('%d/%m %H:%M')}.")
                 else:
-                    # No more steps? Mark completed
                     cur.execute("UPDATE campaign_leads SET cadence_status = 'completed' WHERE id = %s", (lead_id,))
-                    toggle_chatwoot_status(conv_id, 'snoozed') # Snooze anyway? Or resolve?
+                    toggle_chatwoot_status(conv_id, 'resolved')
                     print(f"  🏁 Lead #{lead_id}: Cadence completed.")
             conn.commit()
+
+
+def bootstrap_pending_leads(campaign, conn):
+    """
+    Handles leads that were sent by worker_sender but never entered the cadence cycle.
+    These leads have status='sent' and cadence_status='pending' (or NULL).
+    Sets them to 'snoozed' with snooze_until = now, so they are immediately
+    picked up by process_campaign_sends on the next poll.
+    Also tries to discover their Chatwoot conversation ID if missing.
+    """
+    cid = campaign['id']
+    
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT id, phone, name, chatwoot_conversation_id
+            FROM campaign_leads
+            WHERE campaign_id = %s
+              AND status = 'sent'
+              AND (cadence_status IS NULL OR cadence_status = 'pending')
+            LIMIT 50
+        """, (cid,))
+        pending_leads = cur.fetchall()
+    
+    if not pending_leads:
+        return
+    
+    print(f"  🔄 Campaign '{campaign['name']}': Bootstrapping {len(pending_leads)} pending sent leads into cadence...")
+    
+    # Get step 2 delay for snooze calculation
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT delay_days FROM campaign_steps WHERE campaign_id = %s AND step_number = 2 LIMIT 1",
+            (cid,)
+        )
+        step2 = cur.fetchone()
+    
+    delay_days = (step2['delay_days'] or 1) if step2 else 1
+    snooze_until = datetime.now(BRAZIL_TZ) + timedelta(days=delay_days)
+    
+    for lead in pending_leads:
+        lead_id = lead['id']
+        conv_id = lead['chatwoot_conversation_id']
+        
+        # Try to discover Chatwoot conversation if missing
+        if not conv_id:
+            conv_id = discover_chatwoot_conversation(lead['phone'], lead.get('name'))
+            if conv_id:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s", (conv_id, lead_id))
+                conn.commit()
+                print(f"    🔗 Lead #{lead_id}: Linked to Chatwoot conv {conv_id}")
+                time.sleep(0.3)  # Rate limit
+        
+        # Set to snoozed so cadence worker picks them up
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE campaign_leads 
+                SET current_step = 1, 
+                    cadence_status = 'snoozed', 
+                    snooze_until = %s,
+                    last_message_sent_at = COALESCE(last_message_sent_at, sent_at, NOW())
+                WHERE id = %s
+            """, (snooze_until, lead_id))
+        conn.commit()
+    
+    print(f"  ✅ {len(pending_leads)} leads bootstrapped into cadence (snoozed until {snooze_until.strftime('%d/%m %H:%M')}).")
 
 
 def process_campaign_sends(campaign, conn):
@@ -352,7 +498,7 @@ def process_campaign_sends(campaign, conn):
 
     if not ready_leads: return
 
-    print(f"  📨 Campaign '{campaign['name']}': {len(ready_leads)} leads ready checks")
+    print(f"  📨 Campaign '{campaign['name']}': {len(ready_leads)} leads ready for follow-up")
 
     for lead in ready_leads:
         lead_id = lead['id']
@@ -360,17 +506,23 @@ def process_campaign_sends(campaign, conn):
         current_step = lead['current_step'] or 1
         next_step = current_step + 1
 
+        # If no Chatwoot conversation ID, try to discover it
+        if not conv_id:
+            conv_id = discover_chatwoot_conversation(lead['phone'], lead.get('name'))
+            if conv_id:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE campaign_leads SET chatwoot_conversation_id = %s WHERE id = %s", (conv_id, lead_id))
+                conn.commit()
+
         state_stop = False
         state_reason = ""
 
         # --- DECISION MATRIX (Pre-Send) ---
-        
-        # 1. Fetch Chatwoot Details
         cw_data = get_chatwoot_conversation_details(conv_id)
         
         if cw_data:
             cw_labels = cw_data.get('labels', [])
-            cw_status = cw_data.get('status') # open, snoozed, resolved
+            cw_status = cw_data.get('status')  # open, snoozed, resolved
             
             # A. Check Labels (Hard Stop)
             stop_labels = ['01-interessado', '02-demo', '03-negociacao', '04-ganho']
@@ -379,7 +531,6 @@ def process_campaign_sends(campaign, conn):
             if any(l in cw_labels for l in stop_labels):
                 state_stop = True
                 state_reason = f"Label Stop: {list(set(cw_labels) & set(stop_labels))}"
-                # Mark converted? 
                 
             elif any(l in cw_labels for l in lost_labels):
                 state_stop = True
@@ -388,7 +539,6 @@ def process_campaign_sends(campaign, conn):
             # B. Check Context (Smart Pause)
             if not state_stop:
                 if cw_status == 'open':
-                    # PAUSE (Skip this run, maybe check again later)
                     print(f"    ⏸️ Lead #{lead_id}: Status is OPEN. Pausing.")
                     continue 
                 
@@ -396,18 +546,13 @@ def process_campaign_sends(campaign, conn):
                 messages = cw_data.get('messages', [])
                 if messages:
                     last_msg = messages[-1]
-                    if last_msg.get('message_type') == 0: # 0 = Incoming (Contact)
-                         # Contact replied, but status is resolved/snoozed.
-                         # Rule: "Treat as No Reply" -> PROCEED
-                         pass 
+                    if last_msg.get('message_type') == 0:  # 0 = Incoming (Contact)
+                         pass  # Contact replied but status is resolved/snoozed -> PROCEED
         else:
-            # If no Chatwoot ID or fetch failed
             if not conv_id:
-                # No ID linked yet? Proceed blindly? Or skip?
-                # Let's proceed, as we might be purely WhatsApp based if Sync hasn't run
-                pass
+                pass  # No Chatwoot ID yet, proceed with WhatsApp-only send
             else:
-                print(f"    ⚠️ Lead #{lead_id}: Chatwoot fetch failed. Skipping safety check.")
+                print(f"    ⚠️ Lead #{lead_id}: Chatwoot fetch failed. Proceeding anyway.")
 
         # Handle Stop State
         if state_stop:
@@ -418,13 +563,15 @@ def process_campaign_sends(campaign, conn):
             continue
 
         # --- SENDING LOGIC ---
-        
         step_config = steps_by_number.get(next_step)
         if not step_config:
             # End of cadence
             with conn.cursor() as cur:
                 cur.execute("UPDATE campaign_leads SET cadence_status = 'completed' WHERE id = %s", (lead_id,))
             conn.commit()
+            if conv_id:
+                toggle_chatwoot_status(conv_id, 'resolved')
+            print(f"    🏁 Lead #{lead_id}: Cadence completed (no more steps).")
             continue
 
         # Prepare Message
@@ -452,7 +599,6 @@ def process_campaign_sends(campaign, conn):
             else:
                 message = str(parsed)
         except:
-            # If not JSON, use as plain string
             message = raw_template
         lead_name = lead.get('name', 'Visitante')
         message = message.replace('{{nome}}', lead_name).replace('{{name}}', lead_name)
@@ -480,7 +626,7 @@ def process_campaign_sends(campaign, conn):
             print(f"    ❌ Lead #{lead_id}: Send failed.")
 
         # Cooldown
-        time.sleep(random.randint(20, 40)) # Slightly faster for cadence than sender
+        time.sleep(random.randint(20, 40))
 
 if __name__ == "__main__":
     process_cadence()
