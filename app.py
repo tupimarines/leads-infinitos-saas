@@ -2047,13 +2047,13 @@ def campaign_kanban_data(campaign_id):
         cur.execute("""
             SELECT id, phone, name, status, current_step, cadence_status, 
                    snooze_until, last_message_sent_at, chatwoot_conversation_id,
-                   sent_at, whatsapp_link, notes,
+                   sent_at, whatsapp_link, notes, log,
                    address, website, category, location, reviews_count, reviews_rating, latitude, longitude,
                    CASE 
                        WHEN cadence_status IN ('snoozed', 'active') THEN 1
                        WHEN status IN ('sent', 'pending') THEN 2
                        ELSE 3
-                   END as status_priority
+                       END as status_priority
             FROM campaign_leads 
             WHERE campaign_id = %s 
             ORDER BY current_step ASC, status_priority ASC, last_message_sent_at DESC NULLS LAST, name ASC
