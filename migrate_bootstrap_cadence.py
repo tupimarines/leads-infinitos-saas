@@ -285,7 +285,8 @@ def run_migration():
             continue
 
         steps_by_number = {s['step_number']: s for s in steps}
-        print(f"  📝 Steps: {len(steps)} ({', '.join(f'Step {s['step_number']}' for s in steps)})")
+        step_numbers = [str(s['step_number']) for s in steps]
+        print(f"  📝 Steps: {len(steps)} (Step {', '.join(step_numbers)})")
 
         # Step 2 is Follow-up 1
         step2 = steps_by_number.get(2)
