@@ -311,7 +311,7 @@ def run_migration():
             for row in stats:
                 print(f"     - status={row['status']}, cadence={row['cadence_status']}, step={row['current_step']}: {row['count']} leads")
 
-        # 5. Get leads in step 1 that were sent
+        # 5. Get leads in step 1 that were sent (snoozed, active, or pending)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, phone, name, status, cadence_status, current_step, 
@@ -319,7 +319,7 @@ def run_migration():
                 FROM campaign_leads
                 WHERE campaign_id = %s
                   AND status = 'sent'
-                  AND (cadence_status IS NULL OR cadence_status = 'pending')
+                  AND (cadence_status IN ('snoozed', 'active', 'pending') OR cadence_status IS NULL)
                   AND (current_step IS NULL OR current_step <= 1)
                 ORDER BY id ASC
             """, (cid,))
@@ -338,8 +338,9 @@ def run_migration():
             lead_name = lead.get('name', 'Desconhecido')
             phone = lead['phone']
             conv_id = lead['chatwoot_conversation_id']
+            original_status = lead['status']
 
-            print(f"\n  [{i}/{len(leads)}] Lead #{lead_id}: {lead_name} ({phone})")
+            print(f"\n  [{i}/{len(leads)}] Lead #{lead_id}: {lead_name} ({phone}) [Status: {original_status}]")
 
             # 6a. Discover Chatwoot conversation ID if missing
             if not conv_id:
@@ -446,10 +447,12 @@ def run_migration():
                     with conn.cursor() as cur:
                         cur.execute("""
                             UPDATE campaign_leads 
-                            SET current_step = 2, 
+                            SET status = 'sent',
+                                current_step = 2, 
                                 cadence_status = 'snoozed', 
                                 snooze_until = %s,
-                                last_message_sent_at = NOW()
+                                last_message_sent_at = NOW(),
+                                sent_at = COALESCE(sent_at, NOW())
                             WHERE id = %s
                         """, (snooze_until, lead_id))
                     conn.commit()
