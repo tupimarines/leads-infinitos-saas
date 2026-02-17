@@ -298,6 +298,19 @@ def run_migration():
         step3 = steps_by_number.get(3)
         snooze_delay = (step3['delay_days'] or 1) if step3 else 4  # Default 4 days if no step 3
 
+        # DEBUG: Analyze leads in this campaign to understand why we aren't finding them
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT status, cadence_status, current_step, COUNT(*) as count
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                GROUP BY status, cadence_status, current_step
+            """, (cid,))
+            stats = cur.fetchall()
+            print(f"  📊 Campaign Lead Stats (Debug):")
+            for row in stats:
+                print(f"     - status={row['status']}, cadence={row['cadence_status']}, step={row['current_step']}: {row['count']} leads")
+
         # 5. Get leads in step 1 that were sent
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
