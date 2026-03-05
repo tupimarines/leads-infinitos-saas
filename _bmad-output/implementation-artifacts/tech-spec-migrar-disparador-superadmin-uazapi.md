@@ -141,22 +141,24 @@ Substituir chamadas MegaAPI por Uazapi para o superadmin: criar instância (POST
   - File: `worker_sender.py`
   - Action: Se instance Uazapi, get_instance_status_api chama Uazapi GET /instance/status. Retornar connected, connecting ou disconnected conforme API. Atualizar instances.status no DB. verify_and_recover_instance: para Uazapi, não chamar restart (não existe); retornar False sem tentar recovery; atualizar status no DB se desconectado.
 
-- [ ] Task 12: Vincular status em /account ao Uazapi — mostrar todas as instâncias
+- [x] Task 12: Vincular status em /account ao Uazapi — mostrar todas as instâncias
   - File: `app.py`
   - Action: Na rota /account, se superadmin: buscar todas as instances (api_provider='uazapi'); para cada uma, chamar UazapiService.get_status e obter status real (connected, connecting, disconnected). Passar lista `instances_with_status` ao template.
   - File: `templates/account.html`
   - Action: Para superadmin, em vez de um único bloco "instance", criar loop sobre `instances_with_status`; cada instância com seu próprio card mostrando nome e status (Conectado/Conectando/Desconectado). Manter layout glass-panel; expandir seção WhatsApp para múltiplos cards.
 
-- [ ] Task 13: Adicionar UAZAPI_URL e UAZAPI_ADMIN_TOKEN ao docker-compose e criar .env.example
+- [x] Task 13: Adicionar UAZAPI_URL e UAZAPI_ADMIN_TOKEN ao docker-compose e criar .env.example
   - File: `docker-compose.yml`, `docker-compose.dev.yml`
   - Action: Adicionar env vars UAZAPI_URL, UAZAPI_ADMIN_TOKEN nos serviços app, worker_sender.
   - File: `.env.example` (criar se não existir)
   - Action: Criar .env.example com placeholders para todas as vars incluindo UAZAPI_URL, UAZAPI_ADMIN_TOKEN (sem valores reais).
+  - Done: docker-compose.yml já tinha vars em web, worker, sender; .env.example já existia. Adicionado UAZAPI_URL/UAZAPI_ADMIN_TOKEN ao serviço web em docker-compose.dev.yml.
 
-- [ ] Task 14: Garantir status 'paused' e programada no worker
+- [x] Task 14: Garantir status 'paused' e programada no worker
   - File: `worker_sender.py`
   - Action: Verificar que worker já filtra `status IN ('pending','running')` — campanhas 'paused' não são processadas. Verificar que `scheduled_start IS NULL OR scheduled_start <= NOW()` — campanhas programadas para data futura (pending com scheduled_start > NOW) não são processadas. Documentar no spec; não alterar se já correto.
   - Notes: toggle_pause em app.py já define status 'paused'. Campanha com scheduled_start futura fica 'pending' até scheduled_start <= NOW.
+  - Verified: worker_sender.py linhas 529-534 — query correta; nenhuma alteração necessária.
 
 ### Acceptance Criteria
 
