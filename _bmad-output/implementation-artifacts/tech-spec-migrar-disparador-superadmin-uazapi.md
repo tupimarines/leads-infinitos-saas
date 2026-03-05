@@ -123,7 +123,7 @@ Substituir chamadas MegaAPI por Uazapi para o superadmin: criar instância (POST
   - Action: Remover rota /api/whatsapp/restart; remover bloco de restart em campaign create (linhas ~2913-2936 que chamam service.restart_instance); remover método restart_instance de WhatsappService (ou deixar no-op para compatibilidade com MegaAPI — mas como removemos o botão para todos, podemos remover a rota e o bloco do campaign create; WhatsappService.restart_instance pode permanecer para admin que ainda usa MegaAPI em outros fluxos, ou remover se não houver mais uso).
   - Notes: Uazapi não tem restart. Remover para todos os usuários.
 
-- [ ] Task 8: Remover instâncias MegaAPI do superadmin
+- [x] Task 8: Remover instâncias MegaAPI do superadmin
   - File: `app.py` (ou script de migração)
   - Action: Para superadmin, manter apenas instâncias api_provider='uazapi'. Opções: (a) migração: `DELETE FROM instances WHERE user_id = (SELECT id FROM users WHERE email = 'augustogumi@gmail.com') AND (api_provider IS NULL OR api_provider != 'uazapi')`; (b) ao carregar whatsapp_config, filtrar para exibir apenas Uazapi. Decisão: executar migração para remover MegaAPI do superadmin.
   - Notes: Superadmin usa somente Uazapi.

@@ -260,7 +260,17 @@ def init_db() -> None:
         ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_provider TEXT DEFAULT 'megaapi';
         """
     )
-    
+
+    # Migração: remover instâncias MegaAPI do superadmin (manter apenas Uazapi)
+    print("➡️ Removendo instâncias MegaAPI do superadmin...")
+    cur.execute(
+        """
+        DELETE FROM instances
+        WHERE user_id = (SELECT id FROM users WHERE email = 'augustogumi@gmail.com')
+        AND (api_provider IS NULL OR api_provider != 'uazapi');
+        """
+    )
+
     # Tabela de modelos de mensagem
     cur.execute(
         """
