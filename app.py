@@ -1999,15 +1999,60 @@ def account():
         if lic.status == 'active':
             active_license = lic
             break
-            
-    # 2. Obter Instância WhatsApp
+
+    # 2. Obter Instância(s) WhatsApp
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM instances WHERE user_id = %s", (current_user.id,))
-        instance = cur.fetchone()
+        if is_super_admin():
+            # Superadmin: todas as instâncias Uazapi com status real
+            cur.execute(
+                "SELECT * FROM instances WHERE user_id = %s AND api_provider = 'uazapi'",
+                (current_user.id,),
+            )
+            instances = cur.fetchall()
+        else:
+            cur.execute("SELECT * FROM instances WHERE user_id = %s", (current_user.id,))
+            instances = cur.fetchall()
     conn.close()
-    
-    return render_template('account.html', user=current_user, license=active_license, instance=instance)
+
+    instance = None if is_super_admin() else (instances[0] if instances else None)
+    instances_with_status = None
+
+    if is_super_admin() and instances:
+        uazapi = UazapiService()
+        instances_with_status = []
+        for inst in instances:
+            apikey = inst.get("apikey") or ""
+            if not apikey:
+                instances_with_status.append(
+                    {"id": inst["id"], "name": inst.get("name", "?"), "status": "Desconectado"}
+                )
+                continue
+            result = uazapi.get_status(apikey)
+            raw_status = "disconnected"
+            if result:
+                raw_status = (
+                    result.get("instance", {}).get("status")
+                    or result.get("status")
+                    or "disconnected"
+                )
+            status_label = {
+                "connected": "Conectado",
+                "connecting": "Conectando",
+                "disconnected": "Desconectado",
+            }.get(raw_status, "Desconectado")
+            instances_with_status.append(
+                {"id": inst["id"], "name": inst.get("name", "?"), "status": status_label}
+            )
+
+    return render_template(
+        "account.html",
+        user=current_user,
+        license=active_license,
+        instance=instance,
+        instances_with_status=instances_with_status,
+        is_super_admin=is_super_admin(),
+    )
 
 @app.route('/campaigns')
 @login_required
