@@ -128,16 +128,16 @@ Substituir chamadas MegaAPI por Uazapi para o superadmin: criar instância (POST
   - Action: Para superadmin, manter apenas instâncias api_provider='uazapi'. Opções: (a) migração: `DELETE FROM instances WHERE user_id = (SELECT id FROM users WHERE email = 'augustogumi@gmail.com') AND (api_provider IS NULL OR api_provider != 'uazapi')`; (b) ao carregar whatsapp_config, filtrar para exibir apenas Uazapi. Decisão: executar migração para remover MegaAPI do superadmin.
   - Notes: Superadmin usa somente Uazapi.
 
-- [ ] Task 9: Atualizar worker_sender para Uazapi no envio
+- [x] Task 9: Atualizar worker_sender para Uazapi no envio
   - File: `worker_sender.py`
   - Action: Para superadmin, filtrar instances com api_provider='uazapi' apenas. SELECT incluir apikey, api_provider. Se is_sa, usar apenas instâncias Uazapi. Chamar send_message_uazapi(apikey, number, text). number = extrair de phone_jid (remover @s.whatsapp.net).
 
-- [ ] Task 10: Atualizar worker_sender para check_phone via /chat/check
+- [x] Task 10: Atualizar worker_sender para check_phone via /chat/check
   - File: `worker_sender.py`
   - Action: Se instance Uazapi, usar POST /chat/check. Payload: `{numbers: [number]}` (number sem @s.whatsapp.net). Resposta: array com `isInWhatsapp`. Mapear para exists/correct_jid.
   - Notes: Uazapi retorna `isInWhatsapp` (camelCase). Endpoint: POST /chat/check com header token.
 
-- [ ] Task 11: Atualizar worker_sender para status e recovery quando Uazapi
+- [x] Task 11: Atualizar worker_sender para status e recovery quando Uazapi
   - File: `worker_sender.py`
   - Action: Se instance Uazapi, get_instance_status_api chama Uazapi GET /instance/status. Retornar connected, connecting ou disconnected conforme API. Atualizar instances.status no DB. verify_and_recover_instance: para Uazapi, não chamar restart (não existe); retornar False sem tentar recovery; atualizar status no DB se desconectado.
 

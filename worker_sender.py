@@ -21,6 +21,13 @@ BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 MEGA_API_URL = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
 MEGA_API_TOKEN = os.environ.get('MEGA_API_TOKEN')
 
+# Uazapi (superadmin)
+try:
+    from services.uazapi import UazapiService
+    uazapi_service = UazapiService()
+except ImportError:
+    uazapi_service = None
+
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
 CHATWOOT_ACCESS_TOKEN = os.environ.get('CHATWOOT_ACCESS_TOKEN')
@@ -78,12 +85,28 @@ def extract_phone_from_whatsapp_link(whatsapp_link):
     
     return None
 
-def get_instance_status_api(instance_name):
+def get_instance_status_api(instance_name, apikey=None, api_provider=None):
     """
     Verifica o status da instância via API.
-    GET /rest/instance/{instance_key}
-    Retorna: 'connected', 'disconnected', ou None se erro
+    MegaAPI: GET /rest/instance/{instance_key}
+    Uazapi: GET /instance/status (header token=apikey)
+    Retorna: 'connected', 'connecting', 'disconnected', ou None se erro
     """
+    if api_provider == 'uazapi' and uazapi_service and apikey:
+        try:
+            result = uazapi_service.get_status(apikey)
+            if not result:
+                return None
+            # Uazapi retorna instance.status: connected, connecting, disconnected
+            status = result.get('instance', {}).get('status') or result.get('status')
+            if status in ('connected', 'connecting', 'disconnected'):
+                return status
+            return 'disconnected'
+        except Exception as e:
+            print(f"❌ [Uazapi] Exception checking instance status: {e}")
+            return None
+
+    # MegaAPI
     url = f"{MEGA_API_URL}/rest/instance/{instance_name}"
     headers = {
         "Authorization": MEGA_API_TOKEN,
@@ -153,25 +176,52 @@ def restart_instance_api(instance_name):
         print(f"❌ Exception restarting instance: {e}")
         return False
 
-def verify_and_recover_instance(instance_name):
+def _update_instance_status_db(instance_name, status):
+    """Atualiza status da instância no DB."""
+    try:
+        with psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            database=os.environ.get('DB_NAME', 'leads_infinitos'),
+            user=os.environ.get('DB_USER', 'postgres'),
+            password=os.environ.get('DB_PASSWORD', 'devpassword'),
+            port=os.environ.get('DB_PORT', '5432')
+        ) as conn_fix:
+            with conn_fix.cursor() as cur_fix:
+                cur_fix.execute(
+                    "UPDATE instances SET status = %s, updated_at = NOW() WHERE name = %s",
+                    (status, instance_name),
+                )
+            conn_fix.commit()
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to update DB status: {e}")
+        return False
+
+
+def verify_and_recover_instance(instance_name, apikey=None, api_provider=None):
     """
     Verifica status da instância e tenta recovery se necessário.
-    1. Verifica status atual
-    2. Se desconectada/erro, tenta restart
-    3. Aguarda e verifica novamente
+    MegaAPI: tenta restart se desconectada.
+    Uazapi: não tem restart; apenas atualiza status no DB e retorna False se desconectada.
     
     Retorna: True se instância está conectada, False caso contrário
     """
     print(f"🔍 Verifying instance {instance_name} status...")
     
     # 1. Check current status
-    status = get_instance_status_api(instance_name)
+    status = get_instance_status_api(instance_name, apikey=apikey, api_provider=api_provider)
     
     if status == 'connected':
         print(f"✅ Instance {instance_name} is connected")
         return True
+
+    # Uazapi: não tem restart; atualizar DB e retornar False
+    if api_provider == 'uazapi':
+        print(f"⚠️ Instance {instance_name} (Uazapi) not connected (status: {status}). No restart available.")
+        _update_instance_status_db(instance_name, status or 'disconnected')
+        return False
     
-    # 2. Try restart
+    # 2. MegaAPI: Try restart
     print(f"⚠️ Instance {instance_name} not connected (status: {status}). Attempting recovery...")
     
     if restart_instance_api(instance_name):
@@ -184,21 +234,7 @@ def verify_and_recover_instance(instance_name):
         
         if new_status == 'connected':
             print(f"✅ Instance {instance_name} recovered successfully!")
-            # Update DB to connected
-            try:
-                with psycopg2.connect(
-                    host=os.environ.get('DB_HOST', 'localhost'),
-                    database=os.environ.get('DB_NAME', 'leads_infinitos'),
-                    user=os.environ.get('DB_USER', 'postgres'),
-                    password=os.environ.get('DB_PASSWORD', 'devpassword'),
-                    port=os.environ.get('DB_PORT', '5432')
-                ) as conn_fix:
-                    with conn_fix.cursor() as cur_fix:
-                        cur_fix.execute("UPDATE instances SET status = 'connected', updated_at = NOW() WHERE name = %s", (instance_name,))
-                    conn_fix.commit()
-                print(f"✅ Instance {instance_name} marked as connected in DB")
-            except Exception as e:
-                print(f"⚠️ Failed to update DB status: {e}")
+            _update_instance_status_db(instance_name, 'connected')
             return True
         else:
             print(f"❌ Instance {instance_name} recovery failed (status: {new_status})")
@@ -218,6 +254,16 @@ def format_jid(phone):
         clean_phone = '55' + clean_phone
         
     return f"{clean_phone}@s.whatsapp.net"
+
+
+def jid_to_number(phone_jid):
+    """
+    Extrai o número do JID (remove @s.whatsapp.net).
+    Uazapi usa número no formato 5511999999999.
+    """
+    if not phone_jid:
+        return None
+    return str(phone_jid).replace('@s.whatsapp.net', '').strip()
 
 def check_daily_limit(user_id, plan_limit):
     """
@@ -329,10 +375,11 @@ def is_instance_error_message(error_msg):
     return True
 
 
-def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
+def check_phone_on_whatsapp(instance_name, phone_jid, apikey=None, api_provider=None, retry_count=0):
     """
-    Verifica se o número existe no WhatsApp usando Mega API.
-    GET /rest/instance/isOnWhatsApp/{nome}?jid={jid}
+    Verifica se o número existe no WhatsApp.
+    MegaAPI: GET /rest/instance/isOnWhatsApp/{nome}?jid={jid}
+    Uazapi: POST /chat/check com {numbers: [number]} (number sem @s.whatsapp.net)
     
     Retorna tupla: (exists, correct_jid, is_instance_error)
     - exists: True se número existe no WhatsApp
@@ -346,6 +393,28 @@ def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
         time.sleep(0.1)
         return True, phone_jid, False
 
+    # Uazapi: POST /chat/check
+    if api_provider == 'uazapi' and uazapi_service and apikey:
+        number = jid_to_number(phone_jid)
+        if not number:
+            return False, None, False
+        try:
+            result = uazapi_service.check_phone(apikey, [number])
+            if result is None:
+                return False, None, True  # API error -> instance error
+            # Resposta: array com query, jid, isInWhatsapp (Uazapi OpenAPI)
+            items = result if isinstance(result, list) else [result]
+            if not items:
+                return False, None, True
+            item = items[0] if isinstance(items[0], dict) else {}
+            exists = item.get('isInWhatsapp', False)
+            correct_jid = item.get('jid') or format_jid(item.get('query', number)) if exists else phone_jid
+            return bool(exists), correct_jid, False
+        except Exception as e:
+            print(f"❌ [Uazapi] Exception checking phone: {e}")
+            return False, None, True
+
+    # MegaAPI
     url = f"{MEGA_API_URL}/rest/instance/isOnWhatsApp/{instance_name}"
     headers = {
         "Authorization": MEGA_API_TOKEN,
@@ -398,10 +467,10 @@ def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
             if retry_count < MAX_RETRIES:
                 print(f"🔄 Attempting instance recovery...")
                 
-                if verify_and_recover_instance(instance_name):
+                if verify_and_recover_instance(instance_name, apikey=apikey, api_provider=api_provider):
                     # Recovery successful - retry the check
                     print(f"🔄 Retrying number verification after recovery...")
-                    return check_phone_on_whatsapp(instance_name, phone_jid, retry_count + 1)
+                    return check_phone_on_whatsapp(instance_name, phone_jid, apikey=apikey, api_provider=api_provider, retry_count=retry_count + 1)
                 else:
                     # Recovery failed - mark instance as disconnected but DON'T mark number as invalid
                     print(f"❌ Recovery failed. Marking instance as disconnected...")
@@ -451,16 +520,34 @@ def check_phone_on_whatsapp(instance_name, phone_jid, retry_count=0):
         print(f"Exception checking WhatsApp existence: {e}")
         return False, None, True  # Treat as instance error to be safe
 
-def send_message(instance_name, phone_jid, message):
+def send_message(instance_name, phone_jid, message, apikey=None, api_provider=None):
     """
-    Envia mensagem usando a Mega API.
-    POST /rest/sendMessage/{instance_key}/text
+    Envia mensagem.
+    MegaAPI: POST /rest/sendMessage/{instance_key}/text
+    Uazapi: POST /send/text (number sem @s.whatsapp.net)
     """
     if os.environ.get('MOCK_SENDER'):
         print(f"[MOCK] Sent message to {phone_jid}: {message[:20]}...")
         time.sleep(0.5)
         return True, {"key": "mocked_key"}
 
+    # Uazapi: POST /send/text
+    if api_provider == 'uazapi' and uazapi_service and apikey:
+        number = jid_to_number(phone_jid)
+        if not number:
+            return False, "Invalid phone number"
+        try:
+            result = uazapi_service.send_text(apikey, number, message)
+            if result is not None:
+                print(f"✅ [Uazapi] Message sent successfully!")
+                return True, result
+            return False, "Uazapi send_text returned None"
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ [Uazapi] Exception sending message: {error_msg}")
+            return False, error_msg
+
+    # MegaAPI
     url = f"{MEGA_API_URL}/rest/sendMessage/{instance_name}/text"
     headers = {
         "Authorization": MEGA_API_TOKEN,
@@ -676,27 +763,29 @@ def process_campaigns():
                     active_users_processed += 1
                     
                     # --- FETCH CAMPAIGN INSTANCES (multi-instance support) ---
+                    # Superadmin: apenas instâncias Uazapi (api_provider='uazapi')
+                    # Outros usuários: MegaAPI (api_provider IS NULL ou 'megaapi')
                     campaign_insts = []
+                    instance_filter = "AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'" if is_sa else "AND COALESCE(i.api_provider, 'megaapi') = 'megaapi'"
                     try:
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                            # Try to get instances assigned to this specific campaign
-                            cur.execute("""
-                                SELECT i.name, i.id FROM campaign_instances ci 
-                                JOIN instances i ON ci.instance_id = i.id 
-                                WHERE ci.campaign_id = %s AND i.status = 'connected'
+                            cur.execute(f"""
+                                SELECT i.name, i.id, i.apikey, COALESCE(i.api_provider, 'megaapi') as api_provider
+                                FROM campaign_instances ci
+                                JOIN instances i ON ci.instance_id = i.id
+                                WHERE ci.campaign_id = %s AND i.status = 'connected' {instance_filter}
                                 ORDER BY i.id
                             """, (campaign['id'],))
                             campaign_insts = cur.fetchall()
                     except Exception as e_ci:
-                        # Table may not exist yet (first deploy before init_db runs)
-                        # Rollback the failed transaction to keep connection usable
                         conn.rollback()
-                    
+
                     # Fallback: no campaign_instances records or table doesn't exist
                     if not campaign_insts:
+                        fallback_filter = "AND COALESCE(api_provider, 'megaapi') = 'uazapi'" if is_sa else "AND COALESCE(api_provider, 'megaapi') = 'megaapi'"
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(
-                                "SELECT name, id FROM instances WHERE user_id = %s AND status = 'connected' ORDER BY updated_at DESC LIMIT 1", 
+                                f"SELECT name, id, apikey, COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE user_id = %s AND status = 'connected' {fallback_filter} ORDER BY updated_at DESC LIMIT 1",
                                 (user_id,)
                             )
                             fallback = cur.fetchone()
@@ -800,8 +889,12 @@ def process_campaigns():
                     
                     phone_jid = format_jid(phone_to_use)
                     
-                    # 6. Check WhatsApp Existence (Mega API)
-                    exists, correct_jid, is_instance_error = check_phone_on_whatsapp(instance_name, phone_jid)
+                    # 6. Check WhatsApp Existence (MegaAPI ou Uazapi)
+                    inst_apikey = selected_instance.get('apikey')
+                    inst_provider = selected_instance.get('api_provider') or 'megaapi'
+                    exists, correct_jid, is_instance_error = check_phone_on_whatsapp(
+                        instance_name, phone_jid, apikey=inst_apikey, api_provider=inst_provider
+                    )
                     
                     if is_instance_error:
                         # Instance error - don't mark number as invalid, just skip for now
@@ -847,9 +940,12 @@ def process_campaigns():
                         message_text = message_text.replace("{nome}", lead['name'])
                         message_text = message_text.replace("{name}", lead['name'])  # Suportar ambas as versões
                     
-                    # 7. Enviar
+                    # 7. Enviar (MegaAPI ou Uazapi)
                     print(f"Sending to {phone_jid} (User {user_id})...")
-                    success, log = send_message(instance_name, phone_jid, message_text)
+                    success, log = send_message(
+                        instance_name, phone_jid, message_text,
+                        apikey=inst_apikey, api_provider=inst_provider
+                    )
                     
                     # 8. Atualizar DB
                     new_status = 'sent' if success else 'failed'
