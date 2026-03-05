@@ -24,6 +24,7 @@ from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from main import run_scraper_with_progress
 import requests
+from services.uazapi import UazapiService
 import re
 import pandas as pd
 import io
@@ -250,6 +251,13 @@ def init_db() -> None:
             status TEXT DEFAULT 'disconnected',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        """
+    )
+
+    # Adicionar coluna api_provider (migração: MegaAPI vs Uazapi)
+    cur.execute(
+        """
+        ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_provider TEXT DEFAULT 'megaapi';
         """
     )
     
@@ -2485,6 +2493,37 @@ def admin_user_details(user_id):
 @admin_required
 def admin_check_whatsapp_status(instance_apikey):
     """Admin endpoint to check/update status of a whatsapp instance"""
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE apikey = %s", (instance_apikey,))
+        prov_row = cur.fetchone()
+    conn.close()
+    
+    if not prov_row:
+        return {"error": "Instance not found"}, 404
+    api_provider = prov_row[0]
+    
+    if api_provider == 'uazapi':
+        uazapi = UazapiService()
+        result = uazapi.get_status(instance_apikey)
+        if not result:
+            return {"error": "Failed to verify status"}, 400
+        instance_data = result.get('instance') or result
+        status_val = instance_data.get('status', 'disconnected') if isinstance(instance_data, dict) else 'disconnected'
+        new_status = status_val if status_val in ('connected', 'connecting', 'disconnected') else 'disconnected'
+        remote_jid = None
+        if isinstance(result, dict):
+            remote_jid = result.get('id') or result.get('me')
+            if not remote_jid and result.get('instance_data'):
+                remote_jid = result['instance_data'].get('phone') or result['instance_data'].get('user') or result['instance_data'].get('jid')
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE instances SET status = %s WHERE apikey = %s", (new_status, instance_apikey))
+        conn.commit()
+        conn.close()
+        print(f"Admin Checked Status for {instance_apikey}: {new_status} (Uazapi)")
+        return {"status": new_status, "result": result, "remote_jid": remote_jid}
+    
     service = WhatsappService()
     result = service.get_status(instance_apikey)
     
@@ -3481,6 +3520,32 @@ def init_whatsapp():
         safe_name = "".join(c for c in instance_name if c.isalnum() or c in ('-', '_'))
     
     try:
+        if is_super_admin():
+            # Superadmin usa Uazapi
+            uazapi = UazapiService()
+            result = uazapi.create_instance(safe_name if safe_name else "instance")
+            if not result:
+                return {"error": "Falha ao criar instância na Uazapi."}, 500
+            instance_key = result.get('token') or (result.get('instance') or {}).get('token')
+            if not instance_key:
+                print(f"Warning: No token from Uazapi. Result: {result}")
+                return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO instances (user_id, name, apikey, status, api_provider)
+                        VALUES (%s, %s, %s, 'disconnected', 'uazapi')
+                        """,
+                        (current_user.id, instance_name or safe_name, instance_key)
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            return {"status": "success", "key": instance_key, "data": result}
+        
+        # Usuários normais: MegaAPI
         service = WhatsappService()
         result = service.create_instance(safe_name if safe_name else None)
         
@@ -3535,12 +3600,27 @@ def get_whatsapp_qr(instance_key):
     # Verify ownership
     conn = get_db_connection()
     with conn.cursor() as cur:
-        cur.execute("SELECT user_id FROM instances WHERE apikey = %s", (instance_key,))
+        cur.execute("SELECT user_id, COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE apikey = %s", (instance_key,))
         row = cur.fetchone()
     conn.close()
     
     if not row or row[0] != current_user.id:
         return {"error": "Unauthorized"}, 403
+    
+    api_provider = row[1]
+    
+    if api_provider == 'uazapi':
+        uazapi = UazapiService()
+        result = uazapi.connect(instance_key)
+        if not result:
+            return {"error": "Falha ao obter QR code da Uazapi."}, 500
+        instance_data = result.get('instance') or {}
+        if isinstance(instance_data, dict) and instance_data.get('status') in ('connected', 'open'):
+            return {"error": "Instância já está conectada! Não é necessário escanear QR Code."}, 200
+        qrcode_val = result.get('qrcode') or instance_data.get('qrcode')
+        if qrcode_val and isinstance(qrcode_val, str) and len(qrcode_val) > 50:
+            return {"base64": qrcode_val}
+        return {"error": "QR Code não disponível. Tente novamente em alguns segundos."}, 500
         
     service = WhatsappService()
     result = service.get_qr_code(instance_key)
@@ -3596,13 +3676,31 @@ def get_whatsapp_status(instance_key):
     # Verify ownership
     conn = get_db_connection()
     with conn.cursor() as cur:
-        cur.execute("SELECT id, user_id FROM instances WHERE apikey = %s", (instance_key,))
+        cur.execute("SELECT id, user_id, COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE apikey = %s", (instance_key,))
         row = cur.fetchone()
     conn.close()
     
     if not row or row[1] != current_user.id:
         return {"error": "Unauthorized"}, 403
-        
+    
+    api_provider = row[2]
+    
+    if api_provider == 'uazapi':
+        uazapi = UazapiService()
+        result = uazapi.get_status(instance_key)
+        if not result:
+            return {"error": "Failed to get status"}, 500
+        instance_data = result.get('instance') or result
+        status_val = instance_data.get('status', 'disconnected') if isinstance(instance_data, dict) else 'disconnected'
+        new_status = status_val if status_val in ('connected', 'connecting', 'disconnected') else 'disconnected'
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE instances SET status = %s, updated_at = NOW() WHERE id = %s", (new_status, row[0]))
+        conn.commit()
+        conn.close()
+        print(f"Status checked for instance {instance_key} (User {current_user.id}): {new_status} (Uazapi)")
+        return result
+    
     service = WhatsappService()
     result = service.get_status(instance_key)
     
@@ -3693,14 +3791,31 @@ def delete_whatsapp_instance(instance_key):
     # Verify ownership
     conn = get_db_connection()
     with conn.cursor() as cur:
-        cur.execute("SELECT id, user_id FROM instances WHERE apikey = %s", (instance_key,))
+        cur.execute("SELECT id, user_id, COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE apikey = %s", (instance_key,))
         row = cur.fetchone()
     conn.close()
     
     if not row or row[1] != current_user.id:
         print(f"❌ Unauthorized delete attempt for {instance_key}")
         return {"error": "Unauthorized"}, 403
-        
+    
+    api_provider = row[2]
+    
+    if api_provider == 'uazapi':
+        uazapi = UazapiService()
+        success, status_code = uazapi.delete_instance(instance_key)
+        print(f"🗑️ Uazapi Delete Result: success={success}, status={status_code}")
+        if not success:
+            return {"error": "Falha ao deletar instância na Uazapi."}, 500
+        # 200 ou 404: remover do DB (404 = já deletada na Uazapi, consistência local)
+        print(f"🗑️ Removing from database...")
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM instances WHERE id = %s", (row[0],))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": "Instance deleted"}
+    
     service = WhatsappService()
     
     # 0. Try Logout first (ensure session is killed)
