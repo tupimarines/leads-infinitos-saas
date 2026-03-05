@@ -2944,36 +2944,6 @@ def create_campaign():
     if not name or not job_id:
         return json.dumps({'error': 'Nome e Job são obrigatórios'}), 400
         
-    # NEW: Restart Instance(s) before starting campaign to prevent API bugs
-    try:
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if instance_ids:
-                # Restart selected instances
-                cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s AND id = ANY(%s)", 
-                           (current_user.id, instance_ids))
-            else:
-                # Fallback: restart the default instance
-                cur.execute("SELECT apikey, name FROM instances WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1", 
-                           (current_user.id,))
-            instances_to_restart = cur.fetchall()
-        conn.close()
-        
-        service = WhatsappService()
-        for inst in instances_to_restart:
-            if inst.get('apikey'):
-                print(f"🔄 Restarting instance {inst['name']} for new campaign...")
-                try:
-                    service.restart_instance(inst['apikey'])
-                except Exception as e:
-                    print(f"⚠️ Failed to restart instance {inst['name']}: {e}")
-        if instances_to_restart:
-            import time
-            time.sleep(5)  # Give instances a moment after restart
-    except Exception as e:
-        print(f"⚠️ Failed to restart instances: {e}")
-        # Continue anyway, don't block campaign creation
-        
     try:
         # 1. Obter leads do Job
         conn = get_db_connection()
@@ -3400,31 +3370,6 @@ class WhatsappService:
             print(f"❌ Error getting status: {e}")
             return None
 
-    def restart_instance(self, instance_key: str) -> dict:
-        """Restarts WhatsApp instance"""
-        # Doc: DELETE /rest/instance/{instance_key}/restart
-        url = f"{self.base_url}/rest/instance/{instance_key}/restart"
-        print(f"🔄 [WhatsappService] Restarting {instance_key} via DELETE {url}")
-        
-        try:
-            response = requests.delete(url, headers=self.headers, timeout=15)
-            print(f"🔄 Restart API Status: {response.status_code}")
-            print(f"🔄 Restart API Body: {response.text}")
-            
-            if response.status_code == 404:
-                # Check if it's a real API 404 (JSON) or a Server 404 (HTML)
-                if 'text/html' in response.headers.get('Content-Type', ''):
-                    return {"error": "API Endpoint not found (404 HTML)"}
-                return {"status": "error", "message": "Instance not found for restart"}
-
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error restarting instance: {e}")
-            if e.response:
-                print(f"❌ Response: {e.response.text}")
-            return {"error": str(e)}
-
     def logout_instance(self, instance_key: str) -> dict:
         """Logs out WhatsApp instance"""
         url = f"{self.base_url}/rest/instance/{instance_key}/logout"
@@ -3752,34 +3697,6 @@ def get_whatsapp_status(instance_key):
         
         return result
     return {"error": "Failed to get status"}, 500
-
-
-@app.route("/api/whatsapp/restart/<instance_key>", methods=["POST"])
-@login_required
-def restart_whatsapp_instance(instance_key):
-    """API to restart instance connection"""
-    print(f"🔄 Restarting instance {instance_key} for user {current_user.id}...")
-    
-    # Verify ownership
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id, user_id FROM instances WHERE apikey = %s", (instance_key,))
-        row = cur.fetchone()
-    conn.close()
-    
-    if not row or row[1] != current_user.id:
-        print(f"❌ Unauthorized restart attempt for {instance_key}")
-        return {"error": "Unauthorized"}, 403
-        
-    service = WhatsappService()
-    result = service.restart_instance(instance_key)
-    
-    print(f"🔄 Restart Result: {result}")
-    
-    if result and not result.get('error'):
-        return {"status": "success", "message": "Restart command sent"}
-        
-    return {"error": "Failed to restart instance"}, 500
 
 
 @app.route("/api/whatsapp/delete/<instance_key>", methods=["POST"])

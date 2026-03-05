@@ -53,9 +53,6 @@
                     <button class="btn" onclick="checkInstanceStatus('{{ inst.apikey }}', '{{ inst.name }}')">
                         Status
                     </button>
-                    <button class="btn" onclick="restartSingleInstance('{{ inst.apikey }}')">
-                        Reiniciar
-                    </button>
                     <button class="btn" onclick="deleteSingleInstance('{{ inst.apikey }}')"
                         style="background: rgba(255,93,93,.12); color: #ff5d5d; border-color: rgba(255,93,93,.35);">
                         Deletar
@@ -205,21 +202,6 @@
                 }
             }
 
-            async function restartSingleInstance(apikey) {
-                const card = findCardByKey(apikey);
-                if (!confirm('Deseja reiniciar esta instância?')) return;
-
-                try {
-                    const res = await fetch(`/api/whatsapp/restart/${apikey}`, { method: 'POST' });
-                    const data = await res.json();
-                    if (data.error) throw new Error(data.error);
-                    showCardMessage(card, 'Reiniciada! Verificando status...', 'success');
-                    setTimeout(() => checkInstanceStatus(apikey, ''), 3000);
-                } catch (e) {
-                    showCardMessage(card, e.message, 'error');
-                }
-            }
-
             async function deleteSingleInstance(apikey) {
                 if (!confirm('⚠️ ATENÇÃO: Deseja realmente DELETAR esta instância?\n\nEsta ação removerá a instância permanentemente.')) return;
                 
@@ -276,10 +258,6 @@
                     <button id="btn-status" class="btn" onclick="checkStatus()" {% if not instance %}disabled
                         style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
                         Verificar Status
-                    </button>
-                    <button id="btn-restart" class="btn" onclick="restartInstance()" {% if not instance %}disabled
-                        style="opacity: 0.5; cursor: not-allowed;" {% endif %}>
-                        Reiniciar Conexão
                     </button>
                     <button id="btn-delete" class="btn" onclick="deleteInstance()" {% if not instance %}disabled
                         style="opacity: 0.5; cursor: not-allowed; background: rgba(255,93,93,.12); color: #ff5d5d; border-color: rgba(255,93,93,.35);"
@@ -444,31 +422,6 @@
 
                 } catch (e) {
                     showMessage('Erro ao verificar status.', 'error');
-                }
-            }
-
-            async function restartInstance() {
-                const key = document.getElementById('instance_key').value;
-                if (!key) return showMessage('Instância não configurada.', 'error');
-
-                if (!confirm('Deseja reiniciar a conexão da instância?')) return;
-
-                document.getElementById('btn-restart').disabled = true;
-                document.getElementById('loading').style.display = 'block';
-
-                try {
-                    const res = await fetch(`/api/whatsapp/restart/${key}`, { method: 'POST' });
-                    const data = await res.json();
-                    if (data.error) throw new Error(data.error);
-
-                    showMessage('Conexão reiniciada! Aguarde e verifique o status.', 'success');
-                    setTimeout(() => checkStatus(), 3000);
-
-                } catch (e) {
-                    showMessage(e.message || 'Erro ao reiniciar conexão.', 'error');
-                } finally {
-                    document.getElementById('btn-restart').disabled = false;
-                    document.getElementById('loading').style.display = 'none';
                 }
             }
 
