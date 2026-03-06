@@ -381,17 +381,25 @@
             updateCampaignStats(campaignId);
         });
 
-        // Polling automático para campanhas rodando (a cada 5 segundos)
+        // Polling automático: running a cada 5s; paused/pending a cada 15s (para ver envios após pausar)
         setInterval(() => {
             campaignCards.forEach(card => {
                 const campaignId = card.dataset.campaignId;
                 const status = card.dataset.status;
-
                 if (status === 'running') {
                     updateCampaignStats(campaignId);
                 }
             });
         }, 5000);
+        setInterval(() => {
+            campaignCards.forEach(card => {
+                const campaignId = card.dataset.campaignId;
+                const status = card.dataset.status;
+                if (status === 'paused' || status === 'pending') {
+                    updateCampaignStats(campaignId);
+                }
+            });
+        }, 15000);
     });
 </script>
 {% endblock %}

@@ -952,6 +952,14 @@ def process_campaigns():
                         message_text = message_text.replace("{nome}", lead['name'])
                         message_text = message_text.replace("{name}", lead['name'])  # Suportar ambas as versões
                     
+                    # Re-verificar status da campanha antes de enviar (pausa mais responsiva)
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("SELECT status FROM campaigns WHERE id = %s", (campaign['id'],))
+                        row = cur.fetchone()
+                    if row and row.get('status') not in ('running', 'pending'):
+                        # Campanha foi pausada — pular para próxima campanha
+                        continue
+                    
                     # 7. Enviar (MegaAPI ou Uazapi)
                     print(f"Sending to {phone_jid} (User {user_id})...")
                     success, log = send_message(

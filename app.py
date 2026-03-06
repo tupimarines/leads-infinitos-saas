@@ -4123,9 +4123,9 @@ def get_campaign_stats(campaign_id):
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Verificar se a campanha pertence ao usuário
+            # Verificar se a campanha pertence ao usuário e se usa Uazapi
             cur.execute(
-                "SELECT id, closed_deals FROM campaigns WHERE id = %s AND user_id = %s",
+                "SELECT id, closed_deals, use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s AND user_id = %s",
                 (campaign_id, current_user.id)
             )
             campaign = cur.fetchone()
@@ -4136,7 +4136,7 @@ def get_campaign_stats(campaign_id):
             
             closed_deals = campaign['closed_deals'] or 0
             
-            # Buscar estatísticas de leads
+            # Buscar estatísticas de leads (campaign_leads)
             cur.execute(
                 """
                 SELECT 
@@ -4156,15 +4156,60 @@ def get_campaign_stats(campaign_id):
         
         conn.close()
         
-        # Calcular taxa de conversão
         sent = stats['sent'] or 0
+        pending = stats['pending'] or 0
+        failed = stats['failed'] or 0
+        total_leads = stats['total_leads'] or 0
+
+        # Campanhas Uazapi: campaign_leads nunca é atualizado pelo envio remoto.
+        # Buscar contagens reais via API Uazapi (list_messages por status).
+        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
+            try:
+                conn2 = get_db_connection()
+                with conn2.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT i.apikey FROM campaign_instances ci
+                        JOIN instances i ON i.id = ci.instance_id
+                        WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                        LIMIT 1
+                    """, (campaign_id,))
+                    inst = cur.fetchone()
+                conn2.close()
+                if inst and inst.get('apikey'):
+                    uazapi = UazapiService()
+                    folder_id = campaign['uazapi_folder_id']
+                    token = inst['apikey']
+                    # Buscar Sent
+                    r_sent = uazapi.list_messages(token, folder_id, message_status='Sent', page=1, page_size=1)
+                    # Buscar Failed
+                    r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1)
+                    # Buscar Scheduled (pendentes na fila Uazapi)
+                    r_scheduled = uazapi.list_messages(token, folder_id, message_status='Scheduled', page=1, page_size=1)
+                    # Uazapi list_messages retorna pagination.total
+                    def _count(r):
+                        if not r: return 0
+                        p = r.get('pagination') or {}
+                        if isinstance(p, dict):
+                            return int(p.get('total', 0) or p.get('totalRecords', 0))
+                        return 0
+                    # Para total exato, usar total_leads do DB; sent/failed do Uazapi
+                    uazapi_sent = _count(r_sent)
+                    uazapi_failed = _count(r_failed)
+                    uazapi_scheduled = _count(r_scheduled)
+                    if uazapi_sent > 0 or uazapi_failed > 0 or uazapi_scheduled > 0:
+                        sent = uazapi_sent
+                        failed = uazapi_failed
+                        pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
+            except Exception as e:
+                print(f"⚠️ [Stats] Erro ao buscar stats Uazapi para campanha {campaign_id}: {e}")
+        
         conversion_rate = round((closed_deals / sent * 100), 1) if sent > 0 else 0
         
         return {
-            "total_leads": stats['total_leads'] or 0,
+            "total_leads": total_leads,
             "sent": sent,
-            "pending": stats['pending'] or 0,
-            "failed": stats['failed'] or 0,
+            "pending": pending,
+            "failed": failed,
             "invalid": stats['invalid'] or 0,
             "closed_deals": closed_deals,
             "conversion_rate": conversion_rate,
