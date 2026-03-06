@@ -611,6 +611,54 @@
 
                 </div>
 
+                <!-- ============================================ -->
+                <!-- HORÁRIO COMERCIAL (faixa de envio + dias) -->
+                <!-- ============================================ -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(34, 197, 94, 0.04); border: 1px solid rgba(34, 197, 94, 0.2);">
+                    <label class="block text-sm font-semibold text-gray-300 mb-3">
+                        ⏰ Horário de envio
+                    </label>
+                    <p class="text-xs text-gray-500 mb-4">Define em quais horários e dias as mensagens serão enviadas</p>
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Das</label>
+                            <input type="number" id="send_hour_start" min="0" max="23" value="8"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm"
+                                placeholder="8">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Até (hora)</label>
+                            <input type="number" id="send_hour_end" min="0" max="23" value="20"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm"
+                                placeholder="20">
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap gap-6">
+                        <label class="relative inline-flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" id="send_saturday" class="sr-only peer">
+                            <div class="relative w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                                peer-checked:after:translate-x-full peer-checked:after:border-white 
+                                after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
+                                after:bg-white after:border-gray-300 after:border after:rounded-full 
+                                after:h-4 after:w-4 after:transition-all 
+                                peer-checked:bg-green-600"></div>
+                            <span class="text-sm text-gray-300">Enviar aos sábados</span>
+                        </label>
+                        <label class="relative inline-flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" id="send_sunday" class="sr-only peer">
+                            <div class="relative w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                                peer-checked:after:translate-x-full peer-checked:after:border-white 
+                                after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
+                                after:bg-white after:border-gray-300 after:border after:rounded-full 
+                                after:h-4 after:w-4 after:transition-all 
+                                peer-checked:bg-green-600"></div>
+                            <span class="text-sm text-gray-300">Enviar aos domingos</span>
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Padrão: 8h às 20h, apenas dias úteis (seg-sex)</p>
+                </div>
+
                 <!-- Agendamento (Visual Only for now) -->
                 <div class="grid grid-cols-2 gap-4">
                     <div>
@@ -1030,6 +1078,21 @@
             }
         }
 
+        const sendHourStart = parseInt(document.getElementById('send_hour_start').value, 10) || 8;
+        const sendHourEnd = parseInt(document.getElementById('send_hour_end').value, 10) || 20;
+        if (sendHourStart < 0 || sendHourStart > 23 || sendHourEnd < 0 || sendHourEnd > 23) {
+            alert('Horário de envio deve estar entre 0 e 23.');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            return;
+        }
+        if (sendHourStart >= sendHourEnd) {
+            alert('O horário de início deve ser menor que o horário de término.');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            return;
+        }
+
         const data = {
             name: document.getElementById('name').value,
             job_id: document.getElementById('job_id').value,
@@ -1037,7 +1100,11 @@
             scheduled_start: scheduledStartUTC,
             use_uazapi_sender: useUazapiSender,
             delay_min_minutes: useUazapiSender ? delayMin : null,
-            delay_max_minutes: useUazapiSender ? delayMax : null
+            delay_max_minutes: useUazapiSender ? delayMax : null,
+            send_hour_start: sendHourStart,
+            send_hour_end: sendHourEnd,
+            send_saturday: document.getElementById('send_saturday').checked,
+            send_sunday: document.getElementById('send_sunday').checked
         };
 
         // TERMS: always validate terms checkbox

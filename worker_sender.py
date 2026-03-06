@@ -663,14 +663,29 @@ def discover_chatwoot_conversation(phone, name=None):
     return None
 
 
-def is_business_hours():
+def is_campaign_in_send_window(campaign):
     """
-    Verifica se estamos em horário comercial (8h às 20h, horário de Brasília).
+    Verifica se a campanha pode enviar no momento atual (horário + dia da semana).
+    Usa configurações da campanha (send_hour_start, send_hour_end, send_saturday, send_sunday)
+    ou defaults (8h-20h, seg-sex) se NULL.
     Retorna True se pode enviar, False caso contrário.
     """
     now_brazil = datetime.now(BRAZIL_TZ)
     current_hour = now_brazil.hour
-    return BUSINESS_HOUR_START <= current_hour < BUSINESS_HOUR_END
+    weekday = now_brazil.weekday()  # 0=segunda, 5=sábado, 6=domingo
+
+    hour_start = campaign.get('send_hour_start') if campaign.get('send_hour_start') is not None else BUSINESS_HOUR_START
+    hour_end = campaign.get('send_hour_end') if campaign.get('send_hour_end') is not None else BUSINESS_HOUR_END
+    send_saturday = bool(campaign.get('send_saturday', False))
+    send_sunday = bool(campaign.get('send_sunday', False))
+
+    if not (hour_start <= current_hour < hour_end):
+        return False
+    if weekday == 5 and not send_saturday:
+        return False
+    if weekday == 6 and not send_sunday:
+        return False
+    return True
 
 
 def process_campaigns():
@@ -681,13 +696,6 @@ def process_campaigns():
     
     while True:
         try:
-            # Verificar horário comercial antes de processar
-            if not is_business_hours():
-                now_brazil = datetime.now(BRAZIL_TZ)
-                print(f"⏰ Fora do horário comercial ({now_brazil.strftime('%H:%M')} BRT). Aguardando 8h-20h...")
-                time.sleep(60)  # Verificar a cada minuto
-                continue
-            
             conn = get_db_connection()
             
             # 1. Buscar campanhas 'running' OU 'pending' que atingiram horário agendado
@@ -701,8 +709,8 @@ def process_campaigns():
                 campaigns = cur.fetchall()
             
             conn.close() # Close immediately to free connection, we'll reopen if needed
-            
-            # NEW: Auto-start scheduled campaigns that reached their time
+
+            # Auto-start scheduled campaigns that reached their time (antes do filtro de janela)
             for campaign in campaigns:
                 if campaign['status'] == 'pending':
                     # Campaign was scheduled and time has arrived, start it
@@ -716,14 +724,17 @@ def process_campaigns():
                     conn_temp.close()
                     campaign['status'] = 'running'  # Update local dict for this iteration
                     print(f"Campaign {campaign['id']} auto-started (was scheduled)")
+
+            # Filtrar campanhas que estão na janela de envio (horário + dia da semana)
+            campaigns = [c for c in campaigns if is_campaign_in_send_window(c)]
+            if not campaigns:
+                now_brazil = datetime.now(BRAZIL_TZ)
+                print(f"⏰ Fora do horário de envio ({now_brazil.strftime('%H:%M')} BRT). Aguardando janela configurada...")
+                time.sleep(60)  # Verificar a cada minuto
+                continue
             
             # Heartbeat (verbose) or just informative?
             # print(f"❤️ Worker Heartbeat: Checking {len(campaigns)} active campaigns...")
-            
-            if not campaigns:
-                # print("No active campaigns. Sleeping...")
-                time.sleep(5)
-                continue
                 
             active_users_processed = 0
             

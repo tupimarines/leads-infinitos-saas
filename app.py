@@ -433,6 +433,16 @@ def init_db() -> None:
         """
     )
 
+    # Horário comercial configurável por campanha (faixa de horários + sábado/domingo)
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_hour_start INTEGER DEFAULT 8;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_hour_end INTEGER DEFAULT 20;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_saturday BOOLEAN DEFAULT false;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_sunday BOOLEAN DEFAULT false;
+        """
+    )
+
     # ============================================================
     # END UAZAPI CAMPAIGN API MIGRATIONS
     # ============================================================
@@ -3169,6 +3179,17 @@ def create_campaign():
     use_uazapi_sender = bool(data.get('use_uazapi_sender', False))
     delay_min_minutes = data.get('delay_min_minutes')  # None ou int
     delay_max_minutes = data.get('delay_max_minutes')  # None ou int
+
+    # Horário comercial configurável (faixa de horários + sábado/domingo)
+    send_hour_start = data.get('send_hour_start', 8)
+    send_hour_end = data.get('send_hour_end', 20)
+    send_saturday = bool(data.get('send_saturday', False))
+    send_sunday = bool(data.get('send_sunday', False))
+    # Validar faixa de horário (0-23)
+    if send_hour_start is not None:
+        send_hour_start = max(0, min(23, int(send_hour_start)))
+    if send_hour_end is not None:
+        send_hour_end = max(0, min(23, int(send_hour_end)))
     
     # Validate rotation_mode
     if rotation_mode not in ('single', 'round_robin'):
@@ -3323,10 +3344,10 @@ def create_campaign():
             
             cur.execute(
                 """
-                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
                 """,
-                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes)
+                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday)
             )
             row = cur.fetchone()
             campaign_id = row[0]
