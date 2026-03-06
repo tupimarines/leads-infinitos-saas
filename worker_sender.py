@@ -275,35 +275,8 @@ def jid_to_number(phone_jid):
         return None
     return str(phone_jid).replace('@s.whatsapp.net', '').strip()
 
-def check_daily_limit(user_id, plan_limit):
-    """
-    Verifica se o usuário já atingiu o limite diário de disparos.
-    Retorna True se PODE enviar, False se atingiu o limite.
-    """
-    # Define Brazil timezone
-    # Assuming the server/DB might be UTC, we want to count messages based on BRT day
-    # Adjust logic to cast timestamp to 'America/Sao_Paulo'
-    
-    query = """
-    SELECT COUNT(cl.id) as count 
-    FROM campaign_leads cl
-    JOIN campaigns c ON cl.campaign_id = c.id
-    WHERE c.user_id = %s 
-    AND cl.status = 'sent' 
-    AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
-    """
-    
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (user_id,))
-            row = cur.fetchone()
-        
-        current_sent = row['count']
-        # print(f"User {user_id}: {current_sent}/{plan_limit} messages sent today.")
-        return current_sent < plan_limit
-    finally:
-        conn.close()
+# check_daily_limit extraído para utils.limits (reuso em worker_cadence)
+from utils.limits import check_daily_limit
 
 def check_instance_daily_limit(user_id, instance_name, plan_limit):
     """

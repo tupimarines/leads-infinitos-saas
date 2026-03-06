@@ -3406,10 +3406,16 @@ def create_campaign():
             steps = data.get('steps', [])
             
             if enable_cadence and steps:
-                # Update campaign flags
+                # cadence_config: rollover_time (HH:MM) para rollover diário
+                rollover_time = data.get('rollover_time', '23:00')
+                if rollover_time and not re.match(r'^\d{1,2}:\d{2}$', str(rollover_time)):
+                    rollover_time = '23:00'
+                cadence_config_json = json.dumps({'rollover_time': str(rollover_time)})
                 cur.execute(
-                    "UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = %s WHERE id = %s",
-                    (terms_accepted, campaign_id)
+                    """UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = %s,
+                       cadence_config = COALESCE(cadence_config, '{}')::jsonb || %s::jsonb
+                       WHERE id = %s""",
+                    (terms_accepted, cadence_config_json, campaign_id)
                 )
                 
                 # Media storage directory

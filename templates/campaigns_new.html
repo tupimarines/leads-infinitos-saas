@@ -634,6 +634,13 @@
                                 placeholder="20">
                         </div>
                     </div>
+                    <div class="mb-4" id="rollover_time_block">
+                        <label class="block text-xs font-medium text-gray-400 mb-1">Horário de rollover (leads em Inicial → Follow-up 1)</label>
+                        <input type="time" id="rollover_time" value="23:00" step="60"
+                            class="neon-input w-32 px-4 py-2 rounded-lg text-white text-sm"
+                            title="Ex: 23:34, 9:01 para testes">
+                        <p class="text-xs text-gray-500 mt-1">Ao atingir este horário (BRT), leads em Inicial seguem para Follow-up 1 e campanha é agendada.</p>
+                    </div>
                     <div class="flex flex-wrap gap-6">
                         <label class="relative inline-flex items-center gap-3 cursor-pointer">
                             <input type="checkbox" id="send_saturday" class="sr-only peer">
@@ -1134,6 +1141,8 @@
 
             data.enable_cadence = true;
             data.terms_accepted = true;
+            const rolloverEl = document.getElementById('rollover_time');
+            data.rollover_time = rolloverEl ? rolloverEl.value || '23:00' : '23:00';
             data.steps = [];
 
             // Step 1: uses main message_templates, delay 0
