@@ -3521,11 +3521,20 @@ def create_campaign():
                             pass
                     
                     uazapi = UazapiService()
+                    # Log payload de envio em massa (visibilidade como MegaAPI)
+                    payload_summary = {"campaign_id": campaign_id, "leads": len(messages), "delay_min": delay_min_sec, "delay_max": delay_max_sec}
+                    print(f"[UAZAPI] create_advanced_campaign payload: {json.dumps(payload_summary)}")
+                    if os.environ.get('DEBUG_SENDER'):
+                        for i, m in enumerate(messages[:3]):  # primeiras 3 como amostra
+                            print(f"[UAZAPI]   msg[{i}]: number={m.get('number')} text={m.get('text', '')[:50]}...")
+                        if len(messages) > 3:
+                            print(f"[UAZAPI]   ... +{len(messages)-3} mais")
                     result = uazapi.create_advanced_campaign(
                         token, delay_min_sec, delay_max_sec, messages,
                         info=name, scheduled_for=scheduled_for_param
                     )
                     if result and result.get('folder_id'):
+                        print(f"[UAZAPI] create_advanced_campaign OK campaign_id={campaign_id} folder_id={result['folder_id']}")
                         conn = get_db_connection()
                         with conn.cursor() as cur:
                             cur.execute(
@@ -3534,6 +3543,10 @@ def create_campaign():
                             )
                         conn.commit()
                         conn.close()
+                    elif result:
+                        print(f"⚠️ [UAZAPI] create_advanced_campaign sem folder_id campaign_id={campaign_id} result={result}")
+                    else:
+                        print(f"⚠️ [UAZAPI] create_advanced_campaign falhou campaign_id={campaign_id}")
             else:
                 print(f"⚠️ [Uazapi] Campanha {campaign_id}: use_uazapi_sender=true mas nenhuma instância Uazapi vinculada. Envio não iniciado.")
         
