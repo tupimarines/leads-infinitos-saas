@@ -99,7 +99,7 @@ class UazapiService:
         """
         Deleta instância via DELETE /instance.
         Retorna (success, status_code).
-        Se API retornar 404 (instância já deletada), tratar como sucesso.
+        Trata como sucesso: 200, 404, ou erro cujo body indique instância já deletada.
         """
         url = f"{self.base_url}/instance"
         headers = {"token": token}
@@ -107,6 +107,13 @@ class UazapiService:
         try:
             response = requests.delete(url, headers=headers, timeout=15)
             if response.status_code in (200, 404):
+                return True, response.status_code
+            # Instância já deletada na Uazapi? Tratar como sucesso para remover do nosso DB
+            body_lower = (response.text or "").lower()
+            if any(
+                x in body_lower
+                for x in ("not found", "não encontrad", "deleted", "deletada", "404", "instance not found")
+            ):
                 return True, response.status_code
             print(f"❌ [Uazapi] delete_instance Status: {response.status_code}")
             print(f"❌ [Uazapi] delete_instance Body: {response.text}")
