@@ -4116,9 +4116,8 @@ def delete_whatsapp_instance(instance_key):
         uazapi = UazapiService()
         success, status_code = uazapi.delete_instance(instance_key)
         print(f"🗑️ Uazapi Delete Result: success={success}, status={status_code}")
-        if not success:
-            return {"error": "Falha ao deletar instância na Uazapi."}, 500
-        # 200 ou 404: remover do DB (404 = já deletada na Uazapi, consistência local)
+        # Sempre remover do DB: se Uazapi falhou (ex: instância já deletada lá),
+        # o usuário ainda deve conseguir remover da UI
         print(f"🗑️ Removing from database...")
         conn = get_db_connection()
         with conn.cursor() as cur:
