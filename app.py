@@ -39,6 +39,10 @@ load_dotenv()
 # Super Admin email (multi-instance feature)
 SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
 
+# Throttling para warning de stats Uazapi (evitar spam a cada polling)
+_stats_uazapi_warning_last = {}  # campaign_id -> timestamp
+STATS_UAZAPI_WARNING_COOLDOWN = 300  # 5 min
+
 # Configuração Redis
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
 redis_conn = redis.from_url(REDIS_URL)
@@ -1585,6 +1589,25 @@ def register():
             return redirect(url_for("register"))
     
     return render_template("register.html")
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    """
+    Login via JSON para automação (n8n, curl, etc).
+    Body: {"email": "...", "password": "..."}
+    Retorna 200 + Set-Cookie (session) em sucesso.
+    """
+    if request.is_json:
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+        user = User.get_by_email(email)
+        if not user or not check_password_hash(user.password_hash, password):
+            return json.dumps({"error": "Credenciais inválidas"}), 401
+        login_user(user)
+        return json.dumps({"ok": True, "user_id": user.id}), 200
+    return json.dumps({"error": "Content-Type deve ser application/json"}), 400
 
 
 @app.route("/login", methods=["GET", "POST"]) 
@@ -4186,7 +4209,7 @@ def get_campaign_stats(campaign_id):
                     r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1)
                     # Buscar Scheduled (pendentes na fila Uazapi)
                     r_scheduled = uazapi.list_messages(token, folder_id, message_status='Scheduled', page=1, page_size=1)
-                    # Uazapi list_messages retorna pagination.total
+                    # Uazapi list_messages retorna pagination.total (ou totalRecords em alguns endpoints)
                     def _count(r):
                         if not r: return 0
                         p = r.get('pagination') or {}
@@ -4198,12 +4221,21 @@ def get_campaign_stats(campaign_id):
                     uazapi_failed = _count(r_failed)
                     uazapi_scheduled = _count(r_scheduled)
                     uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled}
+                    # Debug: resposta bruta quando todos zerados (para diagnosticar formato da API)
+                    if request.args.get('debug') == '1' and uazapi_sent == 0 and uazapi_failed == 0 and uazapi_scheduled == 0:
+                        uazapi_debug["_raw_sent"] = r_sent
+                        uazapi_debug["_raw_failed"] = r_failed
+                        uazapi_debug["_raw_scheduled"] = r_scheduled
                     if uazapi_sent > 0 or uazapi_failed > 0 or uazapi_scheduled > 0:
                         sent = uazapi_sent
                         failed = uazapi_failed
                         pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
                     elif campaign.get('status') == 'running' and total_leads > 0:
-                        print(f"⚠️ [Stats] Campanha {campaign_id} Uazapi: list_messages retornou 0 para todos os status. Verificar API/token.")
+                        now_ts = time.time()
+                        last = _stats_uazapi_warning_last.get(campaign_id, 0)
+                        if now_ts - last >= STATS_UAZAPI_WARNING_COOLDOWN:
+                            print(f"⚠️ [Stats] Campanha {campaign_id} Uazapi: list_messages retornou 0 para todos os status. Verificar API/token.")
+                            _stats_uazapi_warning_last[campaign_id] = now_ts
             except Exception as e:
                 uazapi_debug = {"uazapi_error": str(e)}
                 print(f"⚠️ [Stats] Erro ao buscar stats Uazapi para campanha {campaign_id}: {e}")
@@ -4227,6 +4259,7 @@ def get_campaign_stats(campaign_id):
             result["debug"] = {
                 "source": "uazapi" if (campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id')) else "db",
                 "campaign_status": campaign.get('status'),
+                "uazapi_folder_id": campaign.get('uazapi_folder_id'),  # para comparar com list_folders
                 **uazapi_debug,
             }
         
