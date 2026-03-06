@@ -4199,7 +4199,8 @@ def get_campaign_stats(campaign_id):
         uazapi_debug = {}  # para ?debug=1
 
         # Campanhas Uazapi: campaign_leads nunca é atualizado pelo envio remoto.
-        # Buscar contagens reais via API Uazapi (list_messages por status).
+        # Buscar contagens reais via API Uazapi.
+        # Estratégia: 1) list_folders (log_sucess/log_failed) como fonte primária; 2) list_messages como fallback.
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
             try:
                 conn2 = get_db_connection()
@@ -4216,38 +4217,63 @@ def get_campaign_stats(campaign_id):
                     uazapi = UazapiService()
                     folder_id = campaign['uazapi_folder_id']
                     token = inst['apikey']
-                    # Buscar Sent
-                    r_sent = uazapi.list_messages(token, folder_id, message_status='Sent', page=1, page_size=1)
-                    # Buscar Failed
-                    r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1)
-                    # Buscar Scheduled (pendentes na fila Uazapi)
-                    r_scheduled = uazapi.list_messages(token, folder_id, message_status='Scheduled', page=1, page_size=1)
-                    # Uazapi list_messages retorna pagination.total (ou totalRecords em alguns endpoints)
-                    def _count(r):
-                        if not r: return 0
-                        p = r.get('pagination') or {}
-                        if isinstance(p, dict):
-                            return int(p.get('total', 0) or p.get('totalRecords', 0))
-                        return 0
-                    # Para total exato, usar total_leads do DB; sent/failed do Uazapi
-                    uazapi_sent = _count(r_sent)
-                    uazapi_failed = _count(r_failed)
-                    uazapi_scheduled = _count(r_scheduled)
-                    uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled}
-                    # Debug: resposta bruta quando todos zerados (para diagnosticar formato da API)
-                    if request.args.get('debug') == '1' and uazapi_sent == 0 and uazapi_failed == 0 and uazapi_scheduled == 0:
-                        uazapi_debug["_raw_sent"] = r_sent
-                        uazapi_debug["_raw_failed"] = r_failed
-                        uazapi_debug["_raw_scheduled"] = r_scheduled
+                    uazapi_sent, uazapi_failed, uazapi_scheduled = 0, 0, 0
+                    uazapi_debug = {}
+                    source_used = None
+
+                    # 1) Tentar list_folders (Active) — MessageQueueFolder tem log_sucess, log_failed, log_total
+                    folders = uazapi.list_folders(token, status='Active')
+                    if isinstance(folders, dict):
+                        folders = folders.get('folders') or folders.get('data') or folders.get('items') or []
+                    if isinstance(folders, list):
+                        for f in folders:
+                            fid = f.get('id') or f.get('folder_id') or f.get('folderId')
+                            if str(fid) == str(folder_id):
+                                # log_sucess (typo na spec), log_delivered, log_failed
+                                uazapi_sent = int(f.get('log_sucess', 0) or f.get('log_delivered', 0) or f.get('log_success', 0) or 0)
+                                uazapi_failed = int(f.get('log_failed', 0) or 0)
+                                uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "source": "list_folders"}
+                                source_used = "list_folders"
+                                break
+
+                    # 2) Fallback: list_messages por status (pageSize maior para parsing robusto)
+                    if source_used is None:
+                        def _count_listmessages(r):
+                            if not r:
+                                return 0
+                            p = r.get('pagination') or {}
+                            if isinstance(p, dict):
+                                total = int(p.get('total', 0) or p.get('totalRecords', 0) or 0)
+                                if total > 0:
+                                    return total
+                            msgs = r.get('messages') or r.get('data') or []
+                            if isinstance(msgs, list):
+                                return len(msgs)
+                            return 0
+
+                        r_sent = uazapi.list_messages(token, folder_id, message_status='Sent', page=1, page_size=1000)
+                        r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1000)
+                        r_scheduled = uazapi.list_messages(token, folder_id, message_status='Scheduled', page=1, page_size=1000)
+                        uazapi_sent = _count_listmessages(r_sent)
+                        uazapi_failed = _count_listmessages(r_failed)
+                        uazapi_scheduled = _count_listmessages(r_scheduled)
+                        uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled, "source": "list_messages"}
+                        source_used = "list_messages"
+                        if request.args.get('debug') == '1' and uazapi_sent == 0 and uazapi_failed == 0 and uazapi_scheduled == 0:
+                            uazapi_debug["_raw_sent"] = r_sent
+                            uazapi_debug["_raw_failed"] = r_failed
+                            uazapi_debug["_raw_scheduled"] = r_scheduled
+
                     if uazapi_sent > 0 or uazapi_failed > 0 or uazapi_scheduled > 0:
                         sent = uazapi_sent
                         failed = uazapi_failed
+                        # invalid = subconjunto de failed (números inválidos); para Uazapi não distinguimos, então failed inclui inválidos
                         pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
                     elif campaign.get('status') == 'running' and total_leads > 0:
                         now_ts = time.time()
                         last = _stats_uazapi_warning_last.get(campaign_id, 0)
                         if now_ts - last >= STATS_UAZAPI_WARNING_COOLDOWN:
-                            print(f"⚠️ [Stats] Campanha {campaign_id} Uazapi: list_messages retornou 0 para todos os status. Verificar API/token.")
+                            print(f"⚠️ [Stats] Campanha {campaign_id} Uazapi: {source_used or 'API'} retornou 0 para todos os status. Verificar API/token.")
                             _stats_uazapi_warning_last[campaign_id] = now_ts
             except Exception as e:
                 uazapi_debug = {"uazapi_error": str(e)}
@@ -4281,6 +4307,106 @@ def get_campaign_stats(campaign_id):
     except Exception as e:
         print(f"Erro ao obter stats da campanha: {e}")
         return {"error": str(e)}, 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/sync-uazapi", methods=["POST"])
+@login_required
+def sync_campaign_uazapi_stats(campaign_id):
+    """
+    Sincroniza campaign_leads com a API Uazapi (list_messages).
+    Atualiza status sent/failed no DB a partir das mensagens retornadas.
+    Útil quando list_folders/list_messages para stats retornam 0 ou estão desatualizados.
+    """
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT c.id, c.uazapi_folder_id, c.use_uazapi_sender
+                   FROM campaigns c
+                   WHERE c.id = %s AND c.user_id = %s""",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+        conn.close()
+        if not campaign or not campaign.get('use_uazapi_sender') or not campaign.get('uazapi_folder_id'):
+            return json.dumps({"error": "Campanha não usa Uazapi ou sem folder_id"}), 400
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT i.apikey FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+            """, (campaign_id,))
+            inst = cur.fetchone()
+        conn.close()
+        if not inst or not inst.get('apikey'):
+            return json.dumps({"error": "Instância Uazapi não encontrada"}), 404
+
+        uazapi = UazapiService()
+        token = inst['apikey']
+        folder_id = campaign['uazapi_folder_id']
+
+        def _extract_phones_from_messages(resp):
+            phones = set()
+            if not resp:
+                return phones
+            msgs = resp.get('messages') or resp.get('data') or []
+            for m in msgs if isinstance(msgs, list) else []:
+                num = m.get('number') or m.get('chatid') or m.get('chatId') or m.get('sender') or ''
+                if num:
+                    clean = re.sub(r'\D', '', str(num).split('@')[0])
+                    if len(clean) >= 10:
+                        phones.add(clean)
+            return phones
+
+        r_sent = uazapi.list_messages(token, folder_id, message_status='Sent', page=1, page_size=1000)
+        r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1000)
+        sent_phones = _extract_phones_from_messages(r_sent)
+        failed_phones = _extract_phones_from_messages(r_failed)
+
+        updated_sent = 0
+        updated_failed = 0
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Match por phone normalizado (apenas dígitos)
+                def _phone_match_params(ph):
+                    if len(ph) <= 11 and not ph.startswith('55'):
+                        return (ph, '55' + ph)  # DB pode ter 55+DDD+num
+                    return (ph, ph)
+
+                for ph in sent_phones:
+                    p1, p2 = _phone_match_params(ph)
+                    cur.execute(
+                        """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW())
+                           WHERE campaign_id = %s AND status != 'sent'
+                           AND regexp_replace(phone, '[^0-9]', '', 'g') IN (%s, %s)""",
+                        (campaign_id, p1, p2)
+                    )
+                    updated_sent += cur.rowcount
+                for ph in failed_phones:
+                    p1, p2 = _phone_match_params(ph)
+                    cur.execute(
+                        """UPDATE campaign_leads SET status = 'failed', sent_at = COALESCE(sent_at, NOW())
+                           WHERE campaign_id = %s AND status NOT IN ('sent', 'failed')
+                           AND regexp_replace(phone, '[^0-9]', '', 'g') IN (%s, %s)""",
+                        (campaign_id, p1, p2)
+                    )
+                    updated_failed += cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+
+        return json.dumps({
+            "success": True,
+            "synced": {"sent": len(sent_phones), "failed": len(failed_phones)},
+            "updated": {"sent": updated_sent, "failed": updated_failed}
+        })
+    except Exception as e:
+        print(f"Erro ao sincronizar stats Uazapi campanha {campaign_id}: {e}")
+        return json.dumps({"error": str(e)}), 500
 
 
 @app.route("/api/campaigns/<int:campaign_id>/deal", methods=["POST"])

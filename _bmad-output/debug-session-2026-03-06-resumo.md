@@ -78,9 +78,28 @@ docker logs leads_infinitos_web 2>&1 | grep "\[UAZAPI\]"
 
 ## Próximos passos (se necessário)
 
-1. **list_messages retorna uazapi_sent=0** — campanha pausada pode não listar Sent; verificar com campanha running
-2. **Sync periódico Uazapi → DB** — se list_messages continuar inconsistente, job que atualiza campaign_leads a partir da API
+1. ~~**list_messages retorna uazapi_sent=0**~~ — Implementado: list_folders como fonte primária (log_sucess, log_failed); list_messages como fallback com parsing robusto
+2. ~~**Sync periódico Uazapi → DB**~~ — Implementado: POST /api/campaigns/<id>/sync-uazapi + botão "Sincronizar" no card (campanhas Uazapi)
 3. **Envio um a um** — só se for essencial ter logs por mensagem no worker (perde batch/delays da Uazapi)
+
+---
+
+## Atualização 2026-03-06 (contabilização de envios)
+
+### Problema
+Card não contabiliza corretamente enviados/falhas, especialmente leads inválidos. list_messages retornava 0.
+
+### Solução implementada
+
+1. **Dupla fonte para stats Uazapi**
+   - **Primária:** `list_folders(status=Active)` — MessageQueueFolder tem `log_sucess`, `log_failed`, `log_total`
+   - **Fallback:** `list_messages` com `pageSize=1000` e parsing robusto (`pagination.total`, `totalRecords`, `len(messages)`)
+
+2. **Endpoint de sync manual**
+   - `POST /api/campaigns/<id>/sync-uazapi` — chama list_messages(Sent) e list_messages(Failed), atualiza campaign_leads no DB
+   - Após sync, stats passam a vir do DB (fonte única)
+
+3. **Botão "Sincronizar"** no card de campanhas Uazapi (ícone de refresh)
 
 ---
 
