@@ -302,6 +302,45 @@
                 </div>
 
                 <!-- ============================================ -->
+                <!-- UAZAPI ENVIO EM MASSA -->
+                <!-- ============================================ -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300">
+                                🚀 Envio em massa Uazapi
+                            </label>
+                            <p class="text-xs text-gray-500 mt-1">Usar API nativa Uazapi com delays configuráveis entre mensagens</p>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="use_uazapi_sender" class="sr-only peer">
+                            <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                                peer-checked:after:translate-x-full peer-checked:after:border-white 
+                                after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
+                                after:bg-white after:border-gray-300 after:border after:rounded-full 
+                                after:h-4 after:w-4 after:transition-all 
+                                peer-checked:bg-blue-600"></div>
+                        </label>
+                    </div>
+                    <div id="uazapiDelayFields" class="mt-4 grid grid-cols-2 gap-4" style="display: none;">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Delay mínimo (min)</label>
+                            <input type="number" id="delay_min_minutes" min="1" max="60" value="5"
+                                placeholder="Recomendado: 5–15 min"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Delay máximo (min)</label>
+                            <input type="number" id="delay_max_minutes" min="1" max="60" value="15"
+                                placeholder="Recomendado: 5–15 min"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm">
+                        </div>
+                        <p class="text-xs text-blue-400 col-span-2">Recomendado: 5–15 min entre mensagens para evitar bloqueios.</p>
+                    </div>
+                </div>
+
+                <!-- ============================================ -->
                 <!-- CADENCE TOGGLE -->
                 <!-- ============================================ -->
                 <div class="glass-panel p-5 rounded-xl"
@@ -611,7 +650,7 @@
                         {% for inst in instances %}
                         <label class="flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors
                             hover:bg-white/5 border border-transparent instance-checkbox-label"
-                            data-instance-id="{{ inst.id }}">
+                            data-instance-id="{{ inst.id }}" data-api-provider="{{ inst.api_provider|default('megaapi') }}">
                             <input type="checkbox" name="instance_ids" value="{{ inst.id }}"
                                 class="instance-checkbox rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
                                 {% if instances|length==1 %}checked{% endif %}>
@@ -636,6 +675,12 @@
                         {% else %}
                         Instância única selecionada automaticamente.
                         {% endif %}
+                    </p>
+                    <p id="uazapi-instance-hint" class="text-xs text-blue-400 mt-2 hidden">
+                        Com envio em massa Uazapi, apenas instâncias Uazapi são exibidas. Selecione uma.
+                    </p>
+                    <p id="uazapi-no-instances" class="text-xs text-amber-400 mt-2 hidden">
+                        Nenhuma instância Uazapi disponível. Crie uma em Configurações → WhatsApp para usar envio em massa.
                     </p>
                 </div>
                 {% endif %}
@@ -966,11 +1011,33 @@
             scheduledStartUTC = scheduledDate.toISOString();
         }
 
+        const useUazapiSender = document.getElementById('use_uazapi_sender').checked;
+        const delayMin = parseInt(document.getElementById('delay_min_minutes').value, 10) || 5;
+        const delayMax = parseInt(document.getElementById('delay_max_minutes').value, 10) || 15;
+
+        if (useUazapiSender) {
+            if (delayMin < 1 || delayMin > 60 || delayMax < 1 || delayMax > 60) {
+                alert('Delays devem estar entre 1 e 60 minutos.');
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
+            if (delayMin > delayMax) {
+                alert('Delay mínimo não pode ser maior que o máximo.');
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
+        }
+
         const data = {
             name: document.getElementById('name').value,
             job_id: document.getElementById('job_id').value,
-            message_templates: messageTemplates, // Envia lista
-            scheduled_start: scheduledStartUTC  // Send UTC
+            message_templates: messageTemplates,
+            scheduled_start: scheduledStartUTC,
+            use_uazapi_sender: useUazapiSender,
+            delay_min_minutes: useUazapiSender ? delayMin : null,
+            delay_max_minutes: useUazapiSender ? delayMax : null
         };
 
         // TERMS: always validate terms checkbox
@@ -1040,6 +1107,20 @@
             btn.disabled = false;
             btn.innerHTML = originalText;
             return;
+        }
+
+        // Uazapi: quando use_uazapi_sender=true, exige pelo menos uma instância Uazapi selecionada
+        if (useUazapiSender) {
+            const uazapiChecked = Array.from(instanceCheckboxes).filter(cb => {
+                const label = cb.closest('.instance-checkbox-label');
+                return label && label.dataset.apiProvider === 'uazapi';
+            });
+            if (uazapiChecked.length === 0) {
+                alert('Para envio em massa Uazapi, selecione uma instância Uazapi.');
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
         }
 
         const instanceIds = Array.from(instanceCheckboxes).map(cb => parseInt(cb.value));
@@ -1165,6 +1246,50 @@
 
     // Initialize
     loadTemplates();
+
+    // ============================================================
+    // UAZAPI ENVIO EM MASSA
+    // ============================================================
+    function toggleUazapiFields() {
+        const useUazapi = document.getElementById('use_uazapi_sender').checked;
+        const delayFields = document.getElementById('uazapiDelayFields');
+        const instanceLabels = document.querySelectorAll('.instance-checkbox-label');
+        const uazapiHint = document.getElementById('uazapi-instance-hint');
+        const uazapiNoInstances = document.getElementById('uazapi-no-instances');
+
+        delayFields.style.display = useUazapi ? 'grid' : 'none';
+
+        const uazapiInstances = Array.from(instanceLabels).filter(l => l.dataset.apiProvider === 'uazapi');
+        const hasUazapi = uazapiInstances.length > 0;
+
+        instanceLabels.forEach(label => {
+            const isUazapi = label.dataset.apiProvider === 'uazapi';
+            if (useUazapi) {
+                label.style.display = isUazapi ? 'flex' : 'none';
+                if (!isUazapi) {
+                    const cb = label.querySelector('input[name="instance_ids"]');
+                    if (cb) cb.checked = false;
+                }
+            } else {
+                label.style.display = 'flex';
+            }
+        });
+
+        if (uazapiHint) {
+            uazapiHint.classList.toggle('hidden', !useUazapi);
+        }
+        if (uazapiNoInstances) {
+            uazapiNoInstances.classList.toggle('hidden', !useUazapi || hasUazapi);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const useUazapiCheckbox = document.getElementById('use_uazapi_sender');
+        if (useUazapiCheckbox) {
+            useUazapiCheckbox.addEventListener('change', toggleUazapiFields);
+            toggleUazapiFields(); // Initial state
+        }
+    });
 
     // ============================================================
     // CADENCE FUNCTIONS

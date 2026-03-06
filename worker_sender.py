@@ -696,6 +696,7 @@ def process_campaigns():
                     SELECT * FROM campaigns 
                     WHERE status IN ('pending', 'running')
                     AND (scheduled_start IS NULL OR scheduled_start <= NOW())
+                    AND (use_uazapi_sender IS NULL OR use_uazapi_sender = false)
                 """)
                 campaigns = cur.fetchall()
             

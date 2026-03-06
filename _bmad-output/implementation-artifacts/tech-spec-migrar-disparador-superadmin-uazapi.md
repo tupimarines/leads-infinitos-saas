@@ -198,3 +198,7 @@ Substituir chamadas MegaAPI por Uazapi para o superadmin: criar instância (POST
 - Status instância: /instance/status retorna connected, connecting, disconnected
 - Campanha pausada: status 'paused' já existe; worker exclui
 - Campanha programada: scheduled_start futura → pending; worker exclui até scheduled_start <= NOW
+
+### Complemento: Nova lógica de campanhas via API Uazapi
+
+Para migrar o envio de campanhas para a API nativa da Uazapi (criar campanha, envio em massa avançado, delays configuráveis, stop/continue/delete), ver [tech-spec-campanhas-uazapi-api.md](tech-spec-campanhas-uazapi-api.md).

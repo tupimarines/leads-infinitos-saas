@@ -11,6 +11,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_mail import Mail, Message
 
 import os
+import random
 import secrets
 import string
 import json
@@ -418,6 +419,24 @@ def init_db() -> None:
     # END CADENCE FEATURE MIGRATIONS
     # ============================================================
 
+    # ============================================================
+    # UAZAPI CAMPAIGN API MIGRATIONS
+    # ============================================================
+
+    # Colunas para campanhas via API Uazapi (envio em massa avançado)
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS uazapi_folder_id TEXT;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS use_uazapi_sender BOOLEAN DEFAULT false;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
+        """
+    )
+
+    # ============================================================
+    # END UAZAPI CAMPAIGN API MIGRATIONS
+    # ============================================================
+
     # Inserir configuração inicial da Hotmart se não existir
     cur.execute(
         """
@@ -589,7 +608,7 @@ def is_super_admin(user=None):
     return u.is_authenticated and u.email == SUPER_ADMIN_EMAIL
 
 class Campaign:
-    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0, rotation_mode='single', enable_cadence=False, terms_accepted=False, cadence_config=None, **kwargs):
+    def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0, rotation_mode='single', enable_cadence=False, terms_accepted=False, cadence_config=None, use_uazapi_sender=False, uazapi_folder_id=None, **kwargs):
         self.id = id
         self.user_id = user_id
         self.name = name
@@ -604,6 +623,8 @@ class Campaign:
         self.enable_cadence = enable_cadence or False
         self.terms_accepted = terms_accepted or False
         self.cadence_config = cadence_config or {}
+        self.use_uazapi_sender = bool(use_uazapi_sender)
+        self.uazapi_folder_id = uazapi_folder_id
 
     @staticmethod
     def create(user_id: int, name: str, message_template: str, daily_limit: int) -> "Campaign":
@@ -2068,12 +2089,18 @@ def delete_campaign(campaign_id):
     if not campaign:
         flash("Campanha não encontrada.", "error")
         return redirect(url_for('campaigns'))
-    
-    if campaign.delete():
+
+    if campaign.use_uazapi_sender and campaign.uazapi_folder_id:
+        success, err = _uazapi_control_campaign(campaign_id, current_user.id, 'delete')
+        if success:
+            flash("Campanha excluída com sucesso!", "success")
+        else:
+            flash(f"Erro ao excluir campanha: {err}", "error")
+    elif campaign.delete():
         flash("Campanha excluída com sucesso!", "success")
     else:
         flash("Erro ao excluir campanha.", "error")
-        
+
     return redirect(url_for('campaigns'))
 
 # --- Kanban Board Routes ---
@@ -2300,10 +2327,21 @@ def admin_campaigns():
 def admin_delete_campaign(campaign_id):
     try:
         conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s", (campaign_id,))
+            row = cur.fetchone()
+        conn.close()
+
+        if row and row.get('use_uazapi_sender') and row.get('uazapi_folder_id'):
+            success, err = _uazapi_control_campaign(campaign_id, current_user.id, 'delete', admin_mode=True)
+            if success:
+                return {"success": True}
+            return {"error": err or "Falha ao controlar campanha Uazapi"}, 500
+
+        conn = get_db_connection()
         with conn.cursor() as cur:
-            # Delete campaign leads first
             cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
-            # Delete campaign
+            cur.execute("DELETE FROM campaign_instances WHERE campaign_id = %s", (campaign_id,))
             cur.execute("DELETE FROM campaigns WHERE id = %s", (campaign_id,))
         conn.commit()
         conn.close()
@@ -2749,7 +2787,7 @@ def new_campaign():
     # Fetch user's instances for multi-instance selection
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT id, name, status FROM instances WHERE user_id = %s ORDER BY id ASC", (current_user.id,))
+        cur.execute("SELECT id, name, status, COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE user_id = %s ORDER BY id ASC", (current_user.id,))
         user_instances = cur.fetchall()
     conn.close()
     
@@ -2779,37 +2817,182 @@ def api_scraping_jobs():
     except Exception as e:
         return json.dumps({'error': str(e)}), 500
 
+def _uazapi_control_campaign(campaign_id: int, user_id: int, action: str, admin_mode: bool = False):
+    """
+    Helper: executa action (stop|continue|delete) na Uazapi para campanha com use_uazapi_sender.
+    Retorna (success, error_msg). Em caso de delete, já remove do DB.
+    admin_mode: se True, não valida user_id (para admin deletar qualquer campanha).
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if admin_mode:
+                cur.execute(
+                    "SELECT c.id, c.use_uazapi_sender, c.uazapi_folder_id, c.user_id FROM campaigns c WHERE c.id = %s",
+                    (campaign_id,)
+                )
+            else:
+                cur.execute(
+                    "SELECT c.id, c.use_uazapi_sender, c.uazapi_folder_id, c.user_id FROM campaigns c WHERE c.id = %s AND c.user_id = %s",
+                    (campaign_id, user_id)
+                )
+            campaign = cur.fetchone()
+        if not campaign or not campaign.get('use_uazapi_sender') or not campaign.get('uazapi_folder_id'):
+            return False, "Campanha não usa envio Uazapi ou folder_id ausente"
+        folder_id = campaign['uazapi_folder_id']
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT i.apikey FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+            """, (campaign_id,))
+            inst = cur.fetchone()
+        conn.close()
+        if not inst or not inst.get('apikey'):
+            return False, "Instância Uazapi não encontrada para esta campanha"
+        token = inst['apikey']
+        uazapi = UazapiService()
+        result = uazapi.edit_campaign(token, folder_id, action)
+        if not result:
+            return False, "Falha ao comunicar com API Uazapi"
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            if action == 'stop':
+                cur.execute("UPDATE campaigns SET status = 'paused' WHERE id = %s", (campaign_id,))
+            elif action == 'continue':
+                cur.execute("UPDATE campaigns SET status = 'running' WHERE id = %s", (campaign_id,))
+            elif action == 'delete':
+                cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
+                cur.execute("DELETE FROM campaign_instances WHERE campaign_id = %s", (campaign_id,))
+                cur.execute("DELETE FROM campaigns WHERE id = %s", (campaign_id,))
+        conn.commit()
+        conn.close()
+        return True, None
+    except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+        return False, str(e)
+
+
+@app.route('/api/campaigns/<int:campaign_id>/uazapi-control', methods=['POST'])
+@login_required
+def uazapi_control(campaign_id):
+    """
+    Controla campanha Uazapi: stop, continue ou delete.
+    Body: { "action": "stop" | "continue" | "delete" }
+    """
+    data = request.get_json() or {}
+    action = (data.get('action') or '').strip().lower()
+    if action not in ('stop', 'continue', 'delete'):
+        return json.dumps({'error': 'action deve ser stop, continue ou delete'}), 400
+    success, err = _uazapi_control_campaign(campaign_id, current_user.id, action)
+    if success:
+        return json.dumps({'success': True, 'action': action})
+    return json.dumps({'error': err or 'Erro ao controlar campanha'}), 500
+
+
+@app.route('/api/campaigns/<int:campaign_id>/uazapi-messages', methods=['GET'])
+@login_required
+def uazapi_messages(campaign_id):
+    """
+    Lista mensagens da campanha na Uazapi.
+    Query params: messageStatus (Scheduled|Sent|Failed), page, pageSize.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+        if not campaign or not campaign.get('use_uazapi_sender') or not campaign.get('uazapi_folder_id'):
+            return json.dumps({'error': 'Campanha não usa envio Uazapi ou folder_id ausente'}), 404
+        folder_id = campaign['uazapi_folder_id']
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT i.apikey FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+            """, (campaign_id,))
+            inst = cur.fetchone()
+        conn.close()
+        if not inst or not inst.get('apikey'):
+            return json.dumps({'error': 'Instância Uazapi não encontrada para esta campanha'}), 404
+        token = inst['apikey']
+        message_status = request.args.get('messageStatus')
+        page = request.args.get('page', type=int)
+        page_size = request.args.get('pageSize', type=int)
+        uazapi = UazapiService()
+        result = uazapi.list_messages(
+            token, folder_id,
+            message_status=message_status if message_status else None,
+            page=page if page is not None else None,
+            page_size=page_size if page_size is not None else None
+        )
+        if result is None:
+            return json.dumps({'error': 'Falha ao obter mensagens da Uazapi'}), 500
+        return json.dumps(result, default=str)
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        print(f"Erro ao listar mensagens Uazapi: {e}")
+        return json.dumps({'error': str(e)}), 500
+
+
 @app.route('/api/campaigns/<int:campaign_id>/toggle_pause', methods=['POST'])
 @login_required
 def toggle_campaign_pause(campaign_id):
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT status FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, current_user.id))
+            cur.execute("SELECT status, use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, current_user.id))
             campaign = cur.fetchone()
-            
-            if not campaign:
-                return json.dumps({"error": "Campanha não encontrada"}), 404
-                
-            current_status = campaign['status']
-            new_status = None
-            
-            if current_status == 'running':
-                new_status = 'paused'
-            elif current_status == 'paused':
-                new_status = 'running'
-            elif current_status == 'pending':
-                new_status = 'paused' # Allow pausing pending campaigns too
-            else:
-                 return json.dumps({"error": f"Não é possível pausar/continuar campanha com status '{current_status}'"}), 400
-            
+        conn.close()
+
+        if not campaign:
+            return json.dumps({"error": "Campanha não encontrada"}), 404
+
+        current_status = campaign['status']
+        new_status = None
+
+        if current_status == 'running':
+            new_status = 'paused'
+        elif current_status == 'paused':
+            new_status = 'running'
+        elif current_status == 'pending':
+            new_status = 'paused'  # Allow pausing pending campaigns too
+        else:
+            return json.dumps({"error": f"Não é possível pausar/continuar campanha com status '{current_status}'"}), 400
+
+        # Se use_uazapi_sender, delegar para Uazapi API
+        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
+            action = 'stop' if new_status == 'paused' else 'continue'
+            success, err = _uazapi_control_campaign(campaign_id, current_user.id, action)
+            if success:
+                return json.dumps({"success": True, "new_status": new_status})
+            return json.dumps({"error": err or "Erro ao controlar campanha Uazapi"}), 500
+
+        # Comportamento atual para campanhas sem Uazapi
+        conn = get_db_connection()
+        with conn.cursor() as cur:
             cur.execute("UPDATE campaigns SET status = %s WHERE id = %s", (new_status, campaign_id))
-            
         conn.commit()
         conn.close()
-        
+
         return json.dumps({"success": True, "new_status": new_status})
-        
+
     except Exception as e:
         print(f"Erro ao alternar pausa da campanha: {e}")
         return json.dumps({"error": str(e)}), 500
@@ -2981,6 +3164,11 @@ def create_campaign():
     # NEW: Get instance_ids and rotation_mode (multi-instance)
     instance_ids = data.get('instance_ids', [])  # list of instance IDs
     rotation_mode = data.get('rotation_mode', 'single')  # 'single' or 'round_robin'
+
+    # Uazapi campaign API: use_uazapi_sender, delays (minutos)
+    use_uazapi_sender = bool(data.get('use_uazapi_sender', False))
+    delay_min_minutes = data.get('delay_min_minutes')  # None ou int
+    delay_max_minutes = data.get('delay_max_minutes')  # None ou int
     
     # Validate rotation_mode
     if rotation_mode not in ('single', 'round_robin'):
@@ -2998,6 +3186,23 @@ def create_campaign():
     
     if not name or not job_id:
         return json.dumps({'error': 'Nome e Job são obrigatórios'}), 400
+
+    # Uazapi: quando use_uazapi_sender=true, instance_ids obrigatório e apenas instâncias Uazapi
+    if use_uazapi_sender:
+        if not instance_ids:
+            return json.dumps({'error': 'Selecione uma instância Uazapi para campanhas com envio em massa.'}), 400
+        conn_check = get_db_connection()
+        with conn_check.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM instances WHERE user_id = %s AND id = ANY(%s) AND COALESCE(api_provider, 'megaapi') = 'uazapi'",
+                (current_user.id, instance_ids)
+            )
+            uazapi_ids = [r[0] for r in cur.fetchall()]
+        conn_check.close()
+        if len(uazapi_ids) != len(instance_ids):
+            return json.dumps({'error': 'Apenas instâncias Uazapi podem ser usadas com envio em massa. Verifique suas instâncias.'}), 400
+        # Para Uazapi API: usar primeira instância (single folder por campanha)
+        instance_ids = uazapi_ids[:1] if uazapi_ids else []
         
     try:
         # 1. Obter leads do Job
@@ -3109,18 +3314,19 @@ def create_campaign():
             return json.dumps({'error': 'Nenhum lead válido encontrado na lista'}), 400
 
         # 4. Criar Campanha
-        # NEW: Create campaign with scheduled_start, dynamic status, and rotation_mode
+        # NEW: Create campaign with scheduled_start, dynamic status, rotation_mode, use_uazapi_sender
         conn = get_db_connection()
         with conn.cursor() as cur:
             # Determine initial status based on scheduled_start
+            # use_uazapi_sender: Uazapi gerencia envio; status 'running' após API call
             initial_status = 'pending' if scheduled_start else 'running'
             
             cur.execute(
                 """
-                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode)
-                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
                 """,
-                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status, rotation_mode)
+                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes)
             )
             row = cur.fetchone()
             campaign_id = row[0]
@@ -3216,6 +3422,76 @@ def create_campaign():
         
         # 5. Adicionar Leads
         CampaignLead.add_leads(campaign_id, valid_leads)
+        
+        # 6. Uazapi: se use_uazapi_sender, montar messages, chamar API, salvar folder_id
+        if use_uazapi_sender:
+            conn = get_db_connection()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Obter primeira instância Uazapi vinculada
+                cur.execute("""
+                    SELECT i.id, i.apikey, i.api_provider
+                    FROM campaign_instances ci
+                    JOIN instances i ON i.id = ci.instance_id
+                    WHERE ci.campaign_id = %s AND i.api_provider = 'uazapi'
+                    LIMIT 1
+                """, (campaign_id,))
+                inst = cur.fetchone()
+            conn.close()
+            
+            if inst and inst.get('apikey'):
+                token = inst['apikey']
+                # Parse message_templates (lista de variações)
+                try:
+                    variations = json.loads(message_template_json)
+                    if isinstance(variations, str):
+                        variations = [variations]
+                    if not variations:
+                        variations = ["Olá!"]
+                except Exception:
+                    variations = [message_template_json or "Olá!"]
+                
+                # Montar messages array: 1 msg por lead com random.choice(variations)
+                messages = []
+                for lead in valid_leads:
+                    msg_text = random.choice(variations)
+                    if lead.get('name'):
+                        msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name'])
+                    # number sem @s.whatsapp.net; garantir formato 55...
+                    phone = str(lead.get('phone', '')).strip()
+                    if not phone.startswith('55') and len(phone) >= 10:
+                        phone = '55' + phone
+                    messages.append({"number": phone, "type": "text", "text": msg_text})
+                
+                if messages:
+                    delay_min_sec = (delay_min_minutes or 5) * 60
+                    delay_max_sec = (delay_max_minutes or 15) * 60
+                    scheduled_for_param = None
+                    if scheduled_start:
+                        try:
+                            dt = datetime.fromisoformat(scheduled_start.replace('Z', '+00:00'))
+                            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                            delta_min = (dt - now).total_seconds() / 60
+                            if delta_min > 0:
+                                scheduled_for_param = max(1, int(delta_min))  # Uazapi: minutos a partir de agora
+                        except Exception:
+                            pass
+                    
+                    uazapi = UazapiService()
+                    result = uazapi.create_advanced_campaign(
+                        token, delay_min_sec, delay_max_sec, messages,
+                        info=name, scheduled_for=scheduled_for_param
+                    )
+                    if result and result.get('folder_id'):
+                        conn = get_db_connection()
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE campaigns SET uazapi_folder_id = %s, status = 'running' WHERE id = %s",
+                                (result['folder_id'], campaign_id)
+                            )
+                        conn.commit()
+                        conn.close()
+            else:
+                print(f"⚠️ [Uazapi] Campanha {campaign_id}: use_uazapi_sender=true mas nenhuma instância Uazapi vinculada. Envio não iniciado.")
         
         return json.dumps({'success': True, 'campaign_id': campaign_id, 'leads_count': len(valid_leads)})
         

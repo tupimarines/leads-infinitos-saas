@@ -175,3 +175,160 @@ class UazapiService:
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
             return None
+
+    # --- Métodos de campanha (envio em massa avançado) ---
+
+    def create_advanced_campaign(
+        self,
+        token: str,
+        delay_min_sec: int,
+        delay_max_sec: int,
+        messages: list[dict[str, Any]],
+        info: Optional[str] = None,
+        scheduled_for: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Cria campanha de envio em massa via POST /sender/advanced.
+        messages: array de {number, type, text} (number sem @s.whatsapp.net).
+        Retorna dict com folder_id, count, status.
+        """
+        url = f"{self.base_url}/sender/advanced"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "delayMin": delay_min_sec,
+            "delayMax": delay_max_sec,
+            "messages": messages,
+        }
+        if info is not None:
+            payload["info"] = info
+        if scheduled_for is not None:
+            payload["scheduled_for"] = scheduled_for
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=30
+            )
+            if response.status_code != 200:
+                print(
+                    f"❌ [Uazapi] create_advanced_campaign Status: {response.status_code}"
+                )
+                print(f"❌ [Uazapi] create_advanced_campaign Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error creating advanced campaign: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
+
+    def edit_campaign(
+        self, token: str, folder_id: str, action: str
+    ) -> Optional[dict[str, Any]]:
+        """
+        Controla campanha via POST /sender/edit.
+        action: "stop" | "continue" | "delete".
+        Retorna dict com status.
+        """
+        if action not in ("stop", "continue", "delete"):
+            print(f"❌ [Uazapi] edit_campaign invalid action: {action}")
+            return None
+        url = f"{self.base_url}/sender/edit"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+        }
+        payload = {"folder_id": folder_id, "action": action}
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=15
+            )
+            if response.status_code != 200:
+                print(
+                    f"❌ [Uazapi] edit_campaign Status: {response.status_code}"
+                )
+                print(f"❌ [Uazapi] edit_campaign Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error editing campaign: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
+
+    def list_folders(
+        self, token: str, status: Optional[str] = None
+    ) -> Optional[list[dict[str, Any]]]:
+        """
+        Lista campanhas via GET /sender/listfolders.
+        status: "Active" | "Archived" (opcional).
+        Retorna array de pastas/campanhas.
+        """
+        url = f"{self.base_url}/sender/listfolders"
+        headers = {"token": token}
+        params: dict[str, str] = {}
+        if status is not None:
+            params["status"] = status
+
+        try:
+            response = requests.get(
+                url, headers=headers, params=params or None, timeout=15
+            )
+            if response.status_code != 200:
+                print(
+                    f"❌ [Uazapi] list_folders Status: {response.status_code}"
+                )
+                print(f"❌ [Uazapi] list_folders Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error listing folders: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
+
+    def list_messages(
+        self,
+        token: str,
+        folder_id: str,
+        message_status: Optional[str] = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Lista mensagens de campanha via POST /sender/listmessages.
+        message_status: "Scheduled" | "Sent" | "Failed" (opcional).
+        Retorna dict com messages (array) e pagination.
+        """
+        url = f"{self.base_url}/sender/listmessages"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {"folder_id": folder_id}
+        if message_status is not None:
+            payload["messageStatus"] = message_status
+        if page is not None:
+            payload["page"] = page
+        if page_size is not None:
+            payload["pageSize"] = page_size
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=15
+            )
+            if response.status_code != 200:
+                print(
+                    f"❌ [Uazapi] list_messages Status: {response.status_code}"
+                )
+                print(f"❌ [Uazapi] list_messages Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error listing messages: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
