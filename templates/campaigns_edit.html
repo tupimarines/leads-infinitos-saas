@@ -428,6 +428,14 @@
     document.getElementById('nextPage').addEventListener('click', () => loadLeads(currentPage + 1));
     loadLeads(1);
 
+    // Polling: atualizar leads automaticamente quando campanha está enviando
+    const CAMPAIGN_STATUS = "{{ campaign.status }}";
+    if (CAMPAIGN_STATUS === 'running' || CAMPAIGN_STATUS === 'pending') {
+        setInterval(() => {
+            if (document.visibilityState === 'visible') loadLeads(currentPage);
+        }, 15000); // a cada 15s, só se aba visível
+    }
+
     // --- Replace Leads Logic ---
 
     // Load Jobs

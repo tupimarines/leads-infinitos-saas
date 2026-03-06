@@ -606,7 +606,9 @@
         div.dataset.step = lead.current_step;
         div.dataset.status = lead.cadence_status || lead.status;
 
-        const sentAt = lead.last_message_sent_at ? new Date(lead.last_message_sent_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+        const sentAtRaw = lead.last_message_sent_at || lead.sent_at;
+        const sentAt = sentAtRaw ? new Date(sentAtRaw).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+        const isSent = lead.status === 'sent' || !!sentAtRaw;
 
         div.innerHTML = `
             <div class="flex items-start justify-between">
@@ -614,7 +616,10 @@
                     <p class="text-sm font-medium text-gray-200 truncate">${lead.name || 'Sem nome'}</p>
                     <p class="text-xs text-gray-500 truncate mt-0.5">${formatPhone(lead.phone)}</p>
                 </div>
-                ${sentAt ? `<span class="text-[10px] text-gray-600 whitespace-nowrap ml-2">${sentAt}</span>` : ''}
+                <div class="flex flex-col items-end gap-0.5 ml-2">
+                    ${isSent ? '<span class="text-[10px] text-green-400 font-medium">✓ Enviado</span>' : ''}
+                    ${sentAt ? `<span class="text-[10px] text-gray-600 whitespace-nowrap">${sentAt}</span>` : ''}
+                </div>
             </div>
             
             <div class="flex items-center justify-between mt-2">
@@ -914,6 +919,15 @@
     }
 
     // Initial load
-    document.addEventListener('DOMContentLoaded', refreshBoard);
+    document.addEventListener('DOMContentLoaded', () => {
+        refreshBoard();
+        // Polling: atualizar board quando campanha está ativa (envios em andamento)
+        const CAMPAIGN_STATUS = "{{ campaign.status }}";
+        if (CAMPAIGN_STATUS === 'running' || CAMPAIGN_STATUS === 'pending') {
+            setInterval(() => {
+                if (document.visibilityState === 'visible') refreshBoard();
+            }, 15000); // a cada 15s, só se aba visível
+        }
+    });
 </script>
 {% endblock %}
