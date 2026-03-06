@@ -4125,7 +4125,7 @@ def get_campaign_stats(campaign_id):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Verificar se a campanha pertence ao usuário e se usa Uazapi
             cur.execute(
-                "SELECT id, closed_deals, use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s AND user_id = %s",
+                "SELECT id, closed_deals, use_uazapi_sender, uazapi_folder_id, status FROM campaigns WHERE id = %s AND user_id = %s",
                 (campaign_id, current_user.id)
             )
             campaign = cur.fetchone()
@@ -4160,6 +4160,7 @@ def get_campaign_stats(campaign_id):
         pending = stats['pending'] or 0
         failed = stats['failed'] or 0
         total_leads = stats['total_leads'] or 0
+        uazapi_debug = {}  # para ?debug=1
 
         # Campanhas Uazapi: campaign_leads nunca é atualizado pelo envio remoto.
         # Buscar contagens reais via API Uazapi (list_messages por status).
@@ -4196,16 +4197,20 @@ def get_campaign_stats(campaign_id):
                     uazapi_sent = _count(r_sent)
                     uazapi_failed = _count(r_failed)
                     uazapi_scheduled = _count(r_scheduled)
+                    uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled}
                     if uazapi_sent > 0 or uazapi_failed > 0 or uazapi_scheduled > 0:
                         sent = uazapi_sent
                         failed = uazapi_failed
                         pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
+                    elif campaign.get('status') == 'running' and total_leads > 0:
+                        print(f"⚠️ [Stats] Campanha {campaign_id} Uazapi: list_messages retornou 0 para todos os status. Verificar API/token.")
             except Exception as e:
+                uazapi_debug = {"uazapi_error": str(e)}
                 print(f"⚠️ [Stats] Erro ao buscar stats Uazapi para campanha {campaign_id}: {e}")
         
         conversion_rate = round((closed_deals / sent * 100), 1) if sent > 0 else 0
         
-        return {
+        result = {
             "total_leads": total_leads,
             "sent": sent,
             "pending": pending,
@@ -4216,6 +4221,16 @@ def get_campaign_stats(campaign_id):
             "started_at": stats['started_at'].isoformat() if stats['started_at'] else None,
             "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None
         }
+        
+        # Debug: ?debug=1 retorna fonte e dados brutos para diagnóstico
+        if request.args.get('debug') == '1':
+            result["debug"] = {
+                "source": "uazapi" if (campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id')) else "db",
+                "campaign_status": campaign.get('status'),
+                **uazapi_debug,
+            }
+        
+        return result
         
     except Exception as e:
         print(f"Erro ao obter stats da campanha: {e}")

@@ -44,6 +44,16 @@ instance_next_send_time = {}
 # struct: { campaign_id: last_used_index }
 campaign_instance_index = {}
 
+# Log prefixos para filtro (grep "[ENVIO]" ou "[HORARIO]")
+LOG_PREFIX_ENVIO = "[ENVIO]"
+HORARIO_LOG_COOLDOWN = 300  # segundos (5 min) entre logs "Fora do horário"
+last_horario_log_time = None
+
+
+def log_envio(msg, flush=True):
+    """Log de envio com prefixo [ENVIO] para filtro fácil."""
+    print(f"{LOG_PREFIX_ENVIO} {msg}", flush=flush)
+
 def get_db_connection():
     conn = psycopg2.connect(
         host=os.environ.get('DB_HOST', 'localhost'),
@@ -539,12 +549,12 @@ def send_message(instance_name, phone_jid, message, apikey=None, api_provider=No
         try:
             result = uazapi_service.send_text(apikey, number, message)
             if result is not None:
-                print(f"✅ [Uazapi] Message sent successfully!")
+                log_envio("Uazapi OK")
                 return True, result
             return False, "Uazapi send_text returned None"
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ [Uazapi] Exception sending message: {error_msg}")
+            log_envio(f"Uazapi FALHA {error_msg}")
             return False, error_msg
 
     # MegaAPI
@@ -562,32 +572,30 @@ def send_message(instance_name, phone_jid, message, apikey=None, api_provider=No
         }
     }
     
-    # DETAILED LOGGING FOR DEBUGGING
-    print(f"=== SENDING MESSAGE ===")
-    print(f"URL: {url}")
-    print(f"To: {phone_jid}")
-    print(f"Message: {message}")
-    print(f"Payload: {json.dumps(payload, indent=2)}")
+    # Log principal de envio (verbosidade extra condicionada a DEBUG_SENDER)
+    log_envio(f"MegaAPI POST To={phone_jid}")
+    if os.environ.get('DEBUG_SENDER'):
+        print(f"URL: {url}")
+        print(f"Payload: {json.dumps(payload, indent=2)}")
     
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         
-        # LOG RESPONSE
-        print(f"Response Status: {response.status_code}")
-        print(f"Response Body: {response.text}")
+        if os.environ.get('DEBUG_SENDER'):
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
         
         if response.status_code == 200:
             response_data = response.json()
-            print(f"✅ Message sent successfully!")
-            print(f"Response Data: {json.dumps(response_data, indent=2)}")
+            log_envio("MegaAPI OK")
             return True, response_data
         else:
             error_msg = f"{response.status_code} - {response.text}"
-            print(f"❌ Failed to send message: {error_msg}")
+            log_envio(f"MegaAPI FALHA {error_msg[:80]}")
             return False, error_msg
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Exception sending message: {error_msg}")
+        log_envio(f"MegaAPI FALHA {error_msg[:80]}")
         return False, error_msg
 
 
@@ -728,8 +736,13 @@ def process_campaigns():
             # Filtrar campanhas que estão na janela de envio (horário + dia da semana)
             campaigns = [c for c in campaigns if is_campaign_in_send_window(c)]
             if not campaigns:
+                global last_horario_log_time
                 now_brazil = datetime.now(BRAZIL_TZ)
-                print(f"⏰ Fora do horário de envio ({now_brazil.strftime('%H:%M')} BRT). Aguardando janela configurada...")
+                now_ts = time.time()
+                # Throttling: log no máximo 1x a cada 5 min para não poluir stdout
+                if last_horario_log_time is None or (now_ts - last_horario_log_time) >= HORARIO_LOG_COOLDOWN:
+                    print(f"[HORARIO] Fora do horário de envio ({now_brazil.strftime('%H:%M')} BRT). Aguardando janela...", flush=True)
+                    last_horario_log_time = now_ts
                 time.sleep(60)  # Verificar a cada minuto
                 continue
             
@@ -961,11 +974,16 @@ def process_campaigns():
                         continue
                     
                     # 7. Enviar (MegaAPI ou Uazapi)
-                    print(f"Sending to {phone_jid} (User {user_id})...")
+                    log_envio(f"INICIANDO campaign_id={campaign['id']} lead_id={lead['id']} phone={phone_jid} user_id={user_id}")
                     success, log = send_message(
                         instance_name, phone_jid, message_text,
                         apikey=inst_apikey, api_provider=inst_provider
                     )
+                    
+                    if success:
+                        log_envio(f"OK campaign_id={campaign['id']} lead_id={lead['id']}")
+                    else:
+                        log_envio(f"FALHA campaign_id={campaign['id']} lead_id={lead['id']} motivo={str(log)[:80]}")
                     
                     # 8. Atualizar DB
                     new_status = 'sent' if success else 'failed'
