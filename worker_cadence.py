@@ -409,8 +409,10 @@ def check_monitoring_leads(conn):
                 next_step_row = cur.fetchone()
                 
                 if next_step_row:
-                    delay = next_step_row['delay_days'] or 1
-                    snooze_until = datetime.now(BRAZIL_TZ) + timedelta(days=delay)
+                    delay = next_step_row['delay_days']
+                    delay = 1 if delay is None else int(delay)
+                    now_br = datetime.now(BRAZIL_TZ)
+                    snooze_until = now_br + timedelta(minutes=2) if delay <= 0 else now_br + timedelta(days=delay)
                     new_status = 'snoozed'
                     
                     cur.execute("""
@@ -550,7 +552,8 @@ def process_rollover(campaign, conn):
     send_hour = int(campaign.get('send_hour_start') or 8)
     send_sat = bool(campaign.get('send_saturday'))
     send_sun = bool(campaign.get('send_sunday'))
-    delay_days = int(step2.get('delay_days') or 1)
+    delay_days = step2.get('delay_days')
+    delay_days = 1 if delay_days is None else int(delay_days)
 
     target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
     scheduled_ts = int(target_dt.timestamp())
@@ -650,8 +653,10 @@ def bootstrap_pending_leads(campaign, conn):
         )
         step2 = cur.fetchone()
     
-    delay_days = (step2['delay_days'] or 1) if step2 else 1
-    snooze_until = datetime.now(BRAZIL_TZ) + timedelta(days=delay_days)
+    delay_days = step2.get('delay_days') if step2 else None
+    delay_days = 1 if delay_days is None else int(delay_days)
+    now_br = datetime.now(BRAZIL_TZ)
+    snooze_until = now_br + timedelta(minutes=2) if delay_days <= 0 else now_br + timedelta(days=delay_days)
     
     for lead in pending_leads:
         lead_id = lead['id']
