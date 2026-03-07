@@ -43,6 +43,9 @@ except ImportError:
 # Limites compartilhados
 from utils.limits import check_daily_limit, get_user_daily_limit
 
+# Super Admin (gate para mídia Uazapi)
+SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
 CHATWOOT_ACCESS_TOKEN = os.environ.get('CHATWOOT_ACCESS_TOKEN')
@@ -71,6 +74,23 @@ def format_jid(phone):
     if len(clean) <= 11 and not clean.startswith('55'):
         clean = '55' + clean
     return clean + '@s.whatsapp.net'
+
+
+def _is_media_path_safe(media_path, user_id):
+    """
+    Valida que media_path está sob storage/{user_id}/ (segurança multi-tenant).
+    """
+    if not media_path or not user_id:
+        return False
+    if '..' in media_path:
+        return False
+    try:
+        real_path = os.path.abspath(media_path)
+        user_storage = os.path.abspath(os.path.join('storage', str(user_id)))
+        return real_path.startswith(user_storage)
+    except Exception:
+        return False
+
 
 # --- CHATWOOT HELPERS ---
 
@@ -820,6 +840,14 @@ def process_campaign_sends(campaign, conn):
     if not instance:
         return
 
+    # Gate superadmin (mídia Uazapi apenas para superadmin)
+    is_sa = False
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+    if row and row.get('email') == SUPER_ADMIN_EMAIL:
+        is_sa = True
+
     # Respeitar limite diário antes de enviar follow-ups
     plan_limit = get_user_daily_limit(user_id)
     if not check_daily_limit(user_id, plan_limit):
@@ -966,21 +994,35 @@ def process_campaign_sends(campaign, conn):
         lead_name = lead.get('name', 'Visitante')
         message = message.replace('{{nome}}', lead_name).replace('{{name}}', lead_name)
 
-        # Send Media (apenas MegaAPI por enquanto; Uazapi media em fase posterior)
-        if step_config.get('media_path') and api_provider != 'uazapi':
+        phone_num = re.sub(r'\D', '', str(phone))
+        if len(phone_num) <= 11 and not phone_num.startswith('55'):
+            phone_num = '55' + phone_num
+
+        # Uazapi + superadmin + media: enviar APENAS mídia com caption (não enviar texto separado)
+        sent_ok = False
+        sent_via_uazapi_media = False
+        if step_config.get('media_path') and api_provider == 'uazapi' and is_sa and uazapi_service and instance.get('apikey'):
+            if _is_media_path_safe(step_config['media_path'], user_id) and os.path.exists(step_config['media_path']):
+                result = uazapi_service.send_media(
+                    instance['apikey'], phone_num,
+                    step_config.get('media_type', 'image'),
+                    step_config['media_path'],
+                    caption=message
+                )
+                sent_ok = bool(result)
+                sent_via_uazapi_media = True
+        # MegaAPI + media: enviar mídia (comportamento existente; texto enviado em seguida)
+        elif step_config.get('media_path') and api_provider != 'uazapi':
             send_media_message(instance_name, phone_jid, step_config['media_path'], step_config.get('media_type', 'image'))
             time.sleep(1)
 
-        # Send Text (Uazapi ou MegaAPI)
-        sent_ok = False
-        if api_provider == 'uazapi' and uazapi_service and instance.get('apikey'):
-            phone_num = re.sub(r'\D', '', str(phone))
-            if len(phone_num) <= 11 and not phone_num.startswith('55'):
-                phone_num = '55' + phone_num
-            result = uazapi_service.send_text(instance['apikey'], phone_num, message)
-            sent_ok = bool(result)
-        else:
-            sent_ok = send_text_message(instance_name, phone_jid, message)
+        # Send Text (quando não enviou via mídia Uazapi)
+        if not sent_via_uazapi_media:
+            if api_provider == 'uazapi' and uazapi_service and instance.get('apikey'):
+                result = uazapi_service.send_text(instance['apikey'], phone_num, message)
+                sent_ok = bool(result)
+            else:
+                sent_ok = send_text_message(instance_name, phone_jid, message)
 
         if sent_ok:
             # SUCCESS: Enter MONITORING state (Safety Buffer)

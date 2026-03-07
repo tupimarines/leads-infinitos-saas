@@ -153,6 +153,73 @@ class UazapiService:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
             return None
 
+    def send_media(
+        self,
+        token: str,
+        number: str,
+        media_type: str,
+        file: str,
+        caption: str = "",
+    ) -> Optional[dict[str, Any]]:
+        """
+        Envia mídia (imagem ou vídeo) via POST /send/media.
+        number: formato 5511999999999 (sem @s.whatsapp.net).
+        media_type: 'image' ou 'video'.
+        file: path local (será convertido para base64), URL ou string base64.
+        caption: legenda opcional.
+        """
+        import base64
+
+        url = f"{self.base_url}/send/media"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+        }
+
+        file_value = file
+        if not file.startswith(("http://", "https://", "data:")):
+            # Path local: ler e converter para base64
+            if os.path.isfile(file):
+                with open(file, "rb") as f:
+                    data = f.read()
+                b64 = base64.b64encode(data).decode("utf-8")
+                ext = os.path.splitext(file)[1].lower()
+                mime_map = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".gif": "image/gif",
+                    ".mp4": "video/mp4",
+                    ".webm": "video/webm",
+                }
+                mime = mime_map.get(ext, "application/octet-stream")
+                file_value = f"data:{mime};base64,{b64}"
+            else:
+                print(f"❌ [Uazapi] send_media: arquivo não encontrado: {file}")
+                return None
+
+        payload: dict[str, Any] = {
+            "number": number,
+            "type": media_type,
+            "file": file_value,
+            "text": caption or "",
+        }
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=30
+            )
+            if response.status_code != 200:
+                print(f"❌ [Uazapi] send_media Status: {response.status_code}")
+                print(f"❌ [Uazapi] send_media Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error sending media: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
+
     def check_phone(
         self, token: str, numbers: list[str]
     ) -> Optional[list[dict[str, Any]]]:

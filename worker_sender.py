@@ -275,6 +275,24 @@ def jid_to_number(phone_jid):
         return None
     return str(phone_jid).replace('@s.whatsapp.net', '').strip()
 
+
+def _is_media_path_safe(media_path, user_id):
+    """
+    Valida que media_path está sob storage/{user_id}/ (segurança multi-tenant).
+    Retorna True se seguro, False caso contrário.
+    """
+    if not media_path or not user_id:
+        return False
+    if '..' in media_path:
+        return False
+    try:
+        real_path = os.path.abspath(media_path)
+        user_storage = os.path.abspath(os.path.join('storage', str(user_id)))
+        return real_path.startswith(user_storage)
+    except Exception:
+        return False
+
+
 # check_daily_limit extraído para utils.limits (reuso em worker_cadence)
 from utils.limits import check_daily_limit
 
@@ -948,10 +966,38 @@ def process_campaigns():
                     
                     # 7. Enviar (MegaAPI ou Uazapi)
                     log_envio(f"INICIANDO campaign_id={campaign['id']} lead_id={lead['id']} phone={phone_jid} user_id={user_id}")
-                    success, log = send_message(
-                        instance_name, phone_jid, message_text,
-                        apikey=inst_apikey, api_provider=inst_provider
-                    )
+                    success = False
+                    log = ""
+                    attempted_media = False
+                    # Superadmin + Uazapi + cadência: enviar mídia do step 1 se houver (apenas mídia com caption, sem fallback texto)
+                    if is_sa and inst_provider == 'uazapi' and campaign.get('enable_cadence') and uazapi_service and inst_apikey:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            cur.execute(
+                                "SELECT media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
+                                (campaign['id'],)
+                            )
+                            step1 = cur.fetchone()
+                        if step1 and step1.get('media_path') and _is_media_path_safe(step1['media_path'], user_id) and os.path.exists(step1['media_path']):
+                            attempted_media = True
+                            number = jid_to_number(phone_jid)
+                            if number:
+                                result = uazapi_service.send_media(
+                                    inst_apikey, number,
+                                    step1.get('media_type') or 'image',
+                                    step1['media_path'],
+                                    caption=message_text
+                                )
+                                success = result is not None
+                                log = str(result) if result else "Uazapi send_media failed"
+                                if success:
+                                    log_envio("Uazapi send_media OK")
+                                else:
+                                    log_envio(f"Uazapi send_media FALHA {log[:80]}")
+                    if not attempted_media:
+                        success, log = send_message(
+                            instance_name, phone_jid, message_text,
+                            apikey=inst_apikey, api_provider=inst_provider
+                        )
                     
                     if success:
                         log_envio(f"OK campaign_id={campaign['id']} lead_id={lead['id']}")
