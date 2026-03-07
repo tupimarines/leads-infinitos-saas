@@ -3611,6 +3611,21 @@ def create_campaign():
                     LIMIT 1
                 """, (campaign_id,))
                 inst = cur.fetchone()
+                # Step 1 media (superadmin only) para envio com mídia
+                step1_media_path = None
+                step1_media_type = 'image'
+                if is_super_admin() and enable_cadence:
+                    cur.execute(
+                        "SELECT media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
+                        (campaign_id,)
+                    )
+                    step1 = cur.fetchone()
+                    if step1 and step1.get('media_path'):
+                        mp = step1['media_path']
+                        user_storage = os.path.abspath(os.path.join('storage', str(current_user.id)))
+                        if mp and os.path.isfile(mp) and os.path.abspath(mp).startswith(user_storage):
+                            step1_media_path = mp
+                            step1_media_type = step1.get('media_type') or 'image'
             conn.close()
             
             if inst and inst.get('apikey'):
@@ -3625,17 +3640,33 @@ def create_campaign():
                 except Exception:
                     variations = [message_template_json or "Olá!"]
                 
-                # Montar messages array: 1 msg por lead com random.choice(variations)
+                # Base64 da mídia (se step 1 tem mídia e superadmin)
+                media_file_data = None
+                if step1_media_path:
+                    try:
+                        import base64
+                        with open(step1_media_path, 'rb') as f:
+                            b64 = base64.b64encode(f.read()).decode('utf-8')
+                        ext = os.path.splitext(step1_media_path)[1].lower()
+                        mime_map = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.mp4': 'video/mp4', '.webm': 'video/webm'}
+                        mime = mime_map.get(ext, 'application/octet-stream')
+                        media_file_data = f"data:{mime};base64,{b64}"
+                    except Exception as e:
+                        print(f"⚠️ [UAZAPI] Erro ao ler mídia step 1: {e}")
+                
+                # Montar messages array: 1 msg por lead (text ou image/video com caption)
                 messages = []
                 for lead in valid_leads:
                     msg_text = random.choice(variations)
                     if lead.get('name'):
-                        msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name'])
-                    # number sem @s.whatsapp.net; garantir formato 55...
+                        msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name']).replace("{{nome}}", lead['name']).replace("{{name}}", lead['name'])
                     phone = str(lead.get('phone', '')).strip()
                     if not phone.startswith('55') and len(phone) >= 10:
                         phone = '55' + phone
-                    messages.append({"number": phone, "type": "text", "text": msg_text})
+                    if media_file_data and step1_media_path:
+                        messages.append({"number": phone, "type": step1_media_type, "file": media_file_data, "text": msg_text})
+                    else:
+                        messages.append({"number": phone, "type": "text", "text": msg_text})
                 
                 if messages:
                     delay_min_sec = (delay_min_minutes or 5) * 60
@@ -3654,6 +3685,8 @@ def create_campaign():
                     uazapi = UazapiService()
                     # Log payload de envio em massa (visibilidade como MegaAPI)
                     payload_summary = {"campaign_id": campaign_id, "leads": len(messages), "delay_min": delay_min_sec, "delay_max": delay_max_sec}
+                    if media_file_data:
+                        payload_summary["media"] = step1_media_type
                     print(f"[UAZAPI] create_advanced_campaign payload: {json.dumps(payload_summary)}")
                     if os.environ.get('DEBUG_SENDER'):
                         for i, m in enumerate(messages[:3]):  # primeiras 3 como amostra

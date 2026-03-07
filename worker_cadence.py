@@ -561,10 +561,10 @@ def process_rollover(campaign, conn):
 
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(rollover_leads)} leads elegíveis, criando campanha FU1...")
 
-    # Step 2 config
+    # Step 2 config (incl. media_path para Uazapi type image/video)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            "SELECT message_template, delay_days FROM campaign_steps WHERE campaign_id = %s AND step_number = 2 LIMIT 1",
+            "SELECT message_template, delay_days, media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = 2 LIMIT 1",
             (cid,),
         )
         step2 = cur.fetchone()
@@ -580,6 +580,30 @@ def process_rollover(campaign, conn):
 
     target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
     scheduled_ts = int(target_dt.timestamp() * 1000)  # Uazapi espera ms
+
+    # Gate superadmin para mídia
+    user_id = campaign.get('user_id')
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+    is_sa = row and row.get('email') == SUPER_ADMIN_EMAIL
+
+    # Mídia step 2 (superadmin only)
+    media_file_data = None
+    media_type = 'image'
+    if is_sa and step2.get('media_path'):
+        mp = step2['media_path']
+        if mp and _is_media_path_safe(mp, user_id) and os.path.exists(mp):
+            try:
+                with open(mp, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                ext = os.path.splitext(mp)[1].lower()
+                mime_map = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.mp4': 'video/mp4', '.webm': 'video/webm'}
+                mime = mime_map.get(ext, 'application/octet-stream')
+                media_file_data = f"data:{mime};base64,{b64}"
+                media_type = step2.get('media_type') or 'image'
+            except Exception as e:
+                print(f"  ⚠️ [Rollover] Erro ao ler mídia step 2: {e}")
 
     # Montar mensagens
     raw_tpl = step2.get('message_template') or '[]'
@@ -602,8 +626,11 @@ def process_rollover(campaign, conn):
         if len(clean) <= 11 and not clean.startswith('55'):
             clean = '55' + clean
         name = lead.get('name') or 'Visitante'
-        text = msg_text.replace('{{nome}}', name).replace('{{name}}', name)
-        messages.append({'number': clean, 'type': 'text', 'text': text})
+        text = msg_text.replace('{{nome}}', name).replace('{{name}}', name).replace('{nome}', name).replace('{name}', name)
+        if media_file_data:
+            messages.append({'number': clean, 'type': media_type, 'file': media_file_data, 'text': text})
+        else:
+            messages.append({'number': clean, 'type': 'text', 'text': text})
 
     if not messages:
         print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': nenhum telefone válido nos leads.")
@@ -680,7 +707,7 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            "SELECT message_template, delay_days FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
+            "SELECT message_template, delay_days, media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
             (cid, to_step),
         )
         step_cfg = cur.fetchone()
@@ -696,6 +723,30 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
     now_brazil = datetime.now(BRAZIL_TZ)
     target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
     scheduled_ts = int(target_dt.timestamp() * 1000)
+
+    # Gate superadmin para mídia
+    user_id = campaign.get('user_id')
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+    is_sa = row and row.get('email') == SUPER_ADMIN_EMAIL
+
+    # Mídia do step (superadmin only)
+    media_file_data = None
+    media_type = 'image'
+    if is_sa and step_cfg.get('media_path'):
+        mp = step_cfg['media_path']
+        if mp and _is_media_path_safe(mp, user_id) and os.path.exists(mp):
+            try:
+                with open(mp, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                ext = os.path.splitext(mp)[1].lower()
+                mime_map = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.mp4': 'video/mp4', '.webm': 'video/webm'}
+                mime = mime_map.get(ext, 'application/octet-stream')
+                media_file_data = f"data:{mime};base64,{b64}"
+                media_type = step_cfg.get('media_type') or 'image'
+            except Exception as e:
+                print(f"  ⚠️ [Rollover {step_label}] Erro ao ler mídia: {e}")
 
     raw_tpl = step_cfg.get('message_template') or '[]'
     try:
@@ -717,8 +768,11 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
         if len(clean) <= 11 and not clean.startswith('55'):
             clean = '55' + clean
         name = lead.get('name') or 'Visitante'
-        text = msg_text.replace('{{nome}}', name).replace('{{name}}', name)
-        messages.append({'number': clean, 'type': 'text', 'text': text})
+        text = msg_text.replace('{{nome}}', name).replace('{{name}}', name).replace('{nome}', name).replace('{name}', name)
+        if media_file_data:
+            messages.append({'number': clean, 'type': media_type, 'file': media_file_data, 'text': text})
+        else:
+            messages.append({'number': clean, 'type': 'text', 'text': text})
 
     if not messages:
         return
