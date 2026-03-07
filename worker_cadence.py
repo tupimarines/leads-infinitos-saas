@@ -488,19 +488,25 @@ def process_rollover(campaign, conn):
     rollover_h, rollover_m = _parse_rollover_time(rollover_str)
 
     now_brazil = datetime.now(BRAZIL_TZ)
-    # Só executar quando hora:minuto atual >= rollover_time
-    now_minutes = now_brazil.hour * 60 + now_brazil.minute
-    rollover_minutes = rollover_h * 60 + rollover_m
-    if now_minutes < rollover_minutes:
-        return
+    # Só executar quando hora:minuto atual >= rollover_time (00:00 = modo teste: roda em todo ciclo)
+    if rollover_str != '00:00':
+        now_minutes = now_brazil.hour * 60 + now_brazil.minute
+        rollover_minutes = rollover_h * 60 + rollover_m
+        if now_minutes < rollover_minutes:
+            return
 
     instance = get_campaign_instance(cid, conn)
-    if not instance or instance.get('api_provider') != 'uazapi':
+    if not instance:
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': sem instância vinculada, pulando.")
+        return
+    if instance.get('api_provider') != 'uazapi':
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': instância {instance.get('api_provider', '?')}, requer Uazapi.")
         return
     if not uazapi_service:
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': UazapiService indisponível.")
         return
 
-    # Buscar leads em Inicial (current_step=1, status=sent, cadence_status snoozed/pending)
+    # Buscar leads em Inicial (current_step=1, status=sent). Inclui cadence_status NULL (COALESCE evita NULL NOT IN).
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
@@ -509,7 +515,7 @@ def process_rollover(campaign, conn):
               AND cl.current_step = 1
               AND cl.status = 'sent'
               AND (cl.cadence_status IS NULL OR cl.cadence_status IN ('snoozed', 'pending'))
-              AND cl.cadence_status NOT IN ('converted', 'lost')
+              AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
             LIMIT 100
         """, (cid,))
         rollover_leads = cur.fetchall()
@@ -525,6 +531,7 @@ def process_rollover(campaign, conn):
         )
         step2 = cur.fetchone()
     if not step2:
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': step 2 (Follow-up 1) não configurado.")
         return
 
     send_hour = int(campaign.get('send_hour_start') or 8)
@@ -560,10 +567,12 @@ def process_rollover(campaign, conn):
         messages.append({'number': clean, 'type': 'text', 'text': text})
 
     if not messages:
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': nenhum telefone válido nos leads.")
         return
 
     token = instance.get('apikey')
     if not token:
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': instância sem apikey.")
         return
 
     result = uazapi_service.create_advanced_campaign(
