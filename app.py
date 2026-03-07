@@ -2383,7 +2383,8 @@ def admin_delete_campaign(campaign_id):
             success, err = _uazapi_control_campaign(campaign_id, current_user.id, 'delete', admin_mode=True)
             if success:
                 return {"success": True}
-            return {"error": err or "Falha ao controlar campanha Uazapi"}, 500
+            # MegaAPI, sem instância Uazapi ou API falhou: remover do DB mesmo assim
+            print(f"[Admin] Uazapi delete falhou ({err}), removendo campanha do DB.")
 
         conn = get_db_connection()
         with conn.cursor() as cur:
