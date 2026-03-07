@@ -173,7 +173,7 @@
                     {% if campaign.status in ['running', 'paused', 'pending'] %}
                     <button onclick="togglePause({{ campaign.id }})"
                         class="text-gray-500 hover:text-yellow-400 transition-colors p-1"
-                        title="{% if campaign.status == 'paused' %}Continuar{% else %}Pausar{% endif %}">
+                        title="{% if campaign.status == 'paused' %}Continuar{% if campaign.enable_cadence %} (inclui follow-ups){% endif %}{% else %}Pausar{% if campaign.enable_cadence %} (afeta também os follow-ups){% endif %}{% endif %}">
                         {% if campaign.status == 'paused' %}
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">

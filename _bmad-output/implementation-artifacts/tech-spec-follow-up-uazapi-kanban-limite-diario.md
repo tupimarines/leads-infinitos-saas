@@ -156,3 +156,4 @@ Inicial (1ª msg enviada)
 | 13 | **delay_days min=0 na UI** | campaigns_new.html | Inputs "Aguardar (dias)" passam a aceitar 0 nos 3 follow-ups |
 | 14 | **Rollover FU1→FU2 e FU2→Despedida** | worker_cadence.py | `process_rollover_fu_next()`: leads em current_step=2 ou 3 com snooze_until<=NOW() → criar campanha Uazapi agendada e mover para step 3 ou 4. Cards avançam no Kanban após FU1/FU2 enviados. |
 | 15 | **scheduled_for em ms (rollover Inicial→FU1)** | worker_cadence.py | `int(target_dt.timestamp() * 1000)` — Uazapi espera Unix timestamp em milissegundos |
+| 16 | **Sub-campanhas e pausa** | worker_cadence.py, app.py, campaigns_kanban.html, campaigns_list.html | Salvar rollover_fu1/2/3_folder_id em cadence_config; endpoint POST /api/campaigns/<id>/pause-rollover/<step>; seção Sub-campanhas no Kanban (105, 105/1, 105/2, 105/3) com botão pausar; toggle_pause principal pausa também follow-ups; tooltip "Pausar (afeta também os follow-ups)" |

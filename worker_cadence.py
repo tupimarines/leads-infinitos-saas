@@ -607,6 +607,7 @@ def process_rollover(campaign, conn):
         print(f"  ❌ [Rollover] Campaign '{campaign['name']}': Uazapi create_advanced_campaign falhou. Leads NÃO movidos.")
         return
 
+    folder_id = result.get('folder_id') or result.get('folderId')
     # Sucesso: mover leads para Follow-up 1 (current_step=2, cadence_status=snoozed)
     lead_ids = [l['id'] for l in rollover_leads]
     with conn.cursor() as cur:
@@ -618,6 +619,14 @@ def process_rollover(campaign, conn):
             """,
             (target_dt, lead_ids),
         )
+        if folder_id:
+            cur.execute(
+                """
+                UPDATE campaigns SET cadence_config = COALESCE(cadence_config, '{}')::jsonb || %s::jsonb
+                WHERE id = %s
+                """,
+                (json.dumps({'rollover_fu1_folder_id': str(folder_id)}), cid),
+            )
     conn.commit()
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(lead_ids)} leads Inicial → Follow-up 1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT")
 
@@ -711,6 +720,9 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
         print(f"  ❌ [Rollover {step_label}] Campaign '{campaign['name']}': Uazapi create_advanced_campaign falhou.")
         return
 
+    folder_id = result.get('folder_id') or result.get('folderId')
+    config_key = {3: 'rollover_fu2_folder_id', 4: 'rollover_fu3_folder_id'}.get(to_step)
+
     lead_ids = [l['id'] for l in rollover_leads]
     with conn.cursor() as cur:
         cur.execute(
@@ -721,6 +733,14 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
             """,
             (to_step, target_dt, lead_ids),
         )
+        if folder_id and config_key:
+            cur.execute(
+                """
+                UPDATE campaigns SET cadence_config = COALESCE(cadence_config, '{}')::jsonb || %s::jsonb
+                WHERE id = %s
+                """,
+                (json.dumps({config_key: str(folder_id)}), cid),
+            )
     conn.commit()
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(lead_ids)} leads → {step_label}, agendado {target_dt.strftime('%d/%m %H:%M')} BRT")
 

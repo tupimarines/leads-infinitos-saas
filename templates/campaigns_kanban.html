@@ -184,6 +184,62 @@
         </div>
     </div>
 
+    <!-- Sub-campanhas (Principal + Follow-ups) -->
+    {% if campaign.enable_cadence %}
+    {% set cfg = campaign.cadence_config if campaign.cadence_config is mapping else {} %}
+    <div class="mb-6 p-4 bg-gray-900/40 rounded-xl border border-gray-700/50">
+        <p class="text-xs text-gray-500 uppercase tracking-wider mb-3">Sub-campanhas</p>
+        <div class="flex flex-wrap gap-3">
+            <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="1">
+                <span class="text-sm font-medium text-gray-200">{{ campaign.id }}</span>
+                <span class="text-xs text-gray-500">Principal</span>
+                {% if campaign.use_uazapi_sender and campaign.uazapi_folder_id %}
+                <button onclick="toggleRolloverPause(1, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
+                    <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <svg class="w-4 h-4 play-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </button>
+                {% endif %}
+            </div>
+            <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="2">
+                <span class="text-sm font-medium text-gray-200">{{ campaign.id }}/1</span>
+                <span class="text-xs text-gray-500">Follow-up 1</span>
+                {% if cfg.get('rollover_fu1_folder_id') %}
+                <button onclick="toggleRolloverPause(2, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
+                    <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <svg class="w-4 h-4 play-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </button>
+                {% else %}
+                <span class="text-[10px] text-gray-600">—</span>
+                {% endif %}
+            </div>
+            <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="3">
+                <span class="text-sm font-medium text-gray-200">{{ campaign.id }}/2</span>
+                <span class="text-xs text-gray-500">Follow-up 2</span>
+                {% if cfg.get('rollover_fu2_folder_id') %}
+                <button onclick="toggleRolloverPause(3, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
+                    <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <svg class="w-4 h-4 play-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </button>
+                {% else %}
+                <span class="text-[10px] text-gray-600">—</span>
+                {% endif %}
+            </div>
+            <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="4">
+                <span class="text-sm font-medium text-gray-200">{{ campaign.id }}/3</span>
+                <span class="text-xs text-gray-500">Despedida</span>
+                {% if cfg.get('rollover_fu3_folder_id') %}
+                <button onclick="toggleRolloverPause(4, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
+                    <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <svg class="w-4 h-4 play-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </button>
+                {% else %}
+                <span class="text-[10px] text-gray-600">—</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Kanban Board -->
     <div class="kanban-board" id="kanbanBoard">
         <!-- Column: Etapa 1 - Inicial -->
@@ -595,6 +651,41 @@
     }
     const CAMPAIGN_ID = {{ campaign.id }};
     let ALL_LEADS = {};
+    const ROLLOVER_PAUSED = {}; // step -> true se pausado (estado local)
+
+    async function toggleRolloverPause(step, ev) {
+        if (ev) ev.stopPropagation();
+        const card = document.querySelector(`.subcampaign-card[data-step="${step}"]`);
+        const btn = card?.querySelector('button');
+        if (!btn) return;
+        const isPaused = ROLLOVER_PAUSED[step];
+        const action = isPaused ? 'continue' : 'stop';
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/pause-rollover/${step}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                ROLLOVER_PAUSED[step] = !isPaused;
+                const pauseIcon = btn.querySelector('.pause-icon');
+                const playIcon = btn.querySelector('.play-icon');
+                if (pauseIcon && playIcon) {
+                    pauseIcon.classList.toggle('hidden', !ROLLOVER_PAUSED[step]);
+                    playIcon.classList.toggle('hidden', ROLLOVER_PAUSED[step]);
+                }
+                showToast(action === 'stop' ? 'Follow-up pausado' : 'Follow-up continuado', 'success');
+            } else {
+                showToast(data.error || 'Erro ao controlar follow-up', 'error');
+            }
+        } catch (e) {
+            showToast('Erro de conexão', 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
     let CURRENT_LEAD_ID = null;
 
     // Create a lead card element

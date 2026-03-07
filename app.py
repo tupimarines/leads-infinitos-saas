@@ -2864,6 +2864,37 @@ def api_scraping_jobs():
     except Exception as e:
         return json.dumps({'error': str(e)}), 500
 
+def _uazapi_control_folder(campaign_id: int, user_id: int, folder_id: str, action: str):
+    """
+    Helper: executa action (stop|continue) em um folder_id Uazapi.
+    Usado para rollover follow-ups. Retorna (success, error_msg).
+    """
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, user_id)
+            )
+            if not cur.fetchone():
+                return False, "Campanha não encontrada"
+            cur.execute("""
+                SELECT i.apikey FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+            """, (campaign_id,))
+            inst = cur.fetchone()
+        conn.close()
+        if not inst or not inst.get('apikey'):
+            return False, "Instância Uazapi não encontrada"
+        uazapi = UazapiService()
+        result = uazapi.edit_campaign(inst['apikey'], folder_id, action)
+        return bool(result), None if result else "Falha ao comunicar com API Uazapi"
+    except Exception as e:
+        return False, str(e)
+
+
 def _uazapi_control_campaign(campaign_id: int, user_id: int, action: str, admin_mode: bool = False):
     """
     Helper: executa action (stop|continue|delete) na Uazapi para campanha com use_uazapi_sender.
@@ -2944,6 +2975,57 @@ def uazapi_control(campaign_id):
     return json.dumps({'error': err or 'Erro ao controlar campanha'}), 500
 
 
+@app.route('/api/campaigns/<int:campaign_id>/pause-rollover/<int:step>', methods=['POST'])
+@login_required
+def pause_rollover(campaign_id, step):
+    """
+    Pausa ou continua uma sub-campanha de follow-up (rollover).
+    step: 1=principal (uazapi_folder_id), 2=FU1, 3=FU2, 4=Despedida
+    Body: { "action": "stop" | "continue" }
+    """
+    data = request.get_json() or {}
+    action = (data.get('action') or '').strip().lower()
+    if action not in ('stop', 'continue'):
+        return json.dumps({'error': 'action deve ser stop ou continue'}), 400
+
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT use_uazapi_sender, uazapi_folder_id, cadence_config FROM campaigns WHERE id = %s AND user_id = %s",
+            (campaign_id, current_user.id)
+        )
+        row = cur.fetchone()
+    conn.close()
+    if not row:
+        return json.dumps({'error': 'Campanha não encontrada'}), 404
+
+    folder_id = None
+    if step == 1:
+        if row.get('use_uazapi_sender') and row.get('uazapi_folder_id'):
+            folder_id = row['uazapi_folder_id']
+            success, err = _uazapi_control_campaign(campaign_id, current_user.id, action)
+            if success:
+                return json.dumps({'success': True, 'action': action})
+            return json.dumps({'error': err or 'Erro ao controlar campanha'}), 500
+        return json.dumps({'error': 'Campanha principal não usa Uazapi'}), 400
+
+    cfg = row.get('cadence_config') or {}
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg) if cfg else {}
+        except json.JSONDecodeError:
+            cfg = {}
+    key_map = {2: 'rollover_fu1_folder_id', 3: 'rollover_fu2_folder_id', 4: 'rollover_fu3_folder_id'}
+    folder_id = cfg.get(key_map.get(step, ''))
+    if not folder_id:
+        return json.dumps({'error': f'Sub-campanha {step} ainda não criada ou sem folder_id'}), 404
+
+    success, err = _uazapi_control_folder(campaign_id, current_user.id, str(folder_id), action)
+    if success:
+        return json.dumps({'success': True, 'action': action})
+    return json.dumps({'error': err or 'Erro ao controlar follow-up'}), 500
+
+
 @app.route('/api/campaigns/<int:campaign_id>/uazapi-messages', methods=['GET'])
 @login_required
 def uazapi_messages(campaign_id):
@@ -3004,7 +3086,7 @@ def toggle_campaign_pause(campaign_id):
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT status, use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, current_user.id))
+            cur.execute("SELECT status, use_uazapi_sender, uazapi_folder_id, enable_cadence, cadence_config FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, current_user.id))
             campaign = cur.fetchone()
         conn.close()
 
@@ -3023,20 +3105,46 @@ def toggle_campaign_pause(campaign_id):
         else:
             return json.dumps({"error": f"Não é possível pausar/continuar campanha com status '{current_status}'"}), 400
 
-        # Se use_uazapi_sender, delegar para Uazapi API
-        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
-            action = 'stop' if new_status == 'paused' else 'continue'
-            success, err = _uazapi_control_campaign(campaign_id, current_user.id, action)
-            if success:
-                return json.dumps({"success": True, "new_status": new_status})
-            return json.dumps({"error": err or "Erro ao controlar campanha Uazapi"}), 500
+        action = 'stop' if new_status == 'paused' else 'continue'
 
-        # Comportamento atual para campanhas sem Uazapi
+        # Se use_uazapi_sender, delegar para Uazapi API (principal + follow-ups se cadência)
+        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
+            success, err = _uazapi_control_campaign(campaign_id, current_user.id, action)
+            if not success:
+                return json.dumps({"error": err or "Erro ao controlar campanha Uazapi"}), 500
+            # Pausar/continuar também os follow-ups de rollover (cadence)
+            if campaign.get('enable_cadence'):
+                cfg = campaign.get('cadence_config') or {}
+                if isinstance(cfg, str):
+                    try:
+                        cfg = json.loads(cfg) if cfg else {}
+                    except json.JSONDecodeError:
+                        cfg = {}
+                for key in ('rollover_fu1_folder_id', 'rollover_fu2_folder_id', 'rollover_fu3_folder_id'):
+                    fid = cfg.get(key)
+                    if fid:
+                        _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
+            return json.dumps({"success": True, "new_status": new_status})
+
+        # Comportamento atual para campanhas sem Uazapi principal
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute("UPDATE campaigns SET status = %s WHERE id = %s", (new_status, campaign_id))
         conn.commit()
         conn.close()
+
+        # Se cadência ativa, pausar/continuar também os follow-ups de rollover
+        if campaign.get('enable_cadence'):
+            cfg = campaign.get('cadence_config') or {}
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg) if cfg else {}
+                except json.JSONDecodeError:
+                    cfg = {}
+            for key in ('rollover_fu1_folder_id', 'rollover_fu2_folder_id', 'rollover_fu3_folder_id'):
+                fid = cfg.get(key)
+                if fid:
+                    _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
 
         return json.dumps({"success": True, "new_status": new_status})
 
