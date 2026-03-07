@@ -3563,6 +3563,12 @@ def create_campaign():
                                 "UPDATE campaigns SET uazapi_folder_id = %s, status = 'running' WHERE id = %s",
                                 (result['folder_id'], campaign_id)
                             )
+                            # Marcar leads como enviados para rollover/cadência funcionar
+                            cur.execute(
+                                """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
+                                   current_step = 1 WHERE campaign_id = %s AND status = 'pending'""",
+                                (campaign_id,)
+                            )
                         conn.commit()
                         conn.close()
                     elif result:

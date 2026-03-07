@@ -522,7 +522,19 @@ def process_rollover(campaign, conn):
         rollover_leads = cur.fetchall()
 
     if not rollover_leads:
+        # Debug: leads em Inicial com status=sent são necessários; se 0, pode ser status ainda 'pending'
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT status, COUNT(*) as n FROM campaign_leads WHERE campaign_id = %s AND current_step = 1 GROUP BY status",
+                (cid,)
+            )
+            counts = cur.fetchall()
+        if counts:
+            summary = ", ".join(f"{r['status']}={r['n']}" for r in counts)
+            print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': 0 leads elegíveis (precisa status=sent). Inicial: {summary}")
         return
+
+    print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(rollover_leads)} leads elegíveis, criando campanha FU1...")
 
     # Step 2 config
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
