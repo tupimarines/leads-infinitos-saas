@@ -485,11 +485,12 @@ def process_rollover(campaign, conn):
         except json.JSONDecodeError:
             cadence_config = {}
     rollover_str = cadence_config.get('rollover_time', '23:00')
+    rollover_test_mode = bool(cadence_config.get('rollover_test_mode', False))
     rollover_h, rollover_m = _parse_rollover_time(rollover_str)
 
     now_brazil = datetime.now(BRAZIL_TZ)
-    # Só executar quando hora:minuto atual >= rollover_time (00:00 = modo teste: roda em todo ciclo)
-    if rollover_str != '00:00':
+    # Modo teste OU 00:00: roda em todo ciclo. Caso contrário: só quando hora >= rollover_time
+    if not rollover_test_mode and rollover_str != '00:00':
         now_minutes = now_brazil.hour * 60 + now_brazil.minute
         rollover_minutes = rollover_h * 60 + rollover_m
         if now_minutes < rollover_minutes:

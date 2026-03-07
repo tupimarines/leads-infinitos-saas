@@ -32,6 +32,7 @@ import io
 import csv
 from openai import OpenAI
 from functools import wraps
+import pytz
 
 
 load_dotenv()
@@ -1504,6 +1505,19 @@ def send_reset_email(email, token):
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
+
+# Timezone BRT para exibição de datas (Postgres armazena UTC)
+BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
+
+@app.template_filter('to_brt')
+def to_brt(dt):
+    """Converte datetime para BRT. Assume UTC se naive."""
+    if dt is None:
+        return None
+    if hasattr(dt, 'tzinfo') and dt.tzinfo:
+        return dt.astimezone(BRAZIL_TZ)
+    # Naive = assume UTC (Postgres sem timezone)
+    return pytz.UTC.localize(dt).astimezone(BRAZIL_TZ)
 STORAGE_ROOT = os.environ.get("STORAGE_DIR", "storage")
 
 # Configuração do Flask-Mail
@@ -3406,11 +3420,13 @@ def create_campaign():
             steps = data.get('steps', [])
             
             if enable_cadence and steps:
-                # cadence_config: rollover_time (HH:MM) para rollover diário
+                # cadence_config: rollover_time (HH:MM), rollover_test_mode (modo teste)
                 rollover_time = data.get('rollover_time', '23:00')
                 if rollover_time and not re.match(r'^\d{1,2}:\d{2}$', str(rollover_time)):
                     rollover_time = '23:00'
-                cadence_config_json = json.dumps({'rollover_time': str(rollover_time)})
+                rollover_test_mode = bool(data.get('rollover_test_mode', False))
+                cadence_config = {'rollover_time': str(rollover_time), 'rollover_test_mode': rollover_test_mode}
+                cadence_config_json = json.dumps(cadence_config)
                 cur.execute(
                     """UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = %s,
                        cadence_config = COALESCE(cadence_config, '{}')::jsonb || %s::jsonb

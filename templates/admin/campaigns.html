@@ -93,7 +93,7 @@
 
             <!-- Date -->
             <p class="text-xs text-gray-500 mb-4">
-                Criada em: {{ campaign.created_at.strftime('%d/%m/%Y %H:%M') if campaign.created_at else 'N/A' }}
+                Criada em: {{ (campaign.created_at|to_brt).strftime('%d/%m/%Y %H:%M') if campaign.created_at else 'N/A' }}
             </p>
 
             <!-- Actions -->

@@ -639,7 +639,11 @@
                         <input type="time" id="rollover_time" value="23:00" step="1"
                             class="neon-input w-32 px-4 py-2 rounded-lg text-white text-sm"
                             title="Ex: 23:34, 9:01 para testes">
-                        <p class="text-xs text-gray-500 mt-1">Ao atingir este horário (BRT), leads em Inicial seguem para Follow-up 1 e campanha é agendada. Use 00:00 para modo teste (rollover em todo ciclo).</p>
+                        <p class="text-xs text-gray-500 mt-1">Ao atingir este horário (BRT), leads em Inicial seguem para Follow-up 1 e campanha é agendada.</p>
+                        <label class="mt-2 flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox" id="rollover_test_mode" class="rounded border-gray-600 bg-gray-700 text-green-500 focus:ring-green-500" onchange="toggleTestMode(this.checked)">
+                            <span class="text-sm text-amber-400/90">Modo teste: rollover e avanço automático em todo ciclo (~2 min entre etapas)</span>
+                        </label>
                     </div>
                     <div class="flex flex-wrap gap-6">
                         <label class="relative inline-flex items-center gap-3 cursor-pointer">
@@ -918,6 +922,14 @@
         }
     });
 
+    function toggleTestMode(checked) {
+        const defaults = { 2: 3, 3: 4, 4: 1 };
+        [2, 3, 4].forEach(s => {
+            const el = document.getElementById(`delay_step_${s}`);
+            if (el) el.value = checked ? 0 : defaults[s];
+        });
+    }
+
     // Carregar Jobs (Listas) ao iniciar
     document.addEventListener('DOMContentLoaded', async () => {
         try {
@@ -1142,7 +1154,9 @@
             data.enable_cadence = true;
             data.terms_accepted = true;
             const rolloverEl = document.getElementById('rollover_time');
+            const testModeEl = document.getElementById('rollover_test_mode');
             data.rollover_time = rolloverEl ? rolloverEl.value || '23:00' : '23:00';
+            data.rollover_test_mode = testModeEl ? testModeEl.checked : false;
             data.steps = [];
 
             // Step 1: uses main message_templates, delay 0
@@ -1159,9 +1173,10 @@
 
             // Steps 2-4: separate messages
             const stepLabels = { 2: 'Follow-up 1', 3: 'Follow-up 2', 4: 'Break-up' };
+            const testMode = document.getElementById('rollover_test_mode')?.checked || false;
             for (let s = 2; s <= 4; s++) {
                 const msg = document.getElementById(`msg_step_${s}`).value.trim();
-                const delay = parseInt(document.getElementById(`delay_step_${s}`).value) || 3;
+                const delay = testMode ? 0 : (parseInt(document.getElementById(`delay_step_${s}`).value) || 3);
                 const mediaB64 = document.getElementById(`mediaData_${s}`).value;
                 data.steps.push({
                     step_number: s,
