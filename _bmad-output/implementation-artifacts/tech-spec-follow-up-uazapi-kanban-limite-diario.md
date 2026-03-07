@@ -154,3 +154,5 @@ Inicial (1ª msg enviada)
 | 11 | **Timezone BRT em "Criada"** | app.py, campaigns_list.html, admin/campaigns.html | Filtro Jinja `to_brt` para exibir created_at em BRT |
 | 12 | **Checkbox Modo teste** | campaigns_new.html, app.py | Checkbox "Modo teste: rollover e avanço automático em todo ciclo"; define delay_days=0 em todos os steps |
 | 13 | **delay_days min=0 na UI** | campaigns_new.html | Inputs "Aguardar (dias)" passam a aceitar 0 nos 3 follow-ups |
+| 14 | **Rollover FU1→FU2 e FU2→Despedida** | worker_cadence.py | `process_rollover_fu_next()`: leads em current_step=2 ou 3 com snooze_until<=NOW() → criar campanha Uazapi agendada e mover para step 3 ou 4. Cards avançam no Kanban após FU1/FU2 enviados. |
+| 15 | **scheduled_for em ms (rollover Inicial→FU1)** | worker_cadence.py | `int(target_dt.timestamp() * 1000)` — Uazapi espera Unix timestamp em milissegundos |

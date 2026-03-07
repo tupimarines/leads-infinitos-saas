@@ -310,6 +310,9 @@ def process_cadence():
             for campaign in campaigns:
                 # Part B.0: Rollover diário (leads em Inicial → Follow-up 1) — roda mesmo fora do horário comercial
                 process_rollover(campaign, conn)
+                # Part B.0b: Rollover FU1→FU2 e FU2→Despedida (cria campanhas Uazapi agendadas)
+                process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
+                process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
                 # Part B.1 e B.2: apenas em horário comercial
                 if is_business_hours():
                     process_campaign_sends(campaign, conn)
@@ -556,7 +559,7 @@ def process_rollover(campaign, conn):
     delay_days = 1 if delay_days is None else int(delay_days)
 
     target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
-    scheduled_ts = int(target_dt.timestamp())
+    scheduled_ts = int(target_dt.timestamp() * 1000)  # Uazapi espera ms
 
     # Montar mensagens
     raw_tpl = step2.get('message_template') or '[]'
@@ -617,6 +620,109 @@ def process_rollover(campaign, conn):
         )
     conn.commit()
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(lead_ids)} leads Inicial → Follow-up 1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT")
+
+
+def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
+    """
+    Rollover FU1→FU2 ou FU2→Despedida: leads em from_step com snooze_until<=NOW()
+    → criar campanha Uazapi para to_step e mover leads.
+    """
+    cid = campaign['id']
+    instance = get_campaign_instance(cid, conn)
+    if not instance or instance.get('api_provider') != 'uazapi' or not uazapi_service:
+        return
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s
+              AND cl.current_step = %s
+              AND cl.status = 'sent'
+              AND cl.cadence_status = 'snoozed'
+              AND cl.snooze_until <= NOW()
+              AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+            LIMIT 100
+        """, (cid, from_step))
+        rollover_leads = cur.fetchall()
+
+    if not rollover_leads:
+        return
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT message_template, delay_days FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
+            (cid, to_step),
+        )
+        step_cfg = cur.fetchone()
+    if not step_cfg:
+        print(f"  ⏭️ [Rollover {step_label}] Campaign '{campaign['name']}': step {to_step} não configurado.")
+        return
+
+    send_hour = int(campaign.get('send_hour_start') or 8)
+    send_sat = bool(campaign.get('send_saturday'))
+    send_sun = bool(campaign.get('send_sunday'))
+    delay_days = step_cfg.get('delay_days')
+    delay_days = 1 if delay_days is None else int(delay_days)
+    now_brazil = datetime.now(BRAZIL_TZ)
+    target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
+    scheduled_ts = int(target_dt.timestamp() * 1000)
+
+    raw_tpl = step_cfg.get('message_template') or '[]'
+    try:
+        parsed = json.loads(raw_tpl)
+        msg_text = random.choice(parsed) if isinstance(parsed, list) else str(parsed)
+    except Exception:
+        msg_text = str(raw_tpl)
+
+    messages = []
+    for lead in rollover_leads:
+        phone = lead.get('phone') or ''
+        if not phone and lead.get('whatsapp_link'):
+            match = re.search(r'(\d{10,})', str(lead['whatsapp_link']))
+            if match:
+                phone = match.group(1)
+        if not phone:
+            continue
+        clean = re.sub(r'\D', '', str(phone))
+        if len(clean) <= 11 and not clean.startswith('55'):
+            clean = '55' + clean
+        name = lead.get('name') or 'Visitante'
+        text = msg_text.replace('{{nome}}', name).replace('{{name}}', name)
+        messages.append({'number': clean, 'type': 'text', 'text': text})
+
+    if not messages:
+        return
+
+    token = instance.get('apikey')
+    if not token:
+        return
+
+    result = uazapi_service.create_advanced_campaign(
+        token=token,
+        delay_min_sec=60,
+        delay_max_sec=120,
+        messages=messages,
+        info=f"Rollover {step_label} c{cid}",
+        scheduled_for=scheduled_ts,
+    )
+
+    if not result:
+        print(f"  ❌ [Rollover {step_label}] Campaign '{campaign['name']}': Uazapi create_advanced_campaign falhou.")
+        return
+
+    lead_ids = [l['id'] for l in rollover_leads]
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE campaign_leads
+            SET current_step = %s, cadence_status = 'snoozed', snooze_until = %s
+            WHERE id = ANY(%s)
+            """,
+            (to_step, target_dt, lead_ids),
+        )
+    conn.commit()
+    print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(lead_ids)} leads → {step_label}, agendado {target_dt.strftime('%d/%m %H:%M')} BRT")
 
 
 def bootstrap_pending_leads(campaign, conn):
