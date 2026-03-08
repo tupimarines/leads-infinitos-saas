@@ -42,7 +42,13 @@ except ImportError:
 
 # Limites compartilhados
 from utils.limits import check_daily_limit, get_user_daily_limit
-from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
+from utils.sync_uazapi import (
+    sync_campaign_leads_from_uazapi,
+    get_uazapi_campaign_counts,
+    is_initial_campaign_finished,
+    fetch_all_phones_by_status,
+    normalize_phone_for_match,
+)
 
 # Super Admin (gate para mídia Uazapi)
 SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
@@ -500,8 +506,9 @@ def _next_send_datetime(from_dt, delay_days, send_hour_start, send_saturday, sen
 
 def process_rollover(campaign, conn):
     """
-    Rollover diário: às rollover_time, leads em Inicial (current_step=1, status=sent)
-    → mover para Follow-up 1 e criar campanha Uazapi agendada.
+    Rollover diário: às rollover_time, leads em Inicial (current_step=1) que constam
+    em list_messages(Sent) da API → mover para Follow-up 1 e criar campanha Uazapi agendada.
+    API é fonte de verdade (não depende de campaign_leads.status).
     Só processa instâncias Uazapi.
     """
     cid = campaign['id']
@@ -534,7 +541,7 @@ def process_rollover(campaign, conn):
         print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': UazapiService indisponível.")
         return
 
-    # Sync Uazapi → DB antes do rollover (marca envios corretamente via list_messages)
+    # Sync Uazapi → DB antes do rollover (marca envios para Kanban/stats; rollover não depende mais dele)
     if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and instance.get('apikey'):
         try:
             sync_result = sync_campaign_leads_from_uazapi(
@@ -544,58 +551,65 @@ def process_rollover(campaign, conn):
                 print(f"  🔄 [Rollover] Campaign '{campaign['name']}': sync Uazapi → {sync_result}")
             elif sync_result.get('sent', 0) > 0 and sync_result.get('updated_sent', 0) == 0:
                 print(f"  ⚠️ [Rollover] Campaign '{campaign['name']}': API retornou {sync_result.get('sent')} Sent mas 0 atualizados no DB (verificar match de telefone)")
-            # Só prosseguir rollover quando campanha inicial terminou (Scheduled=0)
-            counts = get_uazapi_campaign_counts(uazapi_service, instance['apikey'], campaign['uazapi_folder_id'])
-            if not is_initial_campaign_finished(counts):
-                print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': campanha inicial ainda enviando (scheduled={counts.get('scheduled', 0)}). Aguardando.")
-                return
         except Exception as e:
             print(f"  ⚠️ [Rollover] Campaign '{campaign['name']}': sync Uazapi falhou: {e}")
 
-    # Modo teste + delay: só rollover se MIN(sent_at) >= N minutos
+    # Verificar se campanha inicial terminou (Scheduled=0) e obter sent_phones da API
+    if not campaign.get('uazapi_folder_id') or not instance.get('apikey'):
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': sem uazapi_folder_id ou apikey, pulando.")
+        return
+    counts = get_uazapi_campaign_counts(uazapi_service, instance['apikey'], campaign['uazapi_folder_id'])
+    if not is_initial_campaign_finished(counts):
+        print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': campanha inicial ainda enviando (scheduled={counts.get('scheduled', 0)}). Aguardando.")
+        return
+
+    # API como fonte de verdade: obter sent_phones de list_messages(Sent)
+    sent_phones = fetch_all_phones_by_status(
+        uazapi_service, instance['apikey'], campaign['uazapi_folder_id'], "Sent"
+    )
+    sent_normalized = set()
+    for ph in sent_phones:
+        sent_normalized |= normalize_phone_for_match(ph)
+
+    # Buscar leads em Inicial (current_step=1), sem filtro de status. Exclui converted/lost.
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link, cl.sent_at
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s
+              AND cl.current_step = 1
+              AND (cl.cadence_status IS NULL OR cl.cadence_status IN ('snoozed', 'pending'))
+              AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+            LIMIT 100
+        """, (cid,))
+        initial_leads = cur.fetchall()
+
+    # Match por normalização: lead elegível se phone/whatsapp_link intersecta sent_normalized
+    rollover_leads = []
+    for lead in initial_leads:
+        lead_variants = normalize_phone_for_match(lead.get('phone')) | normalize_phone_for_match(
+            lead.get('whatsapp_link')
+        )
+        if lead_variants and (lead_variants & sent_normalized):
+            rollover_leads.append(lead)
+
+    # Modo teste + delay: só rollover se MIN(sent_at) >= N minutos entre elegíveis
     rollover_test_delay_minutes = int(cadence_config.get('rollover_test_delay_minutes', 5))
-    if rollover_test_mode and rollover_test_delay_minutes > 0:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT MIN(cl.sent_at) as min_sent
-                FROM campaign_leads cl
-                WHERE cl.campaign_id = %s AND cl.current_step = 1 AND cl.status = 'sent'
-                  AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
-            """, (cid,))
-            row = cur.fetchone()
-        min_sent = row and row.get('min_sent')
-        if min_sent:
+    if rollover_test_mode and rollover_test_delay_minutes > 0 and rollover_leads:
+        sent_ats = [l.get('sent_at') for l in rollover_leads if l.get('sent_at')]
+        if sent_ats:
+            min_sent = min(sent_ats)
             if getattr(min_sent, 'tzinfo', None) is None:
                 min_sent = BRAZIL_TZ.localize(min_sent)
             elapsed_min = (now_brazil - min_sent).total_seconds() / 60
             if elapsed_min < rollover_test_delay_minutes:
                 return  # Aguardar delay
 
-    # Buscar leads em Inicial (current_step=1, status=sent). Inclui cadence_status NULL (COALESCE evita NULL NOT IN).
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
-            FROM campaign_leads cl
-            WHERE cl.campaign_id = %s
-              AND cl.current_step = 1
-              AND cl.status = 'sent'
-              AND (cl.cadence_status IS NULL OR cl.cadence_status IN ('snoozed', 'pending'))
-              AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
-            LIMIT 100
-        """, (cid,))
-        rollover_leads = cur.fetchall()
-
     if not rollover_leads:
-        # Debug: leads em Inicial com status=sent são necessários; se 0, pode ser status ainda 'pending'
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT status, COUNT(*) as n FROM campaign_leads WHERE campaign_id = %s AND current_step = 1 GROUP BY status",
-                (cid,)
-            )
-            counts = cur.fetchall()
-        if counts:
-            summary = ", ".join(f"{r['status']}={r['n']}" for r in counts)
-            print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': 0 leads elegíveis (precisa status=sent). Inicial: {summary}")
+        if sent_phones:
+            print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': API retornou {len(sent_phones)} Sent mas 0 leads em Inicial deram match.")
+        else:
+            print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': 0 Sent na API, nenhum lead elegível.")
         return
 
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(rollover_leads)} leads elegíveis, criando campanha FU1...")
@@ -644,19 +658,17 @@ def process_rollover(campaign, conn):
             except Exception as e:
                 print(f"  ⚠️ [Rollover] Erro ao ler mídia step 2: {e}")
 
-    # Montar mensagens
     # Re-query imediatamente antes de criar campanha (excluir leads movidos para Convertido/Perdido)
+    lead_ids = [l['id'] for l in rollover_leads]
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
             FROM campaign_leads cl
-            WHERE cl.campaign_id = %s
+            WHERE cl.id = ANY(%s)
+              AND cl.campaign_id = %s
               AND cl.current_step = 1
-              AND cl.status = 'sent'
-              AND (cl.cadence_status IS NULL OR cl.cadence_status IN ('snoozed', 'pending'))
               AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
-            LIMIT 100
-        """, (cid,))
+        """, (lead_ids, cid))
         rollover_leads = cur.fetchall()
 
     if not rollover_leads:
@@ -711,13 +723,13 @@ def process_rollover(campaign, conn):
         return
 
     folder_id = result.get('folder_id') or result.get('folderId')
-    # Sucesso: mover leads para Follow-up 1 (current_step=2, cadence_status=snoozed)
+    # Sucesso: mover leads para Follow-up 1 (current_step=2, cadence_status=snoozed, status=sent para consistência)
     lead_ids = [l['id'] for l in rollover_leads]
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE campaign_leads
-            SET current_step = 2, cadence_status = 'snoozed', snooze_until = %s
+            SET current_step = 2, cadence_status = 'snoozed', snooze_until = %s, status = 'sent'
             WHERE id = ANY(%s)
             """,
             (target_dt, lead_ids),
