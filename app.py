@@ -1720,8 +1720,7 @@ def scrape():
     # Calcular uso mensal
     cycle_info = ScrapingJob.get_monthly_lead_count(current_user.id, subscription_date)
     
-    # Validar limite (1500 leads por mês)
-    # Validar limite (1500 leads por mês)
+    # Validar limite (2000 leads por mês)
     MONTHLY_LIMIT = 2000
     requested_leads = total
     
@@ -3529,12 +3528,18 @@ def create_campaign():
             steps = data.get('steps', [])
             
             if enable_cadence and steps:
-                # cadence_config: rollover_time (HH:MM), rollover_test_mode (modo teste)
+                # cadence_config: rollover_time (HH:MM), rollover_test_mode (modo teste), rollover_test_delay_minutes
                 rollover_time = data.get('rollover_time', '23:00')
                 if rollover_time and not re.match(r'^\d{1,2}:\d{2}$', str(rollover_time)):
                     rollover_time = '23:00'
                 rollover_test_mode = bool(data.get('rollover_test_mode', False))
-                cadence_config = {'rollover_time': str(rollover_time), 'rollover_test_mode': rollover_test_mode}
+                rollover_test_delay = int(data.get('rollover_test_delay_minutes', 5))
+                rollover_test_delay = max(1, min(60, rollover_test_delay))
+                cadence_config = {
+                    'rollover_time': str(rollover_time),
+                    'rollover_test_mode': rollover_test_mode,
+                    'rollover_test_delay_minutes': rollover_test_delay,
+                }
                 cadence_config_json = json.dumps(cadence_config)
                 cur.execute(
                     """UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = %s,
@@ -3705,12 +3710,18 @@ def create_campaign():
                                 "UPDATE campaigns SET uazapi_folder_id = %s, status = 'running' WHERE id = %s",
                                 (result['folder_id'], campaign_id)
                             )
-                            # Marcar leads como enviados para rollover/cadência funcionar
-                            cur.execute(
-                                """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
-                                   current_step = 1 WHERE campaign_id = %s AND status = 'pending'""",
-                                (campaign_id,)
-                            )
+                            # Com cadência: NÃO marcar em lote — worker_cadence fará sync via list_messages antes do rollover
+                            if not enable_cadence:
+                                cur.execute(
+                                    """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
+                                       current_step = 1 WHERE campaign_id = %s AND status = 'pending'""",
+                                    (campaign_id,)
+                                )
+                            else:
+                                cur.execute(
+                                    """UPDATE campaign_leads SET current_step = 1 WHERE campaign_id = %s AND status = 'pending'""",
+                                    (campaign_id,)
+                                )
                         conn.commit()
                         conn.close()
                     elif result:
@@ -4513,65 +4524,20 @@ def sync_campaign_uazapi_stats(campaign_id):
         if not inst or not inst.get('apikey'):
             return json.dumps({"error": "Instância Uazapi não encontrada"}), 404
 
+        from utils.sync_uazapi import sync_campaign_leads_from_uazapi
         uazapi = UazapiService()
         token = inst['apikey']
         folder_id = campaign['uazapi_folder_id']
-
-        def _extract_phones_from_messages(resp):
-            phones = set()
-            if not resp:
-                return phones
-            msgs = resp.get('messages') or resp.get('data') or []
-            for m in msgs if isinstance(msgs, list) else []:
-                num = m.get('number') or m.get('chatid') or m.get('chatId') or m.get('sender') or ''
-                if num:
-                    clean = re.sub(r'\D', '', str(num).split('@')[0])
-                    if len(clean) >= 10:
-                        phones.add(clean)
-            return phones
-
-        r_sent = uazapi.list_messages(token, folder_id, message_status='Sent', page=1, page_size=1000)
-        r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1000)
-        sent_phones = _extract_phones_from_messages(r_sent)
-        failed_phones = _extract_phones_from_messages(r_failed)
-
-        updated_sent = 0
-        updated_failed = 0
         conn = get_db_connection()
         try:
-            with conn.cursor() as cur:
-                # Match por phone normalizado (apenas dígitos)
-                def _phone_match_params(ph):
-                    if len(ph) <= 11 and not ph.startswith('55'):
-                        return (ph, '55' + ph)  # DB pode ter 55+DDD+num
-                    return (ph, ph)
-
-                for ph in sent_phones:
-                    p1, p2 = _phone_match_params(ph)
-                    cur.execute(
-                        """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW())
-                           WHERE campaign_id = %s AND status != 'sent'
-                           AND regexp_replace(phone, '[^0-9]', '', 'g') IN (%s, %s)""",
-                        (campaign_id, p1, p2)
-                    )
-                    updated_sent += cur.rowcount
-                for ph in failed_phones:
-                    p1, p2 = _phone_match_params(ph)
-                    cur.execute(
-                        """UPDATE campaign_leads SET status = 'failed', sent_at = COALESCE(sent_at, NOW())
-                           WHERE campaign_id = %s AND status NOT IN ('sent', 'failed')
-                           AND regexp_replace(phone, '[^0-9]', '', 'g') IN (%s, %s)""",
-                        (campaign_id, p1, p2)
-                    )
-                    updated_failed += cur.rowcount
-            conn.commit()
+            result = sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi)
         finally:
             conn.close()
 
         return json.dumps({
             "success": True,
-            "synced": {"sent": len(sent_phones), "failed": len(failed_phones)},
-            "updated": {"sent": updated_sent, "failed": updated_failed}
+            "synced": {"sent": result["sent"], "failed": result["failed"]},
+            "updated": {"sent": result["updated_sent"], "failed": result["updated_failed"]}
         })
     except Exception as e:
         print(f"Erro ao sincronizar stats Uazapi campanha {campaign_id}: {e}")

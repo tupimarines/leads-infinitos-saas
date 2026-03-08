@@ -42,6 +42,7 @@ except ImportError:
 
 # Limites compartilhados
 from utils.limits import check_daily_limit, get_user_daily_limit
+from utils.sync_uazapi import sync_campaign_leads_from_uazapi
 
 # Super Admin (gate para mídia Uazapi)
 SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
@@ -314,7 +315,8 @@ def process_cadence():
             # 1. Find active cadence campaigns (para rollover e envio)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_saturday, c.send_sunday
+                    SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_saturday, c.send_sunday,
+                           c.use_uazapi_sender, c.uazapi_folder_id
                     FROM campaigns c
                     WHERE c.enable_cadence = TRUE
                       AND c.status IN ('running', 'pending', 'completed')
@@ -532,6 +534,36 @@ def process_rollover(campaign, conn):
         print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': UazapiService indisponível.")
         return
 
+    # Sync Uazapi → DB antes do rollover (marca envios corretamente via list_messages)
+    if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and instance.get('apikey'):
+        try:
+            sync_result = sync_campaign_leads_from_uazapi(
+                conn, cid, instance['apikey'], campaign['uazapi_folder_id'], uazapi_service
+            )
+            if sync_result.get('updated_sent') or sync_result.get('updated_failed'):
+                print(f"  🔄 [Rollover] Campaign '{campaign['name']}': sync Uazapi → {sync_result}")
+        except Exception as e:
+            print(f"  ⚠️ [Rollover] Campaign '{campaign['name']}': sync Uazapi falhou: {e}")
+
+    # Modo teste + delay: só rollover se MIN(sent_at) >= N minutos
+    rollover_test_delay_minutes = int(cadence_config.get('rollover_test_delay_minutes', 5))
+    if rollover_test_mode and rollover_test_delay_minutes > 0:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT MIN(cl.sent_at) as min_sent
+                FROM campaign_leads cl
+                WHERE cl.campaign_id = %s AND cl.current_step = 1 AND cl.status = 'sent'
+                  AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+            """, (cid,))
+            row = cur.fetchone()
+        min_sent = row and row.get('min_sent')
+        if min_sent:
+            if getattr(min_sent, 'tzinfo', None) is None:
+                min_sent = BRAZIL_TZ.localize(min_sent)
+            elapsed_min = (now_brazil - min_sent).total_seconds() / 60
+            if elapsed_min < rollover_test_delay_minutes:
+                return  # Aguardar delay
+
     # Buscar leads em Inicial (current_step=1, status=sent). Inclui cadence_status NULL (COALESCE evita NULL NOT IN).
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
@@ -606,6 +638,23 @@ def process_rollover(campaign, conn):
                 print(f"  ⚠️ [Rollover] Erro ao ler mídia step 2: {e}")
 
     # Montar mensagens
+    # Re-query imediatamente antes de criar campanha (excluir leads movidos para Convertido/Perdido)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s
+              AND cl.current_step = 1
+              AND cl.status = 'sent'
+              AND (cl.cadence_status IS NULL OR cl.cadence_status IN ('snoozed', 'pending'))
+              AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+            LIMIT 100
+        """, (cid,))
+        rollover_leads = cur.fetchall()
+
+    if not rollover_leads:
+        return
+
     raw_tpl = step2.get('message_template') or '[]'
     try:
         parsed = json.loads(raw_tpl)
@@ -747,6 +796,24 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
                 media_type = step_cfg.get('media_type') or 'image'
             except Exception as e:
                 print(f"  ⚠️ [Rollover {step_label}] Erro ao ler mídia: {e}")
+
+    # Re-query imediatamente antes de criar campanha (excluir leads movidos para Convertido/Perdido)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s
+              AND cl.current_step = %s
+              AND cl.status = 'sent'
+              AND cl.cadence_status = 'snoozed'
+              AND cl.snooze_until <= NOW()
+              AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+            LIMIT 100
+        """, (cid, from_step))
+        rollover_leads = cur.fetchall()
+
+    if not rollover_leads:
+        return
 
     raw_tpl = step_cfg.get('message_template') or '[]'
     try:
