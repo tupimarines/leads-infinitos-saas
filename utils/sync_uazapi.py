@@ -29,15 +29,44 @@ def normalize_phone_for_match(raw):
     return variants
 
 
-def _extract_phones_from_message(m):
-    """Extrai número normalizado (apenas dígitos) de um item de mensagem."""
-    num = m.get("number") or m.get("chatid") or m.get("chatId") or m.get("sender") or ""
-    if not num:
+# Campos conhecidos da API Uazapi para extração de telefone (ordem de prioridade).
+_PHONE_FIELDS = (
+    "number", "chatid", "chatId", "sender", "senderpn", "jid",
+    "recipient", "to", "wa_id", "phoneNumber"
+)
+
+
+def _normalize_phone_value(val):
+    """Extrai dígitos de valor (string ou número); remove sufixo @s.whatsapp.net."""
+    if val is None:
         return None
-    raw = str(num).split("@")[0]
+    raw = str(val).split("@")[0]  # remotejid: 55xxx@s.whatsapp.net -> 55xxx
     clean = re.sub(r"\D", "", raw)
-    if len(clean) >= 10:
-        return clean
+    return clean if len(clean) >= 10 else None
+
+
+def _extract_phones_from_message(m):
+    """
+    Extrai número normalizado (apenas dígitos) de um item de mensagem.
+    API Uazapi retorna em formato remotejid (ex: 554137984966@s.whatsapp.net) em chatid, senderpn, jid.
+    Ordem: number, chatid, chatId, sender, senderpn, jid, recipient, to, wa_id, phoneNumber.
+    Suporta valores aninhados (dict): busca recursivamente por chaves conhecidas.
+    """
+    if not isinstance(m, dict):
+        return None
+    for key in _PHONE_FIELDS:
+        val = m.get(key)
+        if val is None:
+            continue
+        if isinstance(val, dict):
+            # Parse recursivo: objeto aninhado pode ter number, chatid, etc.
+            ph = _extract_phones_from_message(val)
+            if ph:
+                return ph
+        else:
+            ph = _normalize_phone_value(val)
+            if ph:
+                return ph
     return None
 
 
@@ -123,6 +152,19 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         return {"sent": 0, "failed": 0, "updated_sent": 0, "updated_failed": 0}
 
     debug = os.environ.get("DEBUG_SYNC_UAZAPI") == "1"
+    if debug:
+        raw_sent = uazapi_service.list_messages(
+            token, folder_id, message_status="Sent", page=1, page_size=1
+        )
+        first_msg = None
+        if raw_sent:
+            msgs = raw_sent.get("messages") or raw_sent.get("data")
+            if isinstance(msgs, list) and msgs:
+                first_msg = msgs[0]
+            elif isinstance(msgs, dict):
+                first_msg = msgs
+        if first_msg:
+            print(f"[sync_uazapi] first_message_structure: {first_msg}")
     sent_phones = fetch_all_phones_by_status(
         uazapi_service, token, folder_id, "Sent"
     )

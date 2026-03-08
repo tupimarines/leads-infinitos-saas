@@ -1,8 +1,8 @@
-# Problem Solving Session: Cards não avançam automaticamente no pipeline de cadência
+# Problem Solving Session: Match de telefone no Rollover/Sync Uazapi
 
 **Date:** 2026-03-08
 **Problem Solver:** Augusto
-**Problem Category:** Bug técnico / Sincronização de dados
+**Problem Category:** Technical / Integração API
 
 ---
 
@@ -10,29 +10,34 @@
 
 ### Initial Problem Statement
 
-Os cards de leads não avançam automaticamente no Kanban após o período definido (Modo teste com delay de 5 min, rollover às 23:00). O worker_cadence roda mas reporta consistentemente "0 leads elegíveis (precisa status=sent). Inicial: pending=3" (ou pending=2, pending=4).
+O worker de cadência reporta dois logs consecutivos:
+1. **Sync:** `API retornou 1 Sent mas 0 atualizados no DB (verificar match de telefone)`
+2. **Rollover:** `API retornou 1 Sent mas 0 leads em Inicial deram match`
+
+A suspeita é que **o parse pode estar dando problemas** — ou seja, a extração do número de telefone da resposta da API Uazapi (`list_messages`) pode estar falhando ou retornando formato incompatível com o que está no banco.
 
 ### Refined Problem Statement
 
-**O que EXATAMENTE está errado:** O rollover Inicial→FU1 exige `campaign_leads.status = 'sent'`, mas os leads permanecem com `status = 'pending'` no banco, mesmo quando a Uazapi já reportou os envios como concluídos (dashboard mostra "Enviados: 4, Pendentes: 0").
+**O quê exatamente está errado:** O match entre os telefones retornados pela API Uazapi (`list_messages` status Sent) e os leads em `campaign_leads` está falhando. A API indica 1 envio confirmado, mas nenhum lead é atualizado no sync nem considerado elegível no rollover.
 
-**Gap:** A fonte de verdade para stats (API Uazapi list_messages) indica envios concluídos, mas a tabela `campaign_leads` não é atualizada pelo sync, deixando os leads "presos" em pending e bloqueando o rollover.
+**Gap entre estado atual e desejado:**
+- **Atual:** API diz 1 Sent → 0 leads atualizados no DB, 0 leads em Inicial com match
+- **Desejado:** API diz 1 Sent → 1 lead atualizado (sync) e, se estiver em Inicial, elegível para rollover
+
+**Por que vale resolver:** O rollover usa a API como fonte de verdade. Se o match falha, leads que receberam a mensagem não avançam para Follow-up 1, gerando divergência entre dashboard (que usa API) e o fluxo de cadência.
 
 ### Problem Context
 
-- **Campanhas afetadas:** teste225, teste-roul
-- **Config:** Modo teste ativo, rollover 23:00, delay 5 min, horário de envio 8h–20h (dias úteis)
-- **Evidências:**
-  - Dashboard: "Enviados: 4, Pendentes: 0" (stats vêm da Uazapi)
-  - Kanban: 3 cards em Inicial sem indicador "Enviado"; 1 em Convertido com "✓ Enviado 08/03, 01:36"
-  - Logs: "0 leads elegíveis (precisa status=sent). Inicial: pending=3"
-  - Kanban header: "1 Envios concluídos" (uazapi_stats.initial_campaign_finished)
+- **Campanha:** teste9999 (4 leads, cadência ativa)
+- **Kanban:** João Silva (554137984966) em **Convertido** com status ✔ Enviado; Ana Costa, Maria Santos, Pedro Oliveira em **Inicial**
+- **Fluxo:** Sync roda antes do rollover; ambos usam `normalize_phone_for_match` e `_extract_phones_from_message` para cruzar API ↔ DB
+- **Hipótese do usuário:** O parse (extração do número da estrutura da API) pode estar incorreto — campo errado, estrutura aninhada diferente, ou formato retornado pela Uazapi não previsto
 
 ### Success Criteria
 
-- Leads com envio reportado pela Uazapi como Sent devem ter `campaign_leads.status = 'sent'`
-- Rollover deve mover leads elegíveis (status=sent, não converted/lost) para FU1
-- Cards no Kanban devem refletir o status real (enviado vs agendado)
+- [ ] Sync atualiza corretamente `campaign_leads.status` quando a API retorna Sent para um lead existente
+- [ ] Rollover identifica leads em Inicial cujo telefone consta em `list_messages(Sent)`
+- [ ] Match funciona independente do formato em que a API retorna o número (ex.: `number`, `chatid`, `chatId`, `sender`, com ou sem `@s.whatsapp.net`)
 
 ---
 
@@ -40,42 +45,73 @@ Os cards de leads não avançam automaticamente no Kanban após o período defin
 
 ### Problem Boundaries (Is/Is Not)
 
-| Dimensão | É | Não é |
-|----------|---|-------|
-| **Onde** | Campanhas Uazapi com cadência (teste225, teste-roul) | Campanhas MegaAPI; campanhas sem cadência |
-| **Quando** | Após create_advanced_campaign da mensagem inicial; durante "Off hours" | Durante horário comercial de envio |
-| **Quem** | Leads em Inicial (current_step=1) | Leads em FU1, FU2, Convertido, Perdido |
-| **O quê** | Sync Uazapi→DB não atualiza campaign_leads; rollover não encontra leads elegíveis | Problema de envio na Uazapi; problema de UI pura |
+**Onde o problema OCORRE:**
+- Campanhas com `use_uazapi_sender=true` e `uazapi_folder_id`
+- Fluxo sync (atualização de status) e rollover (elegibilidade para FU1)
+- Match entre telefones da API `list_messages(Sent)` e `campaign_leads`
 
-**Padrão:** A Uazapi reporta envios (list_messages Sent), mas o sync não grava `status='sent'` nos leads correspondentes. O worker depende do DB, não da API.
+**Onde o problema NÃO ocorre:**
+- Campanhas MegaAPI (não usam list_messages)
+- Dashboard/stats (usa API diretamente, não depende do match)
+- Campanhas Uazapi sem cadência (rollover não aplicável)
 
-### Root Cause Analysis (Five Whys)
+**Quando OCORRE:**
+- Ao rodar sync antes do rollover
+- Quando a API retorna Sent > 0 (há envios confirmados)
+- Em todo ciclo do worker_cadence para campanhas elegíveis
 
-1. **Por que os cards não avançam?** → Porque o rollover não encontra leads com status=sent.
-2. **Por que não há leads com status=sent?** → Porque o sync (list_messages → UPDATE campaign_leads) não está atualizando os registros.
-3. **Por que o sync não atualiza?** → Hipóteses: (a) sync não roda no worker, (b) matching de telefone falha, (c) API retorna formato inesperado, (d) folder_id incorreto.
-4. **Por que o matching falharia?** → Diferença de formato entre número na API (ex: "5511999999999") e no DB (ex: "11999999999", ou em whatsapp_link).
-5. **Causa raiz provável:** O sync executa, mas o **match por telefone** entre `list_messages` e `campaign_leads` falha por diferença de formato/normalização, ou a API retorna estrutura diferente da esperada.
+**Quando NÃO ocorre:**
+- Se API retorna 0 Sent (nada para fazer match)
+- Se campanha não tem uazapi_folder_id ou instância Uazapi
+
+**Quem É afetado:**
+- João Silva: sempre o primeiro enviado na planilha; o 1 Sent da API confirma que é ele
+- Ana, Maria, Pedro: em Inicial; **não atualizam por razões desconhecidas** quando eventualmente forem enviados
+
+**Quem NÃO é afetado:**
+- Leads em campanhas MegaAPI
+- Stats/dashboard (fonte é a API)
+
+**O que É o problema:**
+- Falha no match telefone API ↔ DB
+- Possíveis causas: (a) parse extrai campo errado ou formato diferente, (b) normalização não cobre o formato retornado, (c) estrutura da resposta da API diferente do esperado
+
+**O que NÃO é o problema:**
+- API não retorna dados (retorna 1 Sent)
+- list_messages funciona (conta está correta)
+- normalize_phone_for_match em si (lógica testada com formatos comuns)
+
+### Root Cause Analysis
+
+**Método: Five Whys**
+
+1. **Por que o sync retorna 0 atualizados?**  
+   → Porque nenhum lead no DB deu match com os telefones retornados pela API.
+
+2. **Por que não há match?**  
+   → Porque o telefone extraído da API (via `_extract_phones_from_message`) não coincide com o telefone armazenado no DB, mesmo após normalização.
+
+3. **Por que não coincide?**  
+   → Porque (a) a API retorna o número em campo ou formato diferente do esperado, ou (b) o valor extraído está incorreto/nulo.
+
+4. **Por que o valor extraído está incorreto?**  
+   → Porque `_extract_phones_from_message` usa `number`, `chatid`, `chatId`, `sender` — a Uazapi pode usar outro campo (ex.: `recipient`, `to`, `jid`) ou estrutura aninhada para mensagens de campanha.
+
+5. **Por que isso é a causa raiz?**  
+   → Porque sem ver a estrutura real da resposta de `list_messages` para campanhas, estamos assumindo campos que podem não existir ou ter nomes diferentes.
+
+**Causa raiz provável:** O parse (`_extract_phones_from_message`) não considera todos os campos possíveis da resposta da Uazapi para mensagens de campanha, ou a estrutura retornada difere do schema genérico de Message.
 
 ### Contributing Factors
 
-- Stats (dashboard) vêm de `get_uazapi_campaign_counts` (conta mensagens); Kanban e rollover vêm de `campaign_leads` (status por lead).
-- Duas fontes de verdade: API Uazapi vs DB. O sync é a ponte; se falha, as fontes divergem.
-- Logs não mostram "sync Uazapi → {...}" com updated_sent > 0, sugerindo que o sync retorna 0 atualizações.
+- Falta de log da estrutura bruta da primeira mensagem em ambiente de debug
+- Schema OpenAPI da Uazapi (Message) descreve chat genérico; mensagens de campanha podem ter estrutura própria
+- Rota `/api/campaigns/<id>/sync-debug` existe mas usa `_fetch_all_phones_by_status` (renomeado para `fetch_all_phones_by_status`) — import quebrado pode impedir diagnóstico
 
 ### System Dynamics
 
-```
-[Uazapi API] list_messages(Sent) → N mensagens
-       ↓
-[sync_campaign_leads_from_uazapi] extrai phones, UPDATE campaign_leads
-       ↓ (match por regexp_replace(phone) IN (p1,p2))
-[campaign_leads] status = 'sent'  ← FALHA AQUI (0 rows updated)
-       ↓
-[process_rollover] SELECT ... WHERE status='sent' → 0 rows
-       ↓
-"0 leads elegíveis (precisa status=sent)"
-```
+- **Feedback loop:** Sync falha → status não atualiza → rollover não avança → leads ficam em Inicial
+- **Leverage point:** Corrigir o parse para extrair o número corretamente da estrutura real da API
 
 ---
 
@@ -83,87 +119,176 @@ Os cards de leads não avançam automaticamente no Kanban após o período defin
 
 ### Force Field Analysis
 
-**Driving Forces:**
-- Código de sync já existe (utils/sync_uazapi.py) com paginação e match por whatsapp_link
-- Kanban chama sync ao carregar; worker chama sync antes do rollover
-- Stats da Uazapi funcionam (dashboard mostra 4 enviados)
+**Driving Forces (Supporting Solution):**
+- Rota sync-debug já existe — basta corrigir import e usar para inspecionar estrutura real da API
+- Código de parse é centralizado em `_extract_phones_from_message` — alteração em um ponto beneficia sync e rollover
+- OpenAPI da Uazapi disponível no projeto — referência para campos possíveis
+- Solução é localizada (utils/sync_uazapi.py) — baixo risco de regressão
 
-**Restraining Forces:**
-- Formato de retorno da API Uazapi pode variar (number, chatid, chatId, sender)
-- Telefones no DB podem vir de CSV/upload com formatos diversos
-- Falta de logs detalhados no sync dificulta diagnóstico
+**Restraining Forces (Blocking Solution):**
+- Estrutura real da API não documentada para `list_messages` de campanhas — schema Message pode não refletir o payload
+- Sem acesso direto à API em tempo real — diagnóstico depende de log ou sync-debug em ambiente com dados
 
 ### Constraint Identification
 
-- **Gargalo:** O UPDATE no sync afeta 0 linhas — o WHERE com regexp_replace + IN (p1,p2) não encontra correspondência.
-- **Limite real:** Precisamos garantir que o número extraído da API e o número no DB (phone ou whatsapp_link) normalizem para o mesmo valor.
-- **Limite assumido:** "Já adicionamos whatsapp_link" — pode não cobrir todos os casos (ex: phone com espaços, parênteses, hífen).
+- **Gargalo:** Parse depende de conhecer os campos exatos retornados pela Uazapi para mensagens de campanha
+- **Limite real:** Documentação da API pode estar incompleta ou desatualizada
+- **Limite assumido:** Que `number`, `chatid`, `sender` cobrem todos os casos — a verificar
 
 ### Key Insights
 
-1. **Divergência de fontes:** Dashboard (API) ≠ Kanban/rollover (DB). O sync é o elo.
-2. **Sync silencioso:** Se updated_sent=0, não há log explícito. O worker só loga quando updated_sent ou updated_failed > 0.
-3. **Debug necessário:** Inserir logs no sync com: phones retornados pela API, amostra de phones no DB, e rowcount do UPDATE.
+- **Leverage point:** Corrigir import do sync-debug e chamar a rota com a campanha teste9999 para obter `first_message_structure` — isso revela os campos reais
+- **Solução defensiva:** Expandir `_extract_phones_from_message` para tentar mais campos (`recipient`, `to`, `jid`, `chatId`, etc.) e estruturas aninhadas
+- **Validação:** Após correção, sync-debug deve mostrar `matched_count > 0` quando API retornar Sent para leads existentes
 
 ---
 
 ## 💡 SOLUTION GENERATION
 
-### Método: Assumption Busting + Debug Instrumentado
+### Methods Used
 
-**Soluções geradas:**
+- **Assumption Busting:** Desafiar a premissa de que `number`/`chatid`/`sender` cobrem todos os casos
+- **SCAMPER (Substitute, Combine, Adapt):** Adaptar o parse para múltiplos formatos; combinar extração com fallbacks
 
-1. **Adicionar logs de debug no sync** — Logar `sent_phones` (amostra), `failed_phones`, e rowcount após cada UPDATE. Permitir diagnóstico sem alterar lógica.
-2. **Expandir normalização de telefone** — Incluir mais formatos: remover parênteses, hífens, espaços; aceitar "55 11 99999-9999" → "5511999999999".
-3. **Match por múltiplos campos** — Se phone vazio, tentar extrair de whatsapp_link (wa.me/5511999999999) e usar no UPDATE.
-4. **Rota de debug** — GET /api/campaigns/<id>/sync-debug que retorna: phones da API, phones no DB (amostra), e resultado do match simulado.
-5. **Fallback: marcar como sent por current_step** — Se sync falhar mas stats mostrarem sent=N, considerar marcar leads em Inicial como sent após timeout. (Arriscado — pode marcar antes do envio real.)
-6. **Unificar fonte de verdade** — Rollover consultar API diretamente em vez de DB. (Mudança arquitetural grande.)
-7. **Validação na criação da campanha** — Ao criar campanha Uazapi, garantir que phones em campaign_leads estão no formato que a API usa (5511999999999).
+### Generated Solutions
 
-### Recomendação
+1. **Expandir campos no parse** — Adicionar `recipient`, `to`, `jid`, `chatId` (camelCase), `wa_id`, `phoneNumber` à ordem de tentativa em `_extract_phones_from_message`
+2. **Parse recursivo em objetos** — Se o valor for dict, buscar recursivamente por chaves conhecidas (number, chatid, etc.)
+3. **Corrigir sync-debug** — Atualizar import para `fetch_all_phones_by_status`; usuário chama a rota e inspeciona `first_message_structure` para descobrir o campo real
+4. **Log da estrutura bruta** — Com `DEBUG_SYNC_UAZAPI=1`, logar a primeira mensagem retornada pela API para diagnóstico
+5. **Fallback por posição** — Se mensagem for lista/array, tentar índice 0 como número (para estruturas não-padrão)
+6. **Normalização mais agressiva** — Extrair qualquer sequência de 10+ dígitos do JSON serializado da mensagem como último recurso
+7. **Webhook Uazapi** — Se a Uazapi enviar webhooks de confirmação de envio, usar como fonte alternativa (fora do escopo imediato)
+8. **Teste unitário com mock** — Criar teste que simula resposta da API com estrutura real (após descobrir via sync-debug)
+9. **Documentar estrutura** — Após descobrir, documentar em `_extract_phones_from_message` ou em docstring os campos suportados
+10. **Múltiplas extrações por mensagem** — Tentar todos os campos; retornar o primeiro que passar validação (>= 10 dígitos)
 
-**Solução 1 + 2 + 4:** Instrumentar o sync com logs, ampliar a normalização e criar rota de debug para validar o match. Isso permite confirmar a causa e corrigir sem mudanças estruturais.
+### Creative Alternatives
+
+- **Reverse:** Em vez de parse da API, usar o payload enviado em `create_advanced_campaign` — armazenar `{folder_id: [numbers]}` e cruzar por folder (requer mudança de arquitetura)
+- **Assumption bust:** E se a API retornar o número em base64 ou em campo aninhado? — Adicionar tentativa de decode e navegação em objetos aninhados
+- **Lateral:** Usar regex no JSON bruto da resposta para capturar padrões `"number":"5511999999999"` ou `"chatid":"55...@s.whatsapp.net"` — independente da estrutura
+
+---
+
+## ⚖️ SOLUTION EVALUATION
+
+### Evaluation Criteria
+
+- **Efetividade** — Resolve o match?
+- **Viabilidade** — Implementação simples?
+- **Risco** — Regressão em outros fluxos?
+- **Manutenção** — Código claro e documentado?
+
+### Solution Analysis
+
+| Solução | Efetividade | Viabilidade | Risco | Nota |
+|---------|-------------|-------------|-------|------|
+| Expandir parse (chatid, senderpn, jid) | Alta | Alta | Baixo | **Alinhado com feedback do usuário** |
+| Corrigir sync-debug | Média (diagnóstico) | Alta | Nenhum | Complementar |
+| Log DEBUG_SYNC_UAZAPI | Média (diagnóstico) | Alta | Nenhum | Complementar |
+| Regex no JSON bruto | Alta | Média | Médio | Fallback se estrutura variar |
+
+### Recommended Solution
+
+**Expandir `_extract_phones_from_message` para priorizar `chatid`, `senderpn`, `jid`** — a API retorna o número em formato **remotejid** (ex.: `554137984966@s.whatsapp.net`). Normalizar após extração: remover sufixo `@s.whatsapp.net` ou `@g.us`, extrair apenas dígitos.
+
+**Ordem de tentativa:** `number` → `chatid` → `chatId` → `sender` → `senderpn` → `jid` → `recipient` → `to`
+
+**Normalização:** `str(val).split("@")[0]` seguido de `re.sub(r"\D", "", ...)` — já parcialmente implementado; garantir que remotejid seja tratado.
+
+### Rationale
+
+- Usuário confirmou: API usa **chatid, senderpn ou jid**, valor em formato **remotejid**
+- Solução direta: adicionar esses campos e normalizar (lógica já existe para `@`)
+- Baixo risco: apenas expande campos tentados; não altera lógica de match
+- Corrigir sync-debug em paralelo para validar e futura diagnose
 
 ---
 
 ## 🚀 IMPLEMENTATION PLAN
 
+### Implementation Approach
+
+Implementação incremental: (1) expandir parse com chatid/senderpn/jid e normalização remotejid; (2) corrigir sync-debug para validação.
+
 ### Action Steps
 
-1. Adicionar logs no `sync_campaign_leads_from_uazapi`: logar len(sent_phones), amostra de 2–3 phones, e rowcount do UPDATE.
-2. Revisar `_extract_phones_from_message` e `_phone_match_params` para cobrir mais formatos.
-3. Criar rota GET `/api/campaigns/<id>/sync-debug` (ou parâmetro ?debug=1 no sync) que retorna phones da API vs phones no DB.
-4. Executar sync manualmente (botão no Kanban) e verificar logs.
-5. Se match falhar, ajustar regex/normalização com base no output do debug.
+1. **Alterar `_extract_phones_from_message` em `utils/sync_uazapi.py`:** ✅
+   - Ordem de campos: `number`, `chatid`, `chatId`, `sender`, `senderpn`, `jid`, `recipient`, `to`, `wa_id`, `phoneNumber`
+   - Para cada valor: `raw = str(val).split("@")[0]` (remove remotejid), `clean = re.sub(r"\D", "", raw)`
+   - Retornar `clean` se `len(clean) >= 10`
+   - Parse recursivo: se valor for dict, buscar recursivamente por chaves conhecidas
 
-### Recursos
+2. **Corrigir import em `app.py` (sync-debug):** ✅ (já estava correto: `fetch_all_phones_by_status`)
 
-- Acesso ao código (utils/sync_uazapi.py, app.py)
-- Logs do worker_cadence
-- Possibilidade de testar com campanha real (teste225)
+3. **Corrigir `scripts/run_sync_debug.py`:** ✅ (já estava correto)
+
+4. **Log DEBUG_SYNC_UAZAPI:** ✅ Adicionado log de `first_message_structure` quando `DEBUG_SYNC_UAZAPI=1`
+
+5. **Validar:** Rodar sync-debug na campanha teste9999; verificar `matched_count > 0` e `first_message_structure` exibindo o campo usado
+
+### Timeline and Milestones
+
+- Milestone 1: Parse expandido e sync-debug corrigido
+- Milestone 2: Validação em campanha real (teste9999)
+
+### Resource Requirements
+
+- Acesso à campanha teste9999 e instância Uazapi conectada
+- Ambiente com DB e API Uazapi disponíveis
+
+### Responsible Parties
+
+- Desenvolvedor: implementação
+- Augusto: validação em campanha real
 
 ---
 
-## ✅ IMPLEMENTADO (Debug)
+## 📈 MONITORING AND VALIDATION
 
-1. **Rota GET `/api/campaigns/<id>/sync-debug`** — Retorna:
-   - `api.sent_phones`: telefones extraídos da Uazapi (list_messages Sent)
-   - `api.first_message_structure`: estrutura bruta da primeira mensagem (para ver keys)
-   - `db_leads_sample`: leads no DB com phone_norm e wa_norm
-   - `match.unmatched_from_api`: phones da API que não encontraram match no DB
-   - `match.unmatched_from_db`: leads no DB que não batem com nenhum phone da API
+### Success Metrics
 
-2. **Log no worker** — Quando API retorna Sent > 0 mas updated_sent = 0: `⚠️ API retornou N Sent mas 0 atualizados no DB (verificar match de telefone)`
+- Sync atualiza ≥1 lead quando API retorna Sent para leads existentes
+- Rollover identifica leads em Inicial que constam em list_messages(Sent)
+- Logs não exibem mais "0 atualizados no DB" ou "0 leads em Inicial deram match" quando há Sent na API
 
-3. **DEBUG_SYNC_UAZAPI=1** — Variável de ambiente para logar sent_phones no sync
+### Validation Plan
 
-### Como usar o debug
+1. Chamar `GET /api/campaigns/<id>/sync-debug` na campanha teste9999 — verificar `matched_count > 0`, `first_message_structure` com chatid/senderpn/jid
+2. Rodar worker_cadence — verificar que sync atualiza e rollover avança quando aplicável
+3. Conferir Kanban — leads com status Sent na API devem aparecer atualizados
 
-1. Acesse `GET /api/campaigns/117/sync-debug` (substitua 117 pelo ID da campanha teste225)
-2. Analise `unmatched_from_api` e `unmatched_from_db` — se houver itens, o formato difere
-3. Compare `first_message_structure` com os campos que usamos (number, chatid, chatId, sender)
-4. Ajuste `_extract_phones_from_message` ou `_phone_match_params` conforme necessário
+### Risk Mitigation
+
+- Manter fallback para `number`/`chatid`/`sender` — não remover campos existentes
+- Se novo formato surgir: sync-debug permite inspecionar estrutura e adicionar campo
+
+### Adjustment Triggers
+
+- Se matched_count continuar 0 após alteração: inspecionar `first_message_structure` e adicionar o campo real
+- Se API mudar formato: expandir parse ou considerar regex no JSON bruto
+
+---
+
+## 📝 LESSONS LEARNED
+
+### Key Learnings
+
+- API Uazapi usa `chatid`, `senderpn` ou `jid` com formato remotejid para mensagens de campanha
+- Sync-debug é essencial para diagnosticar divergências API ↔ DB
+- Manter imports atualizados ao renomear funções (fetch_all_phones_by_status)
+
+### What Worked
+
+- Five Whys para chegar à causa raiz (parse)
+- Is/Is Not para delimitar escopo
+- Feedback do usuário confirmando campos da API (chatid, senderpn, jid, remotejid)
+
+### What to Avoid
+
+- Assumir que schema OpenAPI reflete payload real de todos os endpoints
+- Renomear funções sem atualizar todos os imports (app.py, scripts)
 
 ---
 
