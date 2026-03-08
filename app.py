@@ -2173,11 +2173,37 @@ def campaign_kanban(campaign_id):
 @app.route('/api/campaigns/<int:campaign_id>/kanban-data')
 @login_required
 def campaign_kanban_data(campaign_id):
-    """API: Get all leads for the kanban board"""
+    """API: Get all leads for the kanban board. Para Uazapi: sync antes de retornar + stats."""
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         return json.dumps({'error': 'Campanha não encontrada'}), 404
-    
+
+    stats = None
+    if getattr(campaign, 'use_uazapi_sender', False) and getattr(campaign, 'uazapi_folder_id', None):
+        conn_sync = get_db_connection()
+        try:
+            with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT i.apikey FROM campaign_instances ci
+                    JOIN instances i ON i.id = ci.instance_id
+                    WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                    LIMIT 1
+                """, (campaign_id,))
+                inst = cur.fetchone()
+            if inst and inst.get('apikey'):
+                from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
+                uazapi = UazapiService()
+                sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
+                counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
+                stats = {
+                    "sent": counts.get("sent", 0),
+                    "failed": counts.get("failed", 0),
+                    "scheduled": counts.get("scheduled", 0),
+                    "initial_campaign_finished": is_initial_campaign_finished(counts),
+                }
+        finally:
+            conn_sync.close()
+
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
@@ -2205,8 +2231,11 @@ def campaign_kanban_data(campaign_id):
             if row.get(key):
                 row[key] = row[key].isoformat()
         serialized.append(row)
-    
-    return json.dumps({'leads': serialized, 'campaign_id': campaign_id})
+
+    out = {'leads': serialized, 'campaign_id': campaign_id}
+    if stats:
+        out['uazapi_stats'] = stats
+    return json.dumps(out)
 
 
 @app.route('/api/campaigns/<int:campaign_id>/leads/<int:lead_id>/move', methods=['POST'])
@@ -4381,6 +4410,7 @@ def get_campaign_stats(campaign_id):
         # Campanhas Uazapi: campaign_leads nunca é atualizado pelo envio remoto.
         # Buscar contagens reais via API Uazapi.
         # Estratégia: 1) list_folders (log_sucess/log_failed) como fonte primária; 2) list_messages como fallback.
+        uazapi_scheduled = 0
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
             try:
                 conn2 = get_db_connection()
@@ -4416,33 +4446,17 @@ def get_campaign_stats(campaign_id):
                                 source_used = "list_folders"
                                 break
 
-                    # 2) Fallback: list_messages por status (pageSize maior para parsing robusto)
+                    # 2) Fallback: list_messages com paginação completa (get_uazapi_campaign_counts)
                     if source_used is None:
-                        def _count_listmessages(r):
-                            if not r:
-                                return 0
-                            p = r.get('pagination') or {}
-                            if isinstance(p, dict):
-                                total = int(p.get('total', 0) or p.get('totalRecords', 0) or 0)
-                                if total > 0:
-                                    return total
-                            msgs = r.get('messages') or r.get('data') or []
-                            if isinstance(msgs, list):
-                                return len(msgs)
-                            return 0
-
-                        r_sent = uazapi.list_messages(token, folder_id, message_status='Sent', page=1, page_size=1000)
-                        r_failed = uazapi.list_messages(token, folder_id, message_status='Failed', page=1, page_size=1000)
-                        r_scheduled = uazapi.list_messages(token, folder_id, message_status='Scheduled', page=1, page_size=1000)
-                        uazapi_sent = _count_listmessages(r_sent)
-                        uazapi_failed = _count_listmessages(r_failed)
-                        uazapi_scheduled = _count_listmessages(r_scheduled)
+                        from utils.sync_uazapi import get_uazapi_campaign_counts
+                        counts = get_uazapi_campaign_counts(uazapi, token, folder_id)
+                        uazapi_sent = counts.get("sent", 0)
+                        uazapi_failed = counts.get("failed", 0)
+                        uazapi_scheduled = counts.get("scheduled", 0)
                         uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled, "source": "list_messages"}
                         source_used = "list_messages"
                         if request.args.get('debug') == '1' and uazapi_sent == 0 and uazapi_failed == 0 and uazapi_scheduled == 0:
-                            uazapi_debug["_raw_sent"] = r_sent
-                            uazapi_debug["_raw_failed"] = r_failed
-                            uazapi_debug["_raw_scheduled"] = r_scheduled
+                            uazapi_debug["_counts"] = counts
 
                     if uazapi_sent > 0 or uazapi_failed > 0 or uazapi_scheduled > 0:
                         sent = uazapi_sent
@@ -4472,6 +4486,8 @@ def get_campaign_stats(campaign_id):
             "started_at": stats['started_at'].isoformat() if stats['started_at'] else None,
             "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None
         }
+        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
+            result["scheduled"] = uazapi_scheduled
         
         # Debug: ?debug=1 retorna fonte e dados brutos para diagnóstico
         if request.args.get('debug') == '1':

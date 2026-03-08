@@ -42,7 +42,7 @@ except ImportError:
 
 # Limites compartilhados
 from utils.limits import check_daily_limit, get_user_daily_limit
-from utils.sync_uazapi import sync_campaign_leads_from_uazapi
+from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
 
 # Super Admin (gate para mídia Uazapi)
 SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
@@ -542,6 +542,11 @@ def process_rollover(campaign, conn):
             )
             if sync_result.get('updated_sent') or sync_result.get('updated_failed'):
                 print(f"  🔄 [Rollover] Campaign '{campaign['name']}': sync Uazapi → {sync_result}")
+            # Só prosseguir rollover quando campanha inicial terminou (Scheduled=0)
+            counts = get_uazapi_campaign_counts(uazapi_service, instance['apikey'], campaign['uazapi_folder_id'])
+            if not is_initial_campaign_finished(counts):
+                print(f"  ⏭️ [Rollover] Campaign '{campaign['name']}': campanha inicial ainda enviando (scheduled={counts.get('scheduled', 0)}). Aguardando.")
+                return
         except Exception as e:
             print(f"  ⚠️ [Rollover] Campaign '{campaign['name']}': sync Uazapi falhou: {e}")
 
