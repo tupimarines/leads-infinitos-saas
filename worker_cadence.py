@@ -542,6 +542,8 @@ def process_rollover(campaign, conn):
             )
             if sync_result.get('updated_sent') or sync_result.get('updated_failed'):
                 print(f"  🔄 [Rollover] Campaign '{campaign['name']}': sync Uazapi → {sync_result}")
+            elif sync_result.get('sent', 0) > 0 and sync_result.get('updated_sent', 0) == 0:
+                print(f"  ⚠️ [Rollover] Campaign '{campaign['name']}': API retornou {sync_result.get('sent')} Sent mas 0 atualizados no DB (verificar match de telefone)")
             # Só prosseguir rollover quando campanha inicial terminou (Scheduled=0)
             counts = get_uazapi_campaign_counts(uazapi_service, instance['apikey'], campaign['uazapi_folder_id'])
             if not is_initial_campaign_finished(counts):

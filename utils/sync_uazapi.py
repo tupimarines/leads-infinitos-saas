@@ -3,6 +3,7 @@ Sincroniza campaign_leads com a API Uazapi (list_messages).
 Usado por app.py (rota sync-uazapi) e worker_cadence (antes do rollover).
 """
 
+import os
 import re
 
 
@@ -89,7 +90,7 @@ def _fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status
     return phones
 
 
-def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_service):
+def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_service, debug=False):
     """
     Sincroniza status de campaign_leads com list_messages da Uazapi.
     Atualiza status 'sent' e 'failed' no DB conforme retorno da API.
@@ -99,12 +100,16 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     if not uazapi_service or not token or not folder_id:
         return {"sent": 0, "failed": 0, "updated_sent": 0, "updated_failed": 0}
 
+    debug = os.environ.get("DEBUG_SYNC_UAZAPI") == "1"
     sent_phones = _fetch_all_phones_by_status(
         uazapi_service, token, folder_id, "Sent"
     )
     failed_phones = _fetch_all_phones_by_status(
         uazapi_service, token, folder_id, "Failed"
     )
+
+    if debug:
+        print(f"[sync_uazapi] campaign_id={campaign_id} folder_id={folder_id} sent_phones={list(sent_phones)[:5]}... failed_phones={list(failed_phones)[:3]}")
 
     def _phone_match_params(ph):
         if len(ph) <= 11 and not ph.startswith("55"):
@@ -140,6 +145,9 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             )
             updated_failed += cur.rowcount
     conn.commit()
+
+    if debug and (updated_sent > 0 or updated_failed > 0):
+        print(f"[sync_uazapi] campaign_id={campaign_id} updated_sent={updated_sent} updated_failed={updated_failed}")
 
     return {
         "sent": len(sent_phones),

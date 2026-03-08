@@ -4560,6 +4560,125 @@ def sync_campaign_uazapi_stats(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
+@app.route("/api/campaigns/<int:campaign_id>/sync-debug", methods=["GET"])
+@login_required
+def sync_debug_campaign_uazapi(campaign_id):
+    """
+    Debug: compara phones da API Uazapi vs campaign_leads no DB.
+    Útil para diagnosticar por que o sync não atualiza status.
+    """
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT c.id, c.uazapi_folder_id, c.use_uazapi_sender
+                   FROM campaigns c
+                   WHERE c.id = %s AND c.user_id = %s""",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+        conn.close()
+        if not campaign or not campaign.get('use_uazapi_sender') or not campaign.get('uazapi_folder_id'):
+            return json.dumps({"error": "Campanha não usa Uazapi ou sem folder_id"}), 400
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT i.apikey FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+            """, (campaign_id,))
+            inst = cur.fetchone()
+        conn.close()
+        if not inst or not inst.get('apikey'):
+            return json.dumps({"error": "Instância Uazapi não encontrada"}), 404
+
+        from utils.sync_uazapi import _fetch_all_phones_by_status, _extract_phones_from_message
+        uazapi = UazapiService()
+        token = inst['apikey']
+        folder_id = campaign['uazapi_folder_id']
+
+        sent_phones = list(_fetch_all_phones_by_status(uazapi, token, folder_id, "Sent"))
+        failed_phones = list(_fetch_all_phones_by_status(uazapi, token, folder_id, "Failed"))
+
+        # Raw first message (structure)
+        raw_sent = uazapi.list_messages(token, folder_id, message_status="Sent", page=1, page_size=1)
+        first_msg = None
+        if raw_sent:
+            msgs = raw_sent.get("messages") or raw_sent.get("data")
+            if isinstance(msgs, list) and msgs:
+                first_msg = msgs[0]
+            elif isinstance(msgs, dict):
+                first_msg = msgs
+
+        # DB leads: id, phone, whatsapp_link, status, normalized
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, phone, whatsapp_link, status, current_step,
+                       regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') as phone_norm,
+                       regexp_replace(COALESCE(whatsapp_link, ''), '[^0-9]', '', 'g') as wa_norm
+                FROM campaign_leads
+                WHERE campaign_id = %s
+            """, (campaign_id,))
+            db_leads = cur.fetchall()
+        conn.close()
+
+        # Match simulation
+        def _match_params(ph):
+            if len(ph) <= 11 and not ph.startswith("55"):
+                return (ph, "55" + ph)
+            return (ph, ph)
+
+        matched = []
+        unmatched_api = []
+        for ph in sent_phones:
+            p1, p2 = _match_params(ph)
+            found = any(
+                (lead.get("phone_norm") or "") in (p1, p2) or (lead.get("wa_norm") or "") in (p1, p2)
+                for lead in db_leads
+            )
+            if found:
+                matched.append(ph)
+            else:
+                unmatched_api.append(ph)
+
+        unmatched_db = []
+        for lead in db_leads:
+            pn = (lead.get("phone_norm") or "").strip()
+            wn = (lead.get("wa_norm") or "").strip()
+            if not pn and not wn:
+                continue
+            found = any(
+                pn == ph or wn == ph or pn == ("55" + ph) or wn == ("55" + ph)
+                or ("55" + pn) == ph or ("55" + wn) == ph
+                for ph in sent_phones
+            )
+            if not found and lead.get("status") != "sent":
+                unmatched_db.append({"id": lead["id"], "phone": lead["phone"], "whatsapp_link": lead["whatsapp_link"], "phone_norm": pn or "(vazio)", "wa_norm": wn or "(vazio)", "status": lead["status"]})
+
+        return json.dumps({
+            "campaign_id": campaign_id,
+            "folder_id": folder_id,
+            "api": {
+                "sent_phones": sent_phones,
+                "failed_phones": failed_phones,
+                "first_message_structure": first_msg,
+            },
+            "db_leads_sample": [{"id": l["id"], "phone": l["phone"], "whatsapp_link": l["whatsapp_link"], "phone_norm": l.get("phone_norm"), "wa_norm": l.get("wa_norm"), "status": l["status"]} for l in db_leads[:10]],
+            "match": {
+                "matched_count": len(matched),
+                "unmatched_from_api": unmatched_api,
+                "unmatched_from_db": unmatched_db[:10],
+            },
+        }, indent=2)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return json.dumps({"error": str(e)}), 500
+
+
 @app.route("/api/campaigns/<int:campaign_id>/deal", methods=["POST"])
 @login_required
 def update_campaign_deal(campaign_id):
