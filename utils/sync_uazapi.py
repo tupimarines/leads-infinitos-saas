@@ -141,6 +141,10 @@ def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status)
     return phones
 
 
+# Alias para compatibilidade (código antigo importava _fetch_all_phones_by_status)
+_fetch_all_phones_by_status = fetch_all_phones_by_status
+
+
 def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_service, debug=False):
     """
     Sincroniza status de campaign_leads com list_messages da Uazapi.
