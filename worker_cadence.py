@@ -336,11 +336,12 @@ def process_cadence():
                 continue
 
             for campaign in campaigns:
-                # Part B.0: Rollover diário (leads em Inicial → Follow-up 1) — roda mesmo fora do horário comercial
-                process_rollover(campaign, conn)
-                # Part B.0b: Rollover FU1→FU2 e FU2→Despedida (cria campanhas Uazapi agendadas)
-                process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
-                process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
+                # Part B.0: Rollover diário — DESABILITADO para use_uazapi_sender (F7).
+                # Campanhas Uazapi usam apenas botões "Gerar follow up" no Kanban.
+                if not campaign.get('use_uazapi_sender'):
+                    process_rollover(campaign, conn)
+                    process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
+                    process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
                 # Part B.1 e B.2: apenas em horário comercial
                 if is_business_hours():
                     process_campaign_sends(campaign, conn)

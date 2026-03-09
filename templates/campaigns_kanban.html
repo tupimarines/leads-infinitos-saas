@@ -178,6 +178,15 @@
                 <span class="text-red-400" title="Falhas">✗ <span id="statFailed">0</span></span>
                 <span id="statCampaignFinished" class="hidden text-green-500/80" title="Campanha inicial concluída">• Envios concluídos</span>
             </div>
+            {% if campaign.use_uazapi_sender %}
+            <button onclick="validateLeads()"
+                class="text-xs bg-amber-800/30 text-amber-300 px-3 py-2 rounded-lg border border-amber-600/30 hover:bg-amber-700/40 transition-colors flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                Validar lista
+            </button>
+            {% endif %}
             <button onclick="refreshBoard()"
                 class="text-xs bg-gray-800/50 text-gray-300 px-3 py-2 rounded-lg border border-gray-700/50 hover:bg-gray-700/50 transition-colors flex items-center gap-1.5">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -256,6 +265,9 @@
                     <span class="text-sm font-semibold text-gray-200">Inicial</span>
                 </div>
                 <div class="flex items-center gap-2">
+                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    <button onclick="gerarCampanha(1)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    {% endif %}
                     <button onclick="openMessageModal(1, 'Inicial')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -281,6 +293,9 @@
                     <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
                 </div>
                 <div class="flex items-center gap-2">
+                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    <button onclick="gerarCampanha(2)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    {% endif %}
                     <button onclick="openMessageModal(2, 'Follow-up 1')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -306,6 +321,9 @@
                     <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
                 </div>
                 <div class="flex items-center gap-2">
+                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    <button onclick="gerarCampanha(3)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    {% endif %}
                     <button onclick="openMessageModal(3, 'Follow-up 2')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -331,6 +349,9 @@
                     <span class="text-sm font-semibold text-gray-200">Break-up</span>
                 </div>
                 <div class="flex items-center gap-2">
+                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    <button onclick="gerarCampanha(4)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    {% endif %}
                     <button onclick="openMessageModal(4, 'Break-up')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -656,7 +677,44 @@
         }
     }
     const CAMPAIGN_ID = {{ campaign.id }};
+    const USE_UAZAPI = {{ campaign.use_uazapi_sender|tojson }};
     let ALL_LEADS = {};
+
+    async function validateLeads() {
+        if (!USE_UAZAPI) return;
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/validate-leads`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+                showToast(`${data.valid || 0} válidos, ${data.invalid || 0} inválidos`, 'success');
+                refreshBoard();
+            } else {
+                showToast(data.error || 'Erro ao validar', 'error');
+            }
+        } catch (e) {
+            showToast('Erro de conexão', 'error');
+        }
+    }
+
+    async function gerarCampanha(step) {
+        if (!USE_UAZAPI) return;
+        try {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/gerar-campanha`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ step })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                showToast(`Campanha criada: ${data.count || 0} leads`, 'success');
+                refreshBoard();
+            } else {
+                showToast(data.error || 'Erro ao gerar campanha', 'error');
+            }
+        } catch (e) {
+            showToast('Erro de conexão', 'error');
+        }
+    }
     const ROLLOVER_PAUSED = {}; // step -> true se pausado (estado local)
 
     async function toggleRolloverPause(step, ev) {

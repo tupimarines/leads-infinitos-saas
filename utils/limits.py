@@ -46,6 +46,60 @@ def get_user_daily_limit(user_id: int) -> int:
         conn.close()
 
 
+def get_sent_today_count(user_id: int) -> int:
+    """
+    Conta mensagens enviadas hoje (BRT) pelo usuário.
+    """
+    query = """
+    SELECT COUNT(cl.id) as count
+    FROM campaign_leads cl
+    JOIN campaigns c ON cl.campaign_id = c.id
+    WHERE c.user_id = %s
+      AND cl.status = 'sent'
+      AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
+          = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (user_id,))
+            row = cur.fetchone()
+        return row['count'] if row else 0
+    finally:
+        conn.close()
+
+
+def get_sent_today_count_by_instance(instance_id: int) -> int:
+    """
+    Conta campanhas Uazapi criadas hoje para esta instância.
+    Usado para limite 1 campanha por instância por dia.
+    Usa tabela uazapi_instance_sends (registrada ao criar campanha).
+    """
+    query = """
+    SELECT COUNT(*) as count
+    FROM uazapi_instance_sends
+    WHERE instance_id = %s
+      AND date(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
+          = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (instance_id,))
+            row = cur.fetchone()
+        return row['count'] if row else 0
+    finally:
+        conn.close()
+
+
+def can_create_campaign_today(instance_id: int) -> bool:
+    """
+    Retorna True se a instância ainda pode criar campanha hoje (1 por instância por dia).
+    Nova campanha liberada apenas após meia-noite BRT.
+    """
+    return get_sent_today_count_by_instance(instance_id) < 1
+
+
 def check_daily_limit(user_id: int, plan_limit: int) -> bool:
     """
     Verifica se o usuário já atingiu o limite diário de disparos.

@@ -221,12 +221,13 @@ class UazapiService:
             return None
 
     def check_phone(
-        self, token: str, numbers: list[str]
+        self, token: str, numbers: list[str], timeout: int = 15
     ) -> Optional[list[dict[str, Any]]]:
         """
         Verifica números via POST /chat/check.
         numbers: lista de números sem @s.whatsapp.net (ex: ["5511999999999"]).
         Retorna array com objetos contendo isInWhatsapp (camelCase).
+        timeout: segundos (default 15; validate-leads usa 90 para batches grandes).
         """
         url = f"{self.base_url}/chat/check"
         headers = {
@@ -237,7 +238,7 @@ class UazapiService:
 
         try:
             response = requests.post(
-                url, json=payload, headers=headers, timeout=15
+                url, json=payload, headers=headers, timeout=timeout
             )
             if response.status_code != 200:
                 print(f"❌ [Uazapi] check_phone Status: {response.status_code}")

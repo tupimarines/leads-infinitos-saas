@@ -1,12 +1,29 @@
 """
-Sincroniza campaign_leads com a API Uazapi (list_messages).
+Sincroniza campaign_leads com a API Uazapi (list_messages / list_folders).
 Usado por app.py (rota sync-uazapi) e worker_cadence (antes do rollover).
 """
 
+import json
 import os
 import re
 
 from psycopg2.extras import RealDictCursor
+
+
+def _normalize_phone_for_api(phone: str):
+    """
+    Normaliza número para envio à API Uazapi (POST /chat/check, create_advanced_campaign).
+    Extrai dígitos; se 10–11 dígitos sem 55, adiciona 55. Retorna string ou None se inválido.
+    """
+    if not phone:
+        return None
+    raw_str = str(phone).split("@")[0]
+    clean = re.sub(r"\D", "", raw_str)
+    if len(clean) < 10:
+        return None
+    if 10 <= len(clean) <= 11 and not clean.startswith("55"):
+        return "55" + clean
+    return clean
 
 
 def normalize_phone_for_match(raw):
@@ -145,38 +162,118 @@ def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status)
 _fetch_all_phones_by_status = fetch_all_phones_by_status
 
 
+def _sync_folder_via_listfolders(conn, campaign_id, uazapi_service, token, folders_list, folder_id, lead_ids, next_step, cur):
+    """
+    Se folder encontrado em listfolders com status=done e log_sucess>0, marca lead_ids como sent e
+    atualiza current_step para next_step.
+    Retorna número de leads atualizados.
+    """
+    if not folders_list or not isinstance(folders_list, list) or not lead_ids:
+        return 0
+    folder_info = None
+    for f in folders_list:
+        fid = f.get("id") or f.get("folder_id") or f.get("folderId")
+        if str(fid) == str(folder_id):
+            folder_info = f
+            break
+    if not folder_info:
+        return 0
+    status = (folder_info.get("status") or "").lower()
+    log_success = folder_info.get("log_sucess") or folder_info.get("log_success") or 0
+    if status != "done" or log_success <= 0:
+        return 0
+    ids_to_update = lead_ids[: int(log_success)] if isinstance(lead_ids, list) else []
+    if not ids_to_update:
+        return 0
+    cur.execute(
+        """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
+           current_step = %s, last_message_sent_at = COALESCE(last_message_sent_at, NOW())
+           WHERE id = ANY(%s) AND campaign_id = %s""",
+        (next_step, ids_to_update, campaign_id),
+    )
+    return cur.rowcount
+
+
 def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_service, debug=False):
     """
-    Sincroniza status de campaign_leads com list_messages da Uazapi.
-    Atualiza status 'sent' e 'failed' no DB conforme retorno da API.
-    Itera todas as páginas para capturar todos os envios.
-    Retorna dict com {sent: count, failed: count, updated_sent: int, updated_failed: int}.
+    Sincroniza status de campaign_leads com Uazapi.
+    Primeiro tenta list_folders (sem status) e usa log_sucess + lead_ids armazenados (F8, F9).
+    Fallback: list_messages para Sent/Failed.
+    Atualiza current_step conforme etapa (step 1→2, 2→3, 3→4, 4→4).
     """
-    if not uazapi_service or not token or not folder_id:
+    if not uazapi_service or not token:
         return {"sent": 0, "failed": 0, "updated_sent": 0, "updated_failed": 0}
 
     debug = os.environ.get("DEBUG_SYNC_UAZAPI") == "1"
-    if debug:
-        raw_sent = uazapi_service.list_messages(
-            token, folder_id, message_status="Sent", page=1, page_size=1
-        )
-        first_msg = None
-        if raw_sent:
-            msgs = raw_sent.get("messages") or raw_sent.get("data")
-            if isinstance(msgs, list) and msgs:
-                first_msg = msgs[0]
-            elif isinstance(msgs, dict):
-                first_msg = msgs
-        if first_msg:
-            print(f"[sync_uazapi] first_message_structure: {first_msg}")
-    sent_phones = fetch_all_phones_by_status(
-        uazapi_service, token, folder_id, "Sent"
-    )
-    failed_phones = fetch_all_phones_by_status(
-        uazapi_service, token, folder_id, "Failed"
-    )
+    updated_sent = 0
+    updated_failed = 0
 
-    # Normalizar para match bidirecional (API ↔ DB)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config
+               FROM campaigns WHERE id = %s""",
+            (campaign_id,),
+        )
+        campaign_row = cur.fetchone()
+    lead_ids_by_step = {}
+    if campaign_row:
+        lid = campaign_row.get("uazapi_last_send_lead_ids")
+        if lid:
+            try:
+                lead_ids_by_step[1] = json.loads(lid) if isinstance(lid, str) else lid
+            except Exception:
+                pass
+        cfg = campaign_row.get("cadence_config") or {}
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg) if cfg else {}
+            except Exception:
+                cfg = {}
+        for i in (1, 2, 3):
+            key = f"rollover_fu{i}_lead_ids"
+            ids = cfg.get(key)
+            if ids:
+                lead_ids_by_step[i + 1] = ids if isinstance(ids, list) else []
+
+    folders_list = uazapi_service.list_folders(token) if folder_id else None
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        if folders_list and folder_id:
+            lead_ids = lead_ids_by_step.get(1) or (campaign_row and campaign_row.get("uazapi_last_send_lead_ids"))
+            if lead_ids and isinstance(lead_ids, str):
+                try:
+                    lead_ids = json.loads(lead_ids)
+                except Exception:
+                    lead_ids = []
+            n = _sync_folder_via_listfolders(
+                conn, campaign_id, uazapi_service, token, folders_list,
+                folder_id, lead_ids, 2, cur
+            )
+            if n > 0:
+                updated_sent += n
+        cfg = campaign_row.get("cadence_config") if campaign_row else {}
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg) if cfg else {}
+            except Exception:
+                cfg = {}
+        for step, next_step in [(2, 3), (3, 4), (4, 4)]:
+            fid = cfg.get(f"rollover_fu{step-1}_folder_id")
+            if fid and folders_list and lead_ids_by_step.get(step):
+                n = _sync_folder_via_listfolders(
+                    conn, campaign_id, uazapi_service, token, folders_list,
+                    fid, lead_ids_by_step[step], next_step, cur
+                )
+                if n > 0:
+                    updated_sent += n
+
+    if not folder_id:
+        conn.commit()
+        return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
+
+    sent_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Sent")
+    failed_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Failed")
+
     sent_normalized = set()
     for ph in sent_phones:
         sent_normalized |= normalize_phone_for_match(ph)
@@ -184,12 +281,6 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     for ph in failed_phones:
         failed_normalized |= normalize_phone_for_match(ph)
 
-    if debug:
-        print(f"[sync_uazapi] campaign_id={campaign_id} folder_id={folder_id} sent_phones={list(sent_phones)[:5]}... failed_phones={list(failed_phones)[:3]}")
-
-    # Match por phone ou whatsapp_link usando normalize_phone_for_match
-    updated_sent = 0
-    updated_failed = 0
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """SELECT id, phone, whatsapp_link, status FROM campaign_leads WHERE campaign_id = %s""",
@@ -211,9 +302,10 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             failed_ids.append(lead["id"])
 
     with conn.cursor() as cur:
-        if sent_ids:
+        if sent_ids and updated_sent == 0:
             cur.execute(
-                """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW())
+                """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
+                   current_step = LEAST(4, COALESCE(current_step, 1) + 1)
                    WHERE id = ANY(%s)""",
                 (sent_ids,),
             )
@@ -226,9 +318,6 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             )
             updated_failed = cur.rowcount
     conn.commit()
-
-    if debug and (updated_sent > 0 or updated_failed > 0):
-        print(f"[sync_uazapi] campaign_id={campaign_id} updated_sent={updated_sent} updated_failed={updated_failed}")
 
     return {
         "sent": len(sent_phones),

@@ -417,6 +417,26 @@ def init_db() -> None:
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS chatwoot_conversation_id INTEGER;
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS campaign_tags TEXT[] DEFAULT '{}';
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS notes TEXT;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS send_batch INTEGER DEFAULT NULL;
+        """
+    )
+
+    # uazapi_last_send_lead_ids para sync via listfolders (F9)
+    cur.execute(
+        """
+        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS uazapi_last_send_lead_ids JSONB;
+        """
+    )
+
+    # Tabela para rastrear 1 campanha por instância por dia (F2)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uazapi_instance_sends (
+            id SERIAL PRIMARY KEY,
+            instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
         """
     )
 
@@ -3634,6 +3654,7 @@ def create_campaign():
         
         # 6. Uazapi: se use_uazapi_sender, montar messages, chamar API, salvar folder_id
         if use_uazapi_sender:
+            from utils.limits import get_user_daily_limit, can_create_campaign_today
             conn = get_db_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # Obter primeira instância Uazapi vinculada
@@ -3661,9 +3682,12 @@ def create_campaign():
                             step1_media_path = mp
                             step1_media_type = step1.get('media_type') or 'image'
             conn.close()
-            
+
             if inst and inst.get('apikey'):
                 token = inst['apikey']
+                plan_limit = get_user_daily_limit(current_user.id)
+                if not can_create_campaign_today(inst['id']):
+                    print(f"⚠️ [Uazapi] Instância {inst['id']} já criou campanha hoje. Limite 1/instância/dia.")
                 # Parse message_templates (lista de variações)
                 try:
                     variations = json.loads(message_template_json)
@@ -3688,9 +3712,11 @@ def create_campaign():
                     except Exception as e:
                         print(f"⚠️ [UAZAPI] Erro ao ler mídia step 1: {e}")
                 
+                # Aplicar limite diário (F2, F5): truncar valid_leads
+                leads_to_send = valid_leads[:plan_limit] if can_create_campaign_today(inst['id']) else []
                 # Montar messages array: 1 msg por lead (text ou image/video com caption)
                 messages = []
-                for lead in valid_leads:
+                for lead in leads_to_send:
                     msg_text = random.choice(variations)
                     if lead.get('name'):
                         msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name']).replace("{{nome}}", lead['name']).replace("{{name}}", lead['name'])
@@ -3702,7 +3728,7 @@ def create_campaign():
                     else:
                         messages.append({"number": phone, "type": "text", "text": msg_text})
                 
-                if messages:
+                if messages and can_create_campaign_today(inst['id']):
                     delay_min_sec = (delay_min_minutes or 5) * 60
                     delay_max_sec = (delay_max_minutes or 15) * 60
                     scheduled_for_param = None
@@ -3734,10 +3760,20 @@ def create_campaign():
                     if result and result.get('folder_id'):
                         print(f"[UAZAPI] create_advanced_campaign OK campaign_id={campaign_id} folder_id={result['folder_id']}")
                         conn = get_db_connection()
-                        with conn.cursor() as cur:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(
-                                "UPDATE campaigns SET uazapi_folder_id = %s, status = 'running' WHERE id = %s",
-                                (result['folder_id'], campaign_id)
+                                "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
+                                (inst['id'], campaign_id)
+                            )
+                            cur.execute(
+                                """SELECT id FROM campaign_leads WHERE campaign_id = %s AND status = 'pending'
+                                   ORDER BY id ASC LIMIT %s""",
+                                (campaign_id, len(messages))
+                            )
+                            lead_ids = [r['id'] for r in cur.fetchall()]
+                            cur.execute(
+                                "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
+                                (result['folder_id'], json.dumps(lead_ids) if lead_ids else None, campaign_id)
                             )
                             # Com cadência: NÃO marcar em lote — worker_cadence fará sync via list_messages antes do rollover
                             if not enable_cadence:
@@ -4560,6 +4596,335 @@ def sync_campaign_uazapi_stats(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
+def _get_leads_for_validation(campaign_id):
+    """
+    Retorna leads pendentes com phone/whatsapp_link normalizado para validação.
+    Apenas status='pending' (F3).
+    """
+    from utils.sync_uazapi import _normalize_phone_for_api
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, phone, whatsapp_link FROM campaign_leads
+                   WHERE campaign_id = %s AND status = 'pending'""",
+                (campaign_id,)
+            )
+            rows = cur.fetchall()
+        leads = []
+        for r in rows:
+            raw = r.get('phone') or r.get('whatsapp_link')
+            norm = _normalize_phone_for_api(raw)
+            if norm:
+                leads.append({'id': r['id'], 'phone': norm})
+        return leads
+    finally:
+        conn.close()
+
+
+def _get_uazapi_instance_for_campaign(campaign_id, user_id, admin_mode=False):
+    """
+    Retorna (token, instance_id) da primeira instância Uazapi vinculada à campanha.
+    Retorna (None, None) se não encontrar.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if admin_mode:
+                cur.execute(
+                    "SELECT c.id FROM campaigns c WHERE c.id = %s", (campaign_id,)
+                )
+            else:
+                cur.execute(
+                    "SELECT c.id FROM campaigns c WHERE c.id = %s AND c.user_id = %s",
+                    (campaign_id, user_id)
+                )
+            if not cur.fetchone():
+                return None, None
+            cur.execute("""
+                SELECT i.id as instance_id, i.apikey
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+            """, (campaign_id,))
+            inst = cur.fetchone()
+        if not inst or not inst.get('apikey'):
+            return None, None
+        return inst['apikey'], inst['instance_id']
+    finally:
+        conn.close()
+
+
+def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, timeout=90):
+    """
+    Chama check_phone com retry (F10): 2x se None/Timeout, 1s backoff.
+    429: 3x, 2s backoff.
+    400: sem retry.
+    Retorna (result_list, error_msg). result_list é None em falha.
+    """
+    import requests
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            result = uazapi.check_phone(token, numbers, timeout=timeout)
+            if result is not None:
+                return result, None
+            last_err = "Timeout ou resposta vazia"
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                if attempt < 3:
+                    time.sleep(2)
+                    continue
+            last_err = str(e)
+            break
+        except Exception as e:
+            last_err = str(e)
+        if attempt < max_retries:
+            time.sleep(backoff)
+    return None, last_err
+
+
+@app.route("/api/campaigns/<int:campaign_id>/validate-leads", methods=["POST"])
+@login_required
+def validate_campaign_leads(campaign_id):
+    """
+    Valida leads pendentes via POST /chat/check em batch (50).
+    Marca isInWhatsapp=false como status='invalid'.
+    Após validação, atribui send_batch aos válidos restantes.
+    Timeout 90s.
+    """
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, use_uazapi_sender FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+        conn.close()
+        if not campaign:
+            return json.dumps({"error": "Campanha não encontrada"}), 404
+        if not campaign.get('use_uazapi_sender'):
+            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
+
+        token, instance_id = _get_uazapi_instance_for_campaign(campaign_id, current_user.id)
+        if not token:
+            return json.dumps({"error": "Instância Uazapi não encontrada"}), 400
+
+        from utils.limits import get_user_daily_limit
+        plan_limit = get_user_daily_limit(current_user.id)
+        leads = _get_leads_for_validation(campaign_id)
+        if not leads:
+            return json.dumps({"valid": 0, "invalid": 0, "message": "Nenhum lead pendente para validar"})
+
+        BATCH_SIZE = 50
+        DELAY_BETWEEN_BATCHES = 0.5
+        batches_skipped = 0
+        invalid_ids = []
+
+        uazapi = UazapiService()
+        for i in range(0, len(leads), BATCH_SIZE):
+            batch = leads[i:i + BATCH_SIZE]
+            numbers = [x['phone'] for x in batch]
+            result, err = _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1)
+            if result is None:
+                batches_skipped += 1
+                continue
+            for idx, item in enumerate(result):
+                is_valid = item.get('isInWhatsapp', True)
+                if not is_valid and idx < len(batch):
+                    invalid_ids.append(batch[idx]['id'])
+            time.sleep(DELAY_BETWEEN_BATCHES)
+
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            if invalid_ids:
+                cur.execute(
+                    "UPDATE campaign_leads SET status = 'invalid' WHERE id = ANY(%s)",
+                    (invalid_ids,)
+                )
+            valid_count = 0
+            cur.execute(
+                """SELECT id FROM campaign_leads
+                   WHERE campaign_id = %s AND status = 'pending'
+                   ORDER BY id ASC""",
+                (campaign_id,)
+            )
+            pending_ids = [r[0] for r in cur.fetchall()]
+            batch_size = plan_limit
+            for i, lead_id in enumerate(pending_ids):
+                batch_num = (i // batch_size) + 1
+                cur.execute(
+                    "UPDATE campaign_leads SET send_batch = %s WHERE id = %s",
+                    (batch_num, lead_id)
+                )
+                valid_count += 1
+        conn.commit()
+        conn.close()
+
+        return json.dumps({
+            "valid": valid_count,
+            "invalid": len(invalid_ids),
+            "batches_skipped": batches_skipped,
+            "partial": batches_skipped > 0
+        })
+    except Exception as e:
+        print(f"Erro ao validar leads: {e}")
+        return json.dumps({"error": str(e)}), 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/gerar-campanha", methods=["POST"])
+@login_required
+def gerar_campanha(campaign_id):
+    """
+    Cria campanha Uazapi avançada para a etapa indicada.
+    Body: { step: 1|2|3|4 }. Step 1=Inicial, 2=FU1, 3=FU2, 4=Despedida.
+    Verifica 1 campanha/instância/dia. Usa send_batch para ordem.
+    """
+    from utils.limits import get_user_daily_limit, can_create_campaign_today
+    from utils.sync_uazapi import _normalize_phone_for_api
+    try:
+        data = request.get_json() or {}
+        step = data.get('step')
+        if step not in (1, 2, 3, 4):
+            return json.dumps({"error": "step inválido (1-4)"}), 400
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT c.id, c.user_id, c.use_uazapi_sender, c.enable_cadence, c.cadence_config,
+                          c.delay_min_minutes, c.delay_max_minutes, c.message_template
+                   FROM campaigns c WHERE c.id = %s AND c.user_id = %s""",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+        conn.close()
+        if not campaign or not campaign.get('use_uazapi_sender'):
+            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
+
+        token, instance_id = _get_uazapi_instance_for_campaign(campaign_id, current_user.id)
+        if not token:
+            return json.dumps({"error": "Instância Uazapi não encontrada"}), 400
+
+        if not can_create_campaign_today(instance_id):
+            return json.dumps({"error": "Limite de 1 campanha por instância por dia atingido. Nova campanha após meia-noite (BRT)."}), 429
+
+        limit = get_user_daily_limit(campaign['user_id'])
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if step == 1:
+                cur.execute(
+                    """SELECT id, phone, whatsapp_link, name FROM campaign_leads
+                       WHERE campaign_id = %s AND status = 'pending' AND current_step = 1
+                       ORDER BY COALESCE(send_batch, 999) ASC, id ASC LIMIT %s""",
+                    (campaign_id, limit)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, phone, whatsapp_link, name FROM campaign_leads
+                       WHERE campaign_id = %s AND status = 'sent' AND current_step = %s
+                         AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
+                       ORDER BY COALESCE(send_batch, 999) ASC, id ASC LIMIT %s""",
+                    (campaign_id, step, limit)
+                )
+            leads = cur.fetchall()
+        conn.close()
+
+        if not leads:
+            return json.dumps({"error": "Nenhum lead elegível para esta etapa"}), 400
+
+        try:
+            variations = json.loads(campaign.get('message_template') or '[]')
+            if isinstance(variations, str):
+                variations = [variations]
+            if not variations:
+                variations = ["Olá!"]
+        except Exception:
+            variations = ["Olá!"]
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT message_template, media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
+                (campaign_id, step)
+            )
+            step_row = cur.fetchone()
+        conn.close()
+        step_msg = None
+        if step_row and step_row.get('message_template'):
+            try:
+                step_msg = json.loads(step_row['message_template'])
+                if isinstance(step_msg, list) and step_msg:
+                    step_msg = step_msg[0]
+                elif isinstance(step_msg, str):
+                    pass
+                else:
+                    step_msg = None
+            except Exception:
+                pass
+        if not step_msg:
+            step_msg = random.choice(variations) if variations else "Olá!"
+
+        messages = []
+        lead_ids = []
+        for lead in leads:
+            raw = lead.get('phone') or lead.get('whatsapp_link')
+            norm = _normalize_phone_for_api(raw)
+            if not norm:
+                continue
+            msg_text = step_msg if isinstance(step_msg, str) else (step_msg or "Olá!")
+            if lead.get('name'):
+                msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name']).replace("{{nome}}", lead['name']).replace("{{name}}", lead['name'])
+            messages.append({"number": norm, "type": "text", "text": msg_text})
+            lead_ids.append(lead['id'])
+
+        if not messages:
+            return json.dumps({"error": "Nenhum número válido"}), 400
+
+        delay_min_sec = (campaign.get('delay_min_minutes') or 5) * 60
+        delay_max_sec = (campaign.get('delay_max_minutes') or 15) * 60
+        uazapi = UazapiService()
+        result = uazapi.create_advanced_campaign(
+            token, delay_min_sec, delay_max_sec, messages,
+            info=f"Campanha {campaign_id} step {step}"
+        )
+        if not result or not result.get('folder_id'):
+            return json.dumps({"error": "Falha ao criar campanha na Uazapi"}), 502
+
+        folder_id = result['folder_id']
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
+                (instance_id, campaign_id)
+            )
+            if step == 1:
+                cur.execute(
+                    "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
+                    (folder_id, json.dumps(lead_ids), campaign_id)
+                )
+            else:
+                cfg = campaign.get('cadence_config') or {}
+                if isinstance(cfg, str):
+                    cfg = json.loads(cfg) if cfg else {}
+                key_fid = f'rollover_fu{step-1}_folder_id'
+                key_ids = f'rollover_fu{step-1}_lead_ids'
+                cfg[key_fid] = folder_id
+                cfg[key_ids] = lead_ids
+                cur.execute(
+                    "UPDATE campaigns SET cadence_config = %s WHERE id = %s",
+                    (json.dumps(cfg), campaign_id)
+                )
+        conn.commit()
+        conn.close()
+
+        return json.dumps({"success": True, "folder_id": folder_id, "count": len(lead_ids)})
+    except Exception as e:
+        print(f"Erro ao gerar campanha: {e}")
+        return json.dumps({"error": str(e)}), 500
+
+
 @app.route("/api/campaigns/<int:campaign_id>/sync-debug", methods=["GET"])
 @login_required
 def sync_debug_campaign_uazapi(campaign_id):
@@ -4594,13 +4959,13 @@ def sync_debug_campaign_uazapi(campaign_id):
         if not inst or not inst.get('apikey'):
             return json.dumps({"error": "Instância Uazapi não encontrada"}), 404
 
-        from utils.sync_uazapi import _fetch_all_phones_by_status, _extract_phones_from_message
+        from utils.sync_uazapi import fetch_all_phones_by_status
         uazapi = UazapiService()
         token = inst['apikey']
         folder_id = campaign['uazapi_folder_id']
 
-        sent_phones = list(_fetch_all_phones_by_status(uazapi, token, folder_id, "Sent"))
-        failed_phones = list(_fetch_all_phones_by_status(uazapi, token, folder_id, "Failed"))
+        sent_phones = list(fetch_all_phones_by_status(uazapi, token, folder_id, "Sent"))
+        failed_phones = list(fetch_all_phones_by_status(uazapi, token, folder_id, "Failed"))
 
         # Raw first message (structure)
         raw_sent = uazapi.list_messages(token, folder_id, message_status="Sent", page=1, page_size=1)
