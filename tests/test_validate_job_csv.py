@@ -23,10 +23,15 @@ def test_extract_phone_from_row():
     ph = _extract_phone_from_row(row, None, 'whatsapp_link')
     assert ph == '5511999999999'
 
-    # From phone column
+    # From phone column (fallback)
     row2 = type('Row', (), {'get': lambda s, k, d=None: {'phone': '11999999999'}.get(k, d)})()
     ph2 = _extract_phone_from_row(row2, 'phone', None)
     assert ph2 == '11999999999'
+
+    # From website (Apify coloca wa.me no website quando whatsapp_link vazio)
+    row3 = type('Row', (), {'get': lambda s, k, d=None: {'whatsapp_link': '', 'website': 'https://wa.me/41987298794', 'phone_number': '+5541987298794'}.get(k, d)})()
+    ph3 = _extract_phone_from_row(row3, 'phone_number', 'whatsapp_link', 'website')
+    assert ph3 == '41987298794'  # extraído do wa.me no website
 
     # Normalize
     assert _normalize_phone_for_api('11999999999') == '5511999999999'

@@ -62,29 +62,50 @@ def _normalize_phone_for_api(phone):
     return clean
 
 
-def _extract_phone_from_row(row, phone_col, whatsapp_link_col):
+def _extract_phone_from_link(value):
+    """
+    Extrai número de um link WhatsApp (wa.me, phone=, whatsapp.com).
+    Retorna string de dígitos ou None.
+    """
+    if not value or not pd.notna(value):
+        return None
+    link = str(value).strip()
+    if not link:
+        return None
+    patterns = [
+        r'wa\.me/([0-9]+)',
+        r'phone=([0-9]+)',
+        r'whatsapp\.com/send\?phone=([0-9]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, link, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    digits = re.sub(r'\D', '', link)
+    return digits if len(digits) >= 10 else None
+
+
+def _extract_phone_from_row(row, phone_col, whatsapp_link_col, website_col=None):
     """
     Extrai telefone de uma linha do DataFrame.
-    Prioridade: whatsapp_link_col > phone_col.
+    Prioridade: whatsapp_link > website (se contiver wa.me) > phone_number.
+    Apify às vezes coloca link WhatsApp na coluna website.
     Retorna string ou None.
     """
+    # 1. Primeiro: whatsapp_link
     raw_link = row.get(whatsapp_link_col) if whatsapp_link_col else None
-    if raw_link and pd.notna(raw_link):
-        link = str(raw_link).strip()
-        if link:
-            patterns = [
-                r'wa\.me/([0-9]+)',
-                r'phone=([0-9]+)',
-                r'whatsapp\.com/send\?phone=([0-9]+)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, link)
-                if match:
-                    return match.group(1)
-            digits = re.sub(r'\D', '', link)
-            if len(digits) >= 10:
-                return digits
+    phone = _extract_phone_from_link(raw_link)
+    if phone:
+        return phone
 
+    # 2. Fallback: website (Apify pode colocar wa.me no website)
+    if website_col:
+        raw_web = row.get(website_col)
+        phone = _extract_phone_from_link(raw_web)
+        if phone:
+            return phone
+
+    # 3. Fallback: phone_number
     raw_phone = row.get(phone_col) if phone_col else None
     if raw_phone and pd.notna(raw_phone):
         digits = re.sub(r'\D', '', str(raw_phone))
@@ -153,8 +174,10 @@ def validate_job_csv(job_id, user_id, file_path=None):
         cols = [c.lower() for c in df.columns]
         df.columns = cols
 
-        phone_col = next((c for c in cols if 'phone' in c or 'tel' in c or 'cel' in c), None)
+        # Prioridade Apify: whatsapp_link (1º) > phone_number (fallback)
         whatsapp_link_col = next((c for c in cols if c == 'whatsapp_link'), None)
+        phone_col = next((c for c in cols if 'phone' in c or 'tel' in c or 'cel' in c), None)
+        website_col = next((c for c in cols if c == 'website'), None)  # Apify às vezes coloca wa.me no website
         status_col = next((c for c in cols if c == 'status'), None)
 
         if not phone_col and not whatsapp_link_col:
@@ -168,7 +191,7 @@ def validate_job_csv(job_id, user_id, file_path=None):
 
         rows = []
         for df_idx, row in df_filtered.iterrows():
-            raw = _extract_phone_from_row(row, phone_col, whatsapp_link_col)
+            raw = _extract_phone_from_row(row, phone_col, whatsapp_link_col, website_col)
             phone = _normalize_phone_for_api(raw) if raw else None
             if phone:
                 rows.append((df_idx, row, phone))
