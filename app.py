@@ -2930,7 +2930,7 @@ def api_scraping_jobs():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, keyword, locations, total_results, created_at 
+                SELECT id, keyword, locations, total_results, lead_count, created_at 
                 FROM scraping_jobs 
                 WHERE user_id = %s AND status = 'completed' 
                 ORDER BY created_at DESC

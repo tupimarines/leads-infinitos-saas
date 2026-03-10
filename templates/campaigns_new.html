@@ -221,16 +221,19 @@
                     <p id="jobStats" class="text-xs text-blue-400 mt-2 hidden"></p>
 
                     <!-- Upload CSV Option -->
-                    <div class="mt-3 flex justify-end">
-                        <input type="file" id="csvUpload" accept=".csv" class="hidden">
-                        <button type="button" id="uploadCsvBtn"
-                            class="text-xs flex items-center gap-1 text-purple-400 hover:text-purple-300 transition-colors border border-purple-500/30 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20">
-                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
-                            </svg>
-                            Envie sua própria lista
-                        </button>
+                    <div class="mt-3">
+                        <div class="flex justify-end items-center gap-2">
+                            <input type="file" id="csvUpload" accept=".csv" class="hidden">
+                            <button type="button" id="uploadCsvBtn"
+                                class="text-xs flex items-center gap-1 text-purple-400 hover:text-purple-300 transition-colors border border-purple-500/30 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                                </svg>
+                                Envie sua própria lista
+                            </button>
+                        </div>
+                        <p id="uploadProgressMsg" class="text-xs text-amber-400 mt-2 hidden"></p>
                     </div>
 
 
@@ -966,10 +969,11 @@
 
             jobs.forEach(job => {
                 const date = new Date(job.created_at).toLocaleDateString('pt-BR');
+                const count = (job.lead_count && job.lead_count > 0) ? job.lead_count : job.total_results;
                 const opt = document.createElement('option');
                 opt.value = job.id;
-                opt.textContent = `${job.keyword} - ${job.locations} (${job.total_results} leads) - ${date}`;
-                opt.dataset.count = job.total_results;
+                opt.textContent = `${job.keyword} - ${job.locations} (${count} leads) - ${date}`;
+                opt.dataset.count = count;
                 select.appendChild(opt);
             });
 
@@ -1016,8 +1020,17 @@
 
         // Visual feedback
         const originalText = uploadBtn.innerHTML;
+        const progressMsg = document.getElementById('uploadProgressMsg');
         uploadBtn.disabled = true;
-        uploadBtn.innerHTML = 'Enviando...';
+        uploadBtn.innerHTML = `
+            <svg class="animate-spin w-3 h-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Enviando e validando lista. Aguarde...
+        `;
+        progressMsg.textContent = 'Não feche esta guia. O processo pode levar até 5 minutos.';
+        progressMsg.classList.remove('hidden');
 
         try {
             const res = await fetch('/api/upload-csv-leads', {
@@ -1028,18 +1041,19 @@
             const json = await res.json();
 
             if (res.ok) {
-                // Success: Add new option to select and select it
+                // Success: Add new option to select and select it (usar valid quando validado)
+                const count = json.validated ? json.valid : json.total_leads;
                 const opt = document.createElement('option');
-                opt.value = json.job_id; // The backend should create a virtual job or similar
-                opt.textContent = `[Upload] ${file.name} (${json.total_leads} leads)`;
-                opt.dataset.count = json.total_leads;
+                opt.value = json.job_id;
+                opt.textContent = `[Upload] ${file.name} (${count} leads${json.validated ? ' validados' : ''})`;
+                opt.dataset.count = count;
                 opt.selected = true;
                 jobSelect.appendChild(opt);
 
                 // Trigger change event to update stats
                 jobSelect.dispatchEvent(new Event('change'));
 
-                alert('Lista enviada com sucesso!');
+                alert('Lista enviada com sucesso!' + (json.validated ? ` ${json.valid} contatos válidos (${json.invalid} removidos).` : ''));
             } else {
                 throw new Error(json.error || 'Erro ao enviar arquivo');
             }
@@ -1049,6 +1063,7 @@
         } finally {
             uploadBtn.disabled = false;
             uploadBtn.innerHTML = originalText;
+            progressMsg.classList.add('hidden');
             fileInput.value = ''; // Reset
         }
     });
