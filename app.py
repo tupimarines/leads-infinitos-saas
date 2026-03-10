@@ -3321,13 +3321,24 @@ def upload_csv_leads():
             job_id = cur.fetchone()[0]
         conn.commit()
         conn.close()
-        
-        return json.dumps({
-            'success': True, 
-            'job_id': job_id, 
-            'total_leads': int(count)
-        })
-        
+
+        val = None
+        try:
+            from utils.validate_job_csv import validate_job_csv
+            val = validate_job_csv(job_id, current_user.id)
+        except Exception as e:
+            print(f"[upload_csv_leads] validate_job_csv failed job_id={job_id}: {e}")
+
+        resp = {
+            'success': True,
+            'job_id': job_id,
+            'total_leads': int(count),
+            'validated': bool(val),
+            'valid': val['valid'] if val else int(count),
+            'invalid': val['invalid'] if val else 0,
+        }
+        return json.dumps(resp)
+
     except Exception as e:
         print(f"Erro no upload: {e}")
         return json.dumps({'error': str(e)}), 500

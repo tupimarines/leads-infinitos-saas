@@ -201,9 +201,20 @@ def run_scraper_task(job_id: int):
                 
                 final_df.to_csv(final_path, index=False)
                 print(f"✅ Merged {len(results)} files into {final_path}. Total uniques: {len(final_df)}")
-                
-                lead_count = len(final_df)
-                
+
+                if final_path and os.path.exists(final_path):
+                    try:
+                        from utils.validate_job_csv import validate_job_csv
+                        val = validate_job_csv(job_id, user_id, file_path=final_path)
+                        lead_count = val['valid'] if val else len(final_df)
+                        if val:
+                            print(f"[worker_scraper] job_id={job_id} validated: valid={val['valid']} invalid={val['invalid']}")
+                    except Exception as e:
+                        print(f"⚠️ [worker_scraper] validate_job_csv failed job_id={job_id}: {e}")
+                        lead_count = len(final_df)
+                else:
+                    lead_count = len(final_df)
+
                 # Update DB
                 update_job_status(job_id, 'completed', progress=100, results_path=final_path, lead_count=lead_count)
             else:
