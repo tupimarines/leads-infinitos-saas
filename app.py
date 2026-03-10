@@ -277,6 +277,27 @@ def init_db() -> None:
         """
     )
 
+    # Migração: adicionar 'infinite' ao CHECK de license_type (planos existentes)
+    print("➡️ Atualizando constraint license_type para incluir 'infinite'...")
+    cur.execute("""
+        DO $$
+        DECLARE r RECORD;
+        BEGIN
+            FOR r IN (
+                SELECT conname FROM pg_constraint c
+                WHERE conrelid = 'public.licenses'::regclass AND contype = 'c'
+                AND pg_get_constraintdef(c.oid) LIKE '%license_type%'
+            )
+            LOOP
+                EXECUTE 'ALTER TABLE licenses DROP CONSTRAINT ' || quote_ident(r.conname);
+            END LOOP;
+        END $$;
+    """)
+    cur.execute("""
+        ALTER TABLE licenses ADD CONSTRAINT licenses_license_type_check
+        CHECK (license_type IN ('starter', 'pro', 'scale', 'semestral', 'anual', 'infinite'));
+    """)
+
     # Tabela de modelos de mensagem
     cur.execute(
         """
