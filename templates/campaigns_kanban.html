@@ -136,6 +136,10 @@
         color: #6ee7b7;
     }
 
+    .toast.warning {
+        background: rgba(245, 158, 11, 0.15);
+        border-color: rgb(245, 158, 11);
+    }
     .toast.error {
         background: rgba(239, 68, 68, 0.15);
         border: 1px solid rgba(239, 68, 68, 0.3);
@@ -686,7 +690,10 @@
             const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/validate-leads`, { method: 'POST' });
             const data = await res.json();
             if (res.ok) {
-                showToast(`${data.valid || 0} válidos, ${data.invalid || 0} inválidos`, 'success');
+                const msg = data.partial && data.message
+                    ? `${data.valid || 0} válidos, ${data.invalid || 0} inválidos. ${data.message}`
+                    : `${data.valid || 0} válidos, ${data.invalid || 0} inválidos`;
+                showToast(msg, data.partial ? 'warning' : 'success');
                 refreshBoard();
             } else {
                 showToast(data.error || 'Erro ao validar', 'error');

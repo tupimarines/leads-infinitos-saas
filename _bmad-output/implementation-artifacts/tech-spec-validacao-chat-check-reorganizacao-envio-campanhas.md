@@ -260,6 +260,7 @@ curl --request POST \
 ### Notes
 
 - Batch size 50 para check_phone; timeout 90s em validate-leads
+- **Gunicorn:** `--timeout 180` no docker-compose (validate-leads pode levar 90s+ por batch com retries; worker timeout 30s causava WORKER TIMEOUT)
 - "Gerar follow up" por etapa: folders criados apenas ao clicar; sem rollover automático
 - Armazenar lead_ids obrigatório (cadence_config / uazapi_last_send_lead_ids) — listfolders não retorna números
 - list_folders sem status; buscar folder por id no array (várias campanhas no resultado)

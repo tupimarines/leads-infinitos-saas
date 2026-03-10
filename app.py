@@ -3655,9 +3655,11 @@ def create_campaign():
         # 5b. Uazapi: validar lista automaticamente antes de enviar (remove números sem WhatsApp)
         if use_uazapi_sender:
             try:
-                v, inv = _run_validate_leads(campaign_id, current_user.id)
-                if inv > 0:
-                    print(f"[UAZAPI] Auto-validação: {v} válidos, {inv} inválidos removidos")
+                val = _run_validate_leads(campaign_id, current_user.id)
+                if val["invalid"] > 0:
+                    print(f"[UAZAPI] Auto-validação: {val['valid']} válidos, {val['invalid']} inválidos removidos")
+                if val.get("partial"):
+                    print(f"[UAZAPI] Auto-validação parcial: {val['batches_skipped']} batches pulados (timeout/erro)")
             except Exception as e:
                 print(f"⚠️ [UAZAPI] Auto-validação falhou (continuando): {e}")
         
@@ -4710,26 +4712,29 @@ def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, ti
 def _run_validate_leads(campaign_id, user_id):
     """
     Executa validação de leads pendentes (check_phone batch).
-    Marca inválidos, atribui send_batch. Retorna (valid_count, invalid_count).
+    Marca inválidos, atribui send_batch.
+    Retorna dict: {valid, invalid, batches_skipped, partial}.
     Usado na criação e no endpoint validate-leads.
     """
     token, _ = _get_uazapi_instance_for_campaign(campaign_id, user_id)
     if not token:
-        return 0, 0
+        return {"valid": 0, "invalid": 0, "batches_skipped": 0, "partial": False}
     from utils.limits import get_user_daily_limit
     plan_limit = get_user_daily_limit(user_id)
     leads = _get_leads_for_validation(campaign_id)
     if not leads:
-        return 0, 0
+        return {"valid": 0, "invalid": 0, "batches_skipped": 0, "partial": False}
     BATCH_SIZE = 50
     DELAY_BETWEEN_BATCHES = 0.5
     invalid_ids = []
+    batches_skipped = 0
     uazapi = UazapiService()
     for i in range(0, len(leads), BATCH_SIZE):
         batch = leads[i:i + BATCH_SIZE]
         numbers = [x['phone'] for x in batch]
         result, _ = _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1)
         if result is None:
+            batches_skipped += 1
             continue
         for idx, item in enumerate(result):
             if not item.get('isInWhatsapp', True) and idx < len(batch):
@@ -4749,7 +4754,12 @@ def _run_validate_leads(campaign_id, user_id):
             cur.execute("UPDATE campaign_leads SET send_batch = %s WHERE id = %s", (batch_num, lead_id))
     conn.commit()
     conn.close()
-    return len(pending_ids), len(invalid_ids)
+    return {
+        "valid": len(pending_ids),
+        "invalid": len(invalid_ids),
+        "batches_skipped": batches_skipped,
+        "partial": batches_skipped > 0,
+    }
 
 
 @app.route("/api/campaigns/<int:campaign_id>/validate-leads", methods=["POST"])
@@ -4783,8 +4793,13 @@ def validate_campaign_leads(campaign_id):
         if not leads:
             return json.dumps({"valid": 0, "invalid": 0, "message": "Nenhum lead pendente para validar"})
 
-        valid_count, invalid_count = _run_validate_leads(campaign_id, current_user.id)
-        return json.dumps({"valid": valid_count, "invalid": invalid_count})
+        val = _run_validate_leads(campaign_id, current_user.id)
+        resp = {"valid": val["valid"], "invalid": val["invalid"]}
+        if val.get("partial"):
+            resp["batches_skipped"] = val["batches_skipped"]
+            resp["partial"] = True
+            resp["message"] = f"Validação parcial: {val['batches_skipped']} batch(s) pulado(s) por timeout/erro da API."
+        return json.dumps(resp)
     except Exception as e:
         print(f"Erro ao validar leads: {e}")
         return json.dumps({"error": str(e)}), 500
