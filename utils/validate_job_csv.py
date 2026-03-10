@@ -170,7 +170,10 @@ def validate_job_csv(job_id, user_id, file_path=None):
             print(f"[validate_job_csv] job_id={job_id} skip: path not found or empty")
             return None
 
-        df = pd.read_csv(path, dtype=str, encoding='utf-8', errors='replace')
+        try:
+            df = pd.read_csv(path, dtype=str, encoding='utf-8', encoding_errors='replace')
+        except TypeError:
+            df = pd.read_csv(path, dtype=str, encoding='utf-8')
         cols = [c.lower() for c in df.columns]
         df.columns = cols
 
