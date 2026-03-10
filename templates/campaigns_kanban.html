@@ -302,7 +302,7 @@
                     <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    {% if campaign.use_uazapi_sender %}
                     <button onclick="openStageCampaignModal(2, 'Follow-up 1')" data-generate-step="2" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed" title="Gerar campanha para esta etapa">Gerar</button>
                     {% endif %}
                     <button onclick="openMessageModal(2, 'Follow-up 1')"
@@ -330,7 +330,7 @@
                     <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    {% if campaign.use_uazapi_sender %}
                     <button onclick="openStageCampaignModal(3, 'Follow-up 2')" data-generate-step="3" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed" title="Gerar campanha para esta etapa">Gerar</button>
                     {% endif %}
                     <button onclick="openMessageModal(3, 'Follow-up 2')"
@@ -358,7 +358,7 @@
                     <span class="text-sm font-semibold text-gray-200">Break-up</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    {% if campaign.use_uazapi_sender %}
                     <button onclick="openStageCampaignModal(4, 'Break-up')" data-generate-step="4" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed" title="Gerar campanha para esta etapa">Gerar</button>
                     {% endif %}
                     <button onclick="openMessageModal(4, 'Break-up')"
@@ -992,7 +992,20 @@
     let CURRENT_LEAD_ID = null;
 
     // Create a lead card element
-    function createLeadCard(lead) {
+    function getStageByStep(step) {
+        return ({ 1: 'initial', 2: 'follow1', 3: 'follow2', 4: 'breakup' })[Number(step)] || null;
+    }
+
+    function getStageLabel(stage) {
+        return ({
+            initial: 'Inicial',
+            follow1: 'Follow-up 1',
+            follow2: 'Follow-up 2',
+            breakup: 'Break-up'
+        })[stage] || stage || '-';
+    }
+
+    function createLeadCard(lead, targetStep) {
         const div = document.createElement('div');
         div.className = 'lead-card';
         div.draggable = true;
@@ -1000,9 +1013,12 @@
         div.dataset.step = lead.current_step;
         div.dataset.status = lead.cadence_status || lead.status;
 
+        const stageForColumn = getStageByStep(targetStep);
+        const lastSentStage = (lead.last_sent_stage || '').toLowerCase();
         const sentAtRaw = lead.last_message_sent_at || lead.sent_at;
         const sentAt = sentAtRaw ? new Date(sentAtRaw).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
-        const isSent = lead.status === 'sent' || !!sentAtRaw;
+        const sentThisStage = !!(stageForColumn && lastSentStage && lastSentStage === stageForColumn);
+        const hasPreviousSend = !!lastSentStage;
 
         div.innerHTML = `
             <div class="flex items-start justify-between">
@@ -1011,8 +1027,9 @@
                     <p class="text-xs text-gray-500 truncate mt-0.5">${formatPhone(lead.phone)}</p>
                 </div>
                 <div class="flex flex-col items-end gap-0.5 ml-2">
-                    ${isSent ? '<span class="text-[10px] text-green-400 font-medium">✓ Enviado</span>' : ''}
-                    ${sentAt ? `<span class="text-[10px] text-gray-600 whitespace-nowrap">${sentAt}</span>` : ''}
+                    ${sentThisStage ? '<span class="text-[10px] text-green-400 font-medium">✓ Enviado nesta etapa</span>' : ''}
+                    ${!sentThisStage && hasPreviousSend ? `<span class="text-[10px] text-gray-400">Último: ${getStageLabel(lastSentStage)}</span>` : ''}
+                    ${sentThisStage && sentAt ? `<span class="text-[10px] text-gray-600 whitespace-nowrap">${sentAt}</span>` : ''}
                 </div>
             </div>
             
@@ -1135,7 +1152,7 @@
 
                 const col = document.querySelector(`[data-drop="${targetDrop}"]`);
                 if (col) {
-                    col.appendChild(createLeadCard(lead));
+                    col.appendChild(createLeadCard(lead, targetDrop));
                 }
             });
 

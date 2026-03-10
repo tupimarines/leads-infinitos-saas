@@ -2318,9 +2318,9 @@ def campaign_kanban_data(campaign_id):
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT id, phone, name, status, current_step, cadence_status, 
+            SELECT id, phone, name, status, current_step, cadence_status,
                    snooze_until, last_message_sent_at, chatwoot_conversation_id,
-                   sent_at, whatsapp_link, notes, log,
+                   sent_at, last_sent_stage, whatsapp_link, notes, log,
                    address, website, category, location, reviews_count, reviews_rating, latitude, longitude,
                    CASE 
                        WHEN cadence_status IN ('snoozed', 'active') THEN 1
