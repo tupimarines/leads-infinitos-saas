@@ -357,8 +357,8 @@ def _materialize_scheduled_stage_sends(conn):
     if not uazapi_service:
         return
 
-    now_br = datetime.now(BRAZIL_TZ)
-    now_naive = now_br.replace(tzinfo=None)
+    # scheduled_for é persistido em UTC naive; comparar na mesma base para evitar drift de fuso.
+    now_utc_naive = datetime.utcnow()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
@@ -384,7 +384,7 @@ def _materialize_scheduled_stage_sends(conn):
         sched = row.get("scheduled_for")
         if not sched:
             continue
-        remaining = (sched - now_naive).total_seconds()
+        remaining = (sched - now_utc_naive).total_seconds()
         if remaining > PRE_DISPARO_WINDOW_MAX * 60:
             continue
         if remaining < -15 * 60:
