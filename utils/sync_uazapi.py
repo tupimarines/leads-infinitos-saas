@@ -10,6 +10,12 @@ import re
 from psycopg2.extras import RealDictCursor
 
 
+def _normalize_folder_id(value):
+    if value is None:
+        return None
+    return str(value).strip()
+
+
 def _normalize_phone_for_api(phone: str):
     """
     Normaliza número para envio à API Uazapi (POST /chat/check, create_advanced_campaign).
@@ -162,7 +168,20 @@ def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status)
 _fetch_all_phones_by_status = fetch_all_phones_by_status
 
 
-def _sync_folder_via_listfolders(conn, campaign_id, uazapi_service, token, folders_list, folder_id, lead_ids, next_step, cur):
+def _sync_folder_via_listfolders(
+    conn,
+    campaign_id,
+    uazapi_service,
+    token,
+    folders_list,
+    folder_id,
+    lead_ids,
+    next_step,
+    cur,
+    stage_label=None,
+    instance_id=None,
+    instance_remote_jid=None,
+):
     """
     Se folder encontrado em listfolders com status=done e log_sucess>0, marca lead_ids como sent e
     atualiza current_step para next_step.
@@ -186,10 +205,28 @@ def _sync_folder_via_listfolders(conn, campaign_id, uazapi_service, token, folde
     if not ids_to_update:
         return 0
     cur.execute(
-        """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
-           current_step = %s, last_message_sent_at = COALESCE(last_message_sent_at, NOW())
-           WHERE id = ANY(%s) AND campaign_id = %s""",
-        (next_step, ids_to_update, campaign_id),
+        """UPDATE campaign_leads
+           SET status = 'sent',
+               sent_at = NOW(),
+               current_step = %s,
+               last_message_sent_at = NOW(),
+               last_sent_stage = COALESCE(%s, last_sent_stage),
+               last_sent_instance_id = COALESCE(%s, last_sent_instance_id),
+               last_sent_instance_remote_jid = COALESCE(%s, last_sent_instance_remote_jid),
+               last_sent_folder_id = COALESCE(%s, last_sent_folder_id)
+           WHERE id = ANY(%s)
+             AND campaign_id = %s
+             AND COALESCE(removed_from_funnel, FALSE) = FALSE
+             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+        (
+            next_step,
+            stage_label,
+            instance_id,
+            instance_remote_jid,
+            folder_id,
+            ids_to_update,
+            campaign_id,
+        ),
     )
     return cur.rowcount
 
@@ -208,65 +245,156 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     updated_sent = 0
     updated_failed = 0
 
+    stage_to_next_step = {"initial": 2, "follow1": 3, "follow2": 4, "breakup": 4}
+
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config
                FROM campaigns WHERE id = %s""",
             (campaign_id,),
         )
-        campaign_row = cur.fetchone()
+        campaign_row = cur.fetchone() or {}
+
+    # 1) Novo fluxo: sync por campaign_stage_sends (folder por instância)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT css.id, css.stage, css.instance_id, css.instance_remote_jid, css.uazapi_folder_id,
+                      css.lead_ids, css.planned_count, css.status,
+                      i.apikey
+               FROM campaign_stage_sends css
+               JOIN instances i ON i.id = css.instance_id
+               WHERE css.campaign_id = %s
+                 AND css.uazapi_folder_id IS NOT NULL
+                 AND css.status IN ('scheduled', 'running', 'partial')""",
+            (campaign_id,),
+        )
+        stage_sends = cur.fetchall() or []
+
+    for send in stage_sends:
+        send_token = send.get("apikey")
+        fid = _normalize_folder_id(send.get("uazapi_folder_id"))
+        if not send_token or not fid:
+            continue
+
+        folders_list = uazapi_service.list_folders(send_token) or []
+        folder_info = None
+        for f in folders_list:
+            cur_fid = _normalize_folder_id(f.get("id") or f.get("folder_id") or f.get("folderId"))
+            if cur_fid == fid:
+                folder_info = f
+                break
+        if not folder_info:
+            print(
+                f"⚠️ [Uazapi Sync] folder não encontrado em list_folders "
+                f"(campaign={campaign_id}, send_id={send.get('id')}, stage={send.get('stage')}, folder_id={fid})"
+            )
+            continue
+
+        log_success = int(folder_info.get("log_sucess") or folder_info.get("log_success") or 0)
+        log_failed = int(folder_info.get("log_failed") or 0)
+        status = (folder_info.get("status") or "").lower() or "running"
+        lead_ids = send.get("lead_ids") or []
+        if isinstance(lead_ids, str):
+            try:
+                lead_ids = json.loads(lead_ids)
+            except Exception:
+                lead_ids = []
+        planned_count = int(send.get("planned_count") or 0)
+        if planned_count <= 0 and lead_ids:
+            planned_count = len(lead_ids)
+
+        print(
+            f"🔎 [Uazapi Sync] campaign={campaign_id} send_id={send.get('id')} stage={send.get('stage')} "
+            f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
+        )
+
+        if log_success > 0 and lead_ids:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                n = _sync_folder_via_listfolders(
+                    conn=conn,
+                    campaign_id=campaign_id,
+                    uazapi_service=uazapi_service,
+                    token=send_token,
+                    folders_list=folders_list,
+                    folder_id=fid,
+                    lead_ids=lead_ids,
+                    next_step=stage_to_next_step.get(send.get("stage"), 4),
+                    cur=cur,
+                    stage_label=send.get("stage"),
+                    instance_id=send.get("instance_id"),
+                    instance_remote_jid=send.get("instance_remote_jid"),
+                )
+                updated_sent += n
+
+        # Regra estrita de conclusão: só fecha done quando list_folders confirma status done
+        # e sucesso >= planejado para o send da instância.
+        if status == "done" and planned_count > 0 and log_success >= planned_count:
+            normalized_status = "done"
+        elif status in ("failed", "error", "cancelled", "canceled") and log_success == 0:
+            normalized_status = "failed"
+        elif log_success > 0 or log_failed > 0 or status == "done":
+            normalized_status = "partial"
+        else:
+            normalized_status = "running"
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE campaign_stage_sends
+                   SET success_count = %s,
+                       failed_count = %s,
+                       status = %s,
+                       last_sync_at = NOW(),
+                       updated_at = NOW()
+                   WHERE id = %s""",
+                (log_success, log_failed, normalized_status, send["id"]),
+            )
+
+    # 2) Compat legado (campanhas antigas sem stage_sends)
     lead_ids_by_step = {}
-    if campaign_row:
-        lid = campaign_row.get("uazapi_last_send_lead_ids")
-        if lid:
-            try:
-                lead_ids_by_step[1] = json.loads(lid) if isinstance(lid, str) else lid
-            except Exception:
-                pass
-        cfg = campaign_row.get("cadence_config") or {}
-        if isinstance(cfg, str):
-            try:
-                cfg = json.loads(cfg) if cfg else {}
-            except Exception:
-                cfg = {}
-        for i in (1, 2, 3):
-            key = f"rollover_fu{i}_lead_ids"
-            ids = cfg.get(key)
-            if ids:
-                lead_ids_by_step[i + 1] = ids if isinstance(ids, list) else []
+    lid = campaign_row.get("uazapi_last_send_lead_ids")
+    if lid:
+        try:
+            lead_ids_by_step[1] = json.loads(lid) if isinstance(lid, str) else lid
+        except Exception:
+            pass
+    cfg = campaign_row.get("cadence_config") or {}
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg) if cfg else {}
+        except Exception:
+            cfg = {}
+    for i in (1, 2, 3):
+        key = f"rollover_fu{i}_lead_ids"
+        ids = cfg.get(key)
+        if ids:
+            lead_ids_by_step[i + 1] = ids if isinstance(ids, list) else []
 
     folders_list = uazapi_service.list_folders(token) if folder_id else None
-
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        if folders_list and folder_id:
-            lead_ids = lead_ids_by_step.get(1) or (campaign_row and campaign_row.get("uazapi_last_send_lead_ids"))
-            if lead_ids and isinstance(lead_ids, str):
-                try:
-                    lead_ids = json.loads(lead_ids)
-                except Exception:
-                    lead_ids = []
+        if folders_list and folder_id and lead_ids_by_step.get(1):
             n = _sync_folder_via_listfolders(
                 conn, campaign_id, uazapi_service, token, folders_list,
-                folder_id, lead_ids, 2, cur
+                folder_id, lead_ids_by_step.get(1), 2, cur,
+                stage_label="initial",
+                instance_id=None,
+                instance_remote_jid=None,
             )
             if n > 0:
                 updated_sent += n
-        cfg = campaign_row.get("cadence_config") if campaign_row else {}
-        if isinstance(cfg, str):
-            try:
-                cfg = json.loads(cfg) if cfg else {}
-            except Exception:
-                cfg = {}
         for step, next_step in [(2, 3), (3, 4), (4, 4)]:
             fid = cfg.get(f"rollover_fu{step-1}_folder_id")
             if fid and folders_list and lead_ids_by_step.get(step):
                 n = _sync_folder_via_listfolders(
                     conn, campaign_id, uazapi_service, token, folders_list,
-                    fid, lead_ids_by_step[step], next_step, cur
+                    fid, lead_ids_by_step[step], next_step, cur,
+                    stage_label={2: "follow1", 3: "follow2", 4: "breakup"}.get(step),
+                    instance_id=None,
+                    instance_remote_jid=None,
                 )
                 if n > 0:
                     updated_sent += n
 
+    # 3) Fallback final por list_messages (status principal)
     if not folder_id:
         conn.commit()
         return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
@@ -283,7 +411,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """SELECT id, phone, whatsapp_link, status FROM campaign_leads WHERE campaign_id = %s""",
+            """SELECT id, phone, whatsapp_link, status, cadence_status, removed_from_funnel
+               FROM campaign_leads WHERE campaign_id = %s""",
             (campaign_id,),
         )
         leads = cur.fetchall()
@@ -291,6 +420,10 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     sent_ids = []
     failed_ids = []
     for lead in leads:
+        if lead.get("removed_from_funnel"):
+            continue
+        if (lead.get("cadence_status") or "") in ("converted", "lost"):
+            continue
         lead_variants = normalize_phone_for_match(lead.get("phone")) | normalize_phone_for_match(
             lead.get("whatsapp_link")
         )
@@ -304,15 +437,20 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     with conn.cursor() as cur:
         if sent_ids and updated_sent == 0:
             cur.execute(
-                """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
-                   current_step = LEAST(4, COALESCE(current_step, 1) + 1)
+                """UPDATE campaign_leads
+                   SET status = 'sent',
+                       sent_at = NOW(),
+                       current_step = LEAST(4, COALESCE(current_step, 1) + 1),
+                       last_message_sent_at = NOW(),
+                       last_sent_folder_id = COALESCE(last_sent_folder_id, %s)
                    WHERE id = ANY(%s)""",
-                (sent_ids,),
+                (folder_id, sent_ids),
             )
             updated_sent = cur.rowcount
         if failed_ids:
             cur.execute(
-                """UPDATE campaign_leads SET status = 'failed', sent_at = COALESCE(sent_at, NOW())
+                """UPDATE campaign_leads
+                   SET status = 'failed', sent_at = COALESCE(sent_at, NOW())
                    WHERE id = ANY(%s)""",
                 (failed_ids,),
             )
