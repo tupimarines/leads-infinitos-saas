@@ -439,6 +439,11 @@ def init_db() -> None:
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS campaign_tags TEXT[] DEFAULT '{}';
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS notes TEXT;
         ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS send_batch INTEGER DEFAULT NULL;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_stage TEXT;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_instance_id INTEGER;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_instance_remote_jid TEXT;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_folder_id TEXT;
+        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS removed_from_funnel BOOLEAN DEFAULT FALSE;
         """
     )
 
@@ -458,6 +463,46 @@ def init_db() -> None:
             campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
             created_at TIMESTAMP DEFAULT NOW()
         );
+        """
+    )
+
+    # Tracking de envios por etapa/instância (redesenho funil completo Uazapi)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS campaign_stage_sends (
+            id SERIAL PRIMARY KEY,
+            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+            stage TEXT NOT NULL,
+            instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+            instance_remote_jid TEXT,
+            uazapi_folder_id TEXT,
+            scheduled_for TIMESTAMP,
+            status TEXT DEFAULT 'scheduled',
+            planned_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            lead_ids JSONB,
+            delay_min_minutes INTEGER,
+            delay_max_minutes INTEGER,
+            message_variations JSONB,
+            last_sync_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+        ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
+        ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
+        ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS message_variations JSONB;
+        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_campaign_stage
+            ON campaign_stage_sends(campaign_id, stage);
+        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_folder_id
+            ON campaign_stage_sends(uazapi_folder_id);
+        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_status
+            ON campaign_stage_sends(status);
+        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_schedule
+            ON campaign_stage_sends(scheduled_for);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_stage_sends_window
+            ON campaign_stage_sends(campaign_id, stage, instance_id, scheduled_for)
+            WHERE scheduled_for IS NOT NULL AND status = 'scheduled';
         """
     )
 
@@ -2212,12 +2257,28 @@ def campaign_kanban(campaign_id):
     
     # Get total lead count
     conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
-        total_leads = cur.fetchone()[0]
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT COUNT(*) AS total FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
+        total_leads = int((cur.fetchone() or {}).get("total") or 0)
+        cur.execute(
+            """
+            SELECT i.id, i.name, i.status, COALESCE(i.api_provider, 'megaapi') AS api_provider
+            FROM campaign_instances ci
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE ci.campaign_id = %s
+            ORDER BY i.id ASC
+            """,
+            (campaign_id,),
+        )
+        campaign_instances = cur.fetchall() or []
     conn.close()
-    
-    return render_template('campaigns_kanban.html', campaign=campaign, total_leads=total_leads)
+
+    return render_template(
+        'campaigns_kanban.html',
+        campaign=campaign,
+        total_leads=total_leads,
+        campaign_instances=campaign_instances,
+    )
 
 
 @app.route('/api/campaigns/<int:campaign_id>/kanban-data')
@@ -2285,6 +2346,16 @@ def campaign_kanban_data(campaign_id):
     out = {'leads': serialized, 'campaign_id': campaign_id}
     if stats:
         out['uazapi_stats'] = stats
+    conn_stage = get_db_connection()
+    try:
+        out["stage_progress"] = _get_campaign_stage_progress(conn_stage, campaign_id)
+    finally:
+        conn_stage.close()
+    out["stage_unlocks"] = {
+        "2": _is_previous_stage_fully_done(campaign_id, 2),
+        "3": _is_previous_stage_fully_done(campaign_id, 3),
+        "4": _is_previous_stage_fully_done(campaign_id, 4),
+    }
     return json.dumps(out)
 
 
@@ -2313,11 +2384,14 @@ def move_campaign_lead(campaign_id, lead_id):
             conn.close()
             return json.dumps({'error': 'Lead não encontrado'}), 404
         
+        remove_from_funnel = target_status in ('converted', 'lost')
         cur.execute("""
             UPDATE campaign_leads 
-            SET current_step = %s, cadence_status = %s
+            SET current_step = %s,
+                cadence_status = %s,
+                removed_from_funnel = %s
             WHERE id = %s AND campaign_id = %s
-        """, (target_step, target_status, lead_id, campaign_id))
+        """, (target_step, target_status, remove_from_funnel, lead_id, campaign_id))
     conn.commit()
     conn.close()
     
@@ -3824,6 +3898,7 @@ def create_campaign():
                     )
                     if result and result.get('folder_id'):
                         print(f"[UAZAPI] create_advanced_campaign OK campaign_id={campaign_id} folder_id={result['folder_id']}")
+                        instance_remote_jid = _resolve_uazapi_remote_jid(uazapi, token)
                         conn = get_db_connection()
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(
@@ -3839,6 +3914,19 @@ def create_campaign():
                             cur.execute(
                                 "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
                                 (result['folder_id'], json.dumps(lead_ids) if lead_ids else None, campaign_id)
+                            )
+                            cur.execute(
+                                """INSERT INTO campaign_stage_sends
+                                   (campaign_id, stage, instance_id, instance_remote_jid, uazapi_folder_id, status, planned_count, lead_ids)
+                                   VALUES (%s, 'initial', %s, %s, %s, 'running', %s, %s)""",
+                                (
+                                    campaign_id,
+                                    inst['id'],
+                                    instance_remote_jid,
+                                    result['folder_id'],
+                                    len(lead_ids),
+                                    json.dumps(lead_ids) if lead_ids else None,
+                                ),
                             )
                             # Com cadência: NÃO marcar em lote — worker_cadence fará sync via list_messages antes do rollover
                             if not enable_cadence:
@@ -4587,6 +4675,13 @@ def get_campaign_stats(campaign_id):
             "started_at": stats['started_at'].isoformat() if stats['started_at'] else None,
             "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None
         }
+        conn_stage = get_db_connection()
+        try:
+            stage_progress = _get_campaign_stage_progress(conn_stage, campaign_id)
+            result["stage_progress"] = stage_progress
+            result["last_sync_at"] = stage_progress.get("last_sync_at")
+        finally:
+            conn_stage.close()
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
             result["scheduled"] = uazapi_scheduled
         
@@ -4721,6 +4816,249 @@ def _get_uazapi_instance_for_campaign(campaign_id, user_id, admin_mode=False):
         conn.close()
 
 
+def _get_uazapi_instances_for_campaign(campaign_id, user_id):
+    """Retorna todas as instâncias Uazapi vinculadas à campanha e ao usuário."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, user_id),
+            )
+            if not cur.fetchone():
+                return []
+            cur.execute(
+                """
+                SELECT i.id AS instance_id, i.apikey
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                  AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                  AND i.apikey IS NOT NULL
+                ORDER BY i.id ASC
+                """,
+                (campaign_id,),
+            )
+            rows = cur.fetchall() or []
+        return rows
+    finally:
+        conn.close()
+
+
+def _resolve_uazapi_remote_jid(uazapi, token):
+    """
+    Resolve remote_jid ativo da instância no momento do envio.
+    Não bloqueia fluxo: retorna None em falha.
+    """
+    try:
+        result = uazapi.get_status(token)
+        if not isinstance(result, dict):
+            return None
+        remote_jid = result.get('id') or result.get('me')
+        if not remote_jid and isinstance(result.get('instance_data'), dict):
+            instance_data = result.get('instance_data') or {}
+            remote_jid = instance_data.get('phone') or instance_data.get('user') or instance_data.get('jid')
+        return remote_jid
+    except Exception:
+        return None
+
+
+def _stage_label_from_step(step):
+    return {1: 'initial', 2: 'follow1', 3: 'follow2', 4: 'breakup'}.get(step)
+
+
+def _parse_iso_datetime_local(raw_value):
+    """
+    Parse de datetime ISO (naive ou com timezone) para datetime local naive.
+    Retorna None quando valor ausente/inválido.
+    """
+    if not raw_value:
+        return None
+    try:
+        if isinstance(raw_value, datetime):
+            parsed = raw_value
+        else:
+            text = str(raw_value).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _status_rank_for_stage_send(status):
+    # Maior valor = estado mais "avançado" na resolução da etapa.
+    ranks = {"failed": 1, "scheduled": 2, "running": 3, "partial": 4, "done": 5}
+    return ranks.get((status or "").lower(), 0)
+
+
+def _get_campaign_stage_progress(conn, campaign_id):
+    """
+    Agrega progresso por etapa e por instância a partir de campaign_stage_sends.
+    Retorna payload serializável para Kanban/lista.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT stage, instance_id, instance_remote_jid, uazapi_folder_id, status,
+                   planned_count, success_count, failed_count, last_sync_at, scheduled_for
+            FROM campaign_stage_sends
+            WHERE campaign_id = %s
+            ORDER BY stage ASC, instance_id ASC, created_at ASC
+            """,
+            (campaign_id,),
+        )
+        rows = cur.fetchall() or []
+
+    stage_keys = ("initial", "follow1", "follow2", "breakup")
+    stage_data = {
+        k: {
+            "status": "idle",
+            "planned_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "last_sync_at": None,
+            "instances": [],
+        }
+        for k in stage_keys
+    }
+    grouped = {}
+    global_last_sync = None
+
+    for row in rows:
+        stage = row.get("stage")
+        if stage not in stage_data:
+            continue
+        key = (stage, int(row.get("instance_id") or 0))
+        bucket = grouped.get(key)
+        if not bucket:
+            bucket = {
+                "instance_id": int(row.get("instance_id") or 0),
+                "instance_remote_jid": row.get("instance_remote_jid"),
+                "status": row.get("status") or "scheduled",
+                "planned_count": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "last_sync_at": row.get("last_sync_at"),
+                "scheduled_for": row.get("scheduled_for"),
+            }
+            grouped[key] = bucket
+
+        bucket["planned_count"] += int(row.get("planned_count") or 0)
+        bucket["success_count"] += int(row.get("success_count") or 0)
+        bucket["failed_count"] += int(row.get("failed_count") or 0)
+
+        current_rank = _status_rank_for_stage_send(bucket.get("status"))
+        new_rank = _status_rank_for_stage_send(row.get("status"))
+        if new_rank > current_rank:
+            bucket["status"] = row.get("status")
+
+        last_sync = row.get("last_sync_at")
+        if last_sync and (not bucket.get("last_sync_at") or last_sync > bucket["last_sync_at"]):
+            bucket["last_sync_at"] = last_sync
+        sched = row.get("scheduled_for")
+        if sched and (not bucket.get("scheduled_for") or sched > bucket["scheduled_for"]):
+            bucket["scheduled_for"] = sched
+        if last_sync and (global_last_sync is None or last_sync > global_last_sync):
+            global_last_sync = last_sync
+
+    stage_rows = {}
+    for (stage, _instance_id), bucket in grouped.items():
+        stage_rows.setdefault(stage, []).append(bucket)
+
+    for stage, instances in stage_rows.items():
+        instances.sort(key=lambda x: x.get("instance_id") or 0)
+        stage_total = stage_data[stage]
+        for inst in instances:
+            stage_total["planned_count"] += int(inst.get("planned_count") or 0)
+            stage_total["success_count"] += int(inst.get("success_count") or 0)
+            stage_total["failed_count"] += int(inst.get("failed_count") or 0)
+            inst_sync = inst.get("last_sync_at")
+            if inst_sync and (stage_total["last_sync_at"] is None or inst_sync > stage_total["last_sync_at"]):
+                stage_total["last_sync_at"] = inst_sync
+            inst["last_sync_at"] = inst_sync.isoformat() if inst_sync else None
+            inst_sched = inst.get("scheduled_for")
+            inst["scheduled_for"] = inst_sched.isoformat() if inst_sched else None
+            stage_total["instances"].append(inst)
+
+        stage_status = "idle"
+        if instances:
+            statuses = [(i.get("status") or "scheduled").lower() for i in instances]
+            if all(s == "done" for s in statuses):
+                stage_status = "done"
+            elif any(s == "running" for s in statuses):
+                stage_status = "running"
+            elif any(s == "partial" for s in statuses):
+                stage_status = "partial"
+            elif any(s == "scheduled" for s in statuses):
+                stage_status = "scheduled"
+            elif any(s == "failed" for s in statuses):
+                stage_status = "failed"
+            else:
+                stage_status = statuses[0]
+        stage_total["status"] = stage_status
+        stage_total["last_sync_at"] = stage_total["last_sync_at"].isoformat() if stage_total["last_sync_at"] else None
+
+    return {
+        "stages": stage_data,
+        "last_sync_at": global_last_sync.isoformat() if global_last_sync else None,
+    }
+
+
+def _is_previous_stage_fully_done(campaign_id, step):
+    """
+    Regra fechada: próxima etapa só libera quando etapa anterior estiver done em todas as instâncias.
+    Step 2 usa campanha inicial (folder principal); Step 3/4 usa campaign_stage_sends.
+    """
+    if step <= 1:
+        return True
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if step == 2:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done_count
+                    FROM campaign_stage_sends
+                    WHERE campaign_id = %s AND stage = 'initial'
+                    """,
+                    (campaign_id,),
+                )
+                stage_initial = cur.fetchone() or {}
+                total_initial = int(stage_initial.get('total') or 0)
+                done_initial = int(stage_initial.get('done_count') or 0)
+                if total_initial > 0:
+                    return total_initial == done_initial
+                cur.execute(
+                    "SELECT use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = %s",
+                    (campaign_id,),
+                )
+                row = cur.fetchone()
+                return bool(row and row.get('use_uazapi_sender') and row.get('uazapi_folder_id'))
+            prev_stage = _stage_label_from_step(step - 1)
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done_count
+                FROM campaign_stage_sends
+                WHERE campaign_id = %s AND stage = %s
+                """,
+                (campaign_id, prev_stage),
+            )
+            row = cur.fetchone() or {}
+            total = int(row.get('total') or 0)
+            done_count = int(row.get('done_count') or 0)
+            return total > 0 and total == done_count
+    finally:
+        conn.close()
+
+
 def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, timeout=90):
     """
     Chama check_phone com retry (F10): 2x se None/Timeout, 1s backoff.
@@ -4846,152 +5184,341 @@ def validate_campaign_leads(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
-@app.route("/api/campaigns/<int:campaign_id>/gerar-campanha", methods=["POST"])
-@login_required
-def gerar_campanha(campaign_id):
-    """
-    Cria campanha Uazapi avançada para a etapa indicada.
-    Body: { step: 1|2|3|4 }. Step 1=Inicial, 2=FU1, 3=FU2, 4=Despedida.
-    Verifica 1 campanha/instância/dia. Usa send_batch para ordem.
-    """
-    from utils.limits import get_user_daily_limit, can_create_campaign_today
+def _create_stage_campaign(campaign_id):
+    """Cria campanhas por etapa com 1 folder por instância Uazapi."""
+    from utils.limits import can_create_campaign_today
     from utils.sync_uazapi import _normalize_phone_for_api
-    try:
-        data = request.get_json() or {}
-        step = data.get('step')
-        if step not in (1, 2, 3, 4):
-            return json.dumps({"error": "step inválido (1-4)"}), 400
 
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """SELECT c.id, c.user_id, c.use_uazapi_sender, c.enable_cadence, c.cadence_config,
-                          c.delay_min_minutes, c.delay_max_minutes, c.message_template
-                   FROM campaigns c WHERE c.id = %s AND c.user_id = %s""",
-                (campaign_id, current_user.id)
-            )
-            campaign = cur.fetchone()
-        conn.close()
-        if not campaign or not campaign.get('use_uazapi_sender'):
-            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
+    data = request.get_json() or {}
+    step = data.get('step')
+    if step not in (2, 3, 4):
+        return json.dumps({"error": "Use esta rota apenas para follow-ups (step 2-4). Etapa inicial nasce na criação da campanha."}), 400
+    scheduled_for = _parse_iso_datetime_local(
+        data.get("scheduled_for") or data.get("scheduled_at") or data.get("scheduled_start")
+    )
+    schedule_mode = bool(scheduled_for and scheduled_for > datetime.now())
+    requested_instance_ids = data.get("instance_ids") or []
+    if not isinstance(requested_instance_ids, list):
+        requested_instance_ids = []
+    requested_instance_ids = {int(v) for v in requested_instance_ids if str(v).isdigit()}
 
-        token, instance_id = _get_uazapi_instance_for_campaign(campaign_id, current_user.id)
-        if not token:
-            return json.dumps({"error": "Instância Uazapi não encontrada"}), 400
-
-        if not can_create_campaign_today(instance_id):
-            return json.dumps({"error": "Limite de 1 campanha por instância por dia atingido. Nova campanha após meia-noite (BRT)."}), 429
-
-        limit = get_user_daily_limit(campaign['user_id'])
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if step == 1:
-                cur.execute(
-                    """SELECT id, phone, whatsapp_link, name FROM campaign_leads
-                       WHERE campaign_id = %s AND status = 'pending' AND current_step = 1
-                       ORDER BY COALESCE(send_batch, 999) ASC, id ASC LIMIT %s""",
-                    (campaign_id, limit)
-                )
-            else:
-                cur.execute(
-                    """SELECT id, phone, whatsapp_link, name FROM campaign_leads
-                       WHERE campaign_id = %s AND status = 'sent' AND current_step = %s
-                         AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
-                       ORDER BY COALESCE(send_batch, 999) ASC, id ASC LIMIT %s""",
-                    (campaign_id, step, limit)
-                )
-            leads = cur.fetchall()
-        conn.close()
-
-        if not leads:
-            return json.dumps({"error": "Nenhum lead elegível para esta etapa"}), 400
-
+    def _coerce_delay_minutes(value, default_value):
         try:
-            variations = json.loads(campaign.get('message_template') or '[]')
-            if isinstance(variations, str):
-                variations = [variations]
-            if not variations:
-                variations = ["Olá!"]
+            parsed = int(value)
+            if parsed < 1:
+                return 1
+            if parsed > 60:
+                return 60
+            return parsed
         except Exception:
-            variations = ["Olá!"]
+            return default_value
 
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT c.id, c.user_id, c.use_uazapi_sender, c.enable_cadence, c.cadence_config,
+                      c.delay_min_minutes, c.delay_max_minutes, c.message_template
+               FROM campaigns c WHERE c.id = %s AND c.user_id = %s""",
+            (campaign_id, current_user.id),
+        )
+        campaign = cur.fetchone()
+    conn.close()
+
+    if not campaign:
+        return json.dumps({"error": "Campanha não encontrada"}), 404
+    if not campaign.get('use_uazapi_sender'):
+        return json.dumps({"error": "Campanha não usa Uazapi"}), 400
+    if not _is_previous_stage_fully_done(campaign_id, step):
+        return json.dumps({"error": "Etapa anterior ainda não está concluída em todas as instâncias."}), 409
+
+    instances = _get_uazapi_instances_for_campaign(campaign_id, current_user.id)
+    if not instances:
+        return json.dumps({"error": "Nenhuma instância Uazapi vinculada à campanha"}), 400
+
+    allowed_instances = []
+    for inst in instances:
+        if can_create_campaign_today(inst['instance_id']):
+            allowed_instances.append(inst)
+    if requested_instance_ids:
+        allowed_instances = [
+            inst for inst in allowed_instances
+            if int(inst.get("instance_id") or 0) in requested_instance_ids
+        ]
+    if not allowed_instances:
+        if requested_instance_ids:
+            return json.dumps({"error": "Nenhuma das instâncias selecionadas está disponível para envio nesta etapa."}), 400
+        return json.dumps({"error": "Limite diário de criação por instância atingido (tente após meia-noite BRT)."}), 429
+
+    per_instance_limit = 30
+    total_limit = per_instance_limit * len(allowed_instances)
+    stage = _stage_label_from_step(step)
+    delay_min_minutes = _coerce_delay_minutes(
+        data.get("delay_min_minutes"),
+        int(campaign.get("delay_min_minutes") or 5),
+    )
+    delay_max_minutes = _coerce_delay_minutes(
+        data.get("delay_max_minutes"),
+        int(campaign.get("delay_max_minutes") or 15),
+    )
+    if delay_max_minutes < delay_min_minutes:
+        delay_max_minutes = delay_min_minutes
+
+    raw_variations = data.get("message_variations") or []
+    if isinstance(raw_variations, str):
+        raw_variations = [raw_variations]
+    custom_variations = []
+    if isinstance(raw_variations, list):
+        custom_variations = [str(v).strip() for v in raw_variations if str(v).strip()]
+    if len(custom_variations) > 5:
+        custom_variations = custom_variations[:5]
+
+    if schedule_mode:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT message_template, media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
-                (campaign_id, step)
+                """SELECT COUNT(*) AS total
+                   FROM campaign_leads
+                   WHERE campaign_id = %s
+                     AND status = 'sent'
+                     AND current_step = %s
+                     AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                     AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                (campaign_id, step),
             )
-            step_row = cur.fetchone()
+            total_eligible = int((cur.fetchone() or {}).get("total") or 0)
+            if total_eligible <= 0:
+                conn.close()
+                return json.dumps({"error": "Nenhum lead elegível para esta etapa"}), 400
+
+            created = 0
+            skipped = 0
+            for inst in allowed_instances:
+                cur.execute(
+                    """SELECT id
+                       FROM campaign_stage_sends
+                       WHERE campaign_id = %s
+                         AND stage = %s
+                         AND instance_id = %s
+                         AND scheduled_for = %s
+                         AND status IN ('scheduled', 'running', 'partial')
+                       LIMIT 1""",
+                    (campaign_id, stage, inst["instance_id"], scheduled_for),
+                )
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+                cur.execute(
+                    """INSERT INTO campaign_stage_sends
+                       (campaign_id, stage, instance_id, scheduled_for, status, planned_count, lead_ids,
+                        delay_min_minutes, delay_max_minutes, message_variations)
+                       VALUES (%s, %s, %s, %s, 'scheduled', 0, '[]'::jsonb, %s, %s, %s)""",
+                    (
+                        campaign_id,
+                        stage,
+                        inst["instance_id"],
+                        scheduled_for,
+                        delay_min_minutes,
+                        delay_max_minutes,
+                        json.dumps(custom_variations),
+                    ),
+                )
+                created += 1
+
+            if created <= 0:
+                conn.close()
+                return json.dumps({"error": "Já existe agendamento desta etapa/instância para esta janela."}), 409
+
+            cur.execute("UPDATE campaigns SET status = 'running' WHERE id = %s", (campaign_id,))
+        conn.commit()
         conn.close()
-        step_msg = None
-        if step_row and step_row.get('message_template'):
-            try:
-                step_msg = json.loads(step_row['message_template'])
-                if isinstance(step_msg, list) and step_msg:
-                    step_msg = step_msg[0]
-                elif isinstance(step_msg, str):
-                    pass
-                else:
-                    step_msg = None
-            except Exception:
-                pass
-        if not step_msg:
-            step_msg = random.choice(variations) if variations else "Olá!"
+        return json.dumps(
+            {
+                "success": True,
+                "scheduled": True,
+                "step": step,
+                "stage": stage,
+                "instances_used": created,
+                "count": min(total_eligible, total_limit),
+                "scheduled_for": scheduled_for.isoformat(),
+                "warnings": [f"{skipped} instância(s) já possuíam agendamento nesta janela."] if skipped else [],
+            }
+        )
+
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT id, phone, whatsapp_link, name FROM campaign_leads
+               WHERE campaign_id = %s
+                 AND status = 'sent'
+                 AND current_step = %s
+                 AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                 AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
+               ORDER BY COALESCE(send_batch, 999) ASC, id ASC
+               LIMIT %s""",
+            (campaign_id, step, total_limit),
+        )
+        leads = cur.fetchall()
+    conn.close()
+    if not leads:
+        return json.dumps({"error": "Nenhum lead elegível para esta etapa"}), 400
+
+    try:
+        variations = json.loads(campaign.get('message_template') or '[]')
+        if isinstance(variations, str):
+            variations = [variations]
+    except Exception:
+        variations = []
+    if not variations:
+        variations = ["Olá!"]
+
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
+            (campaign_id, step),
+        )
+        step_row = cur.fetchone()
+    conn.close()
+    step_msgs = []
+    if step_row and step_row.get('message_template'):
+        try:
+            parsed = json.loads(step_row.get('message_template') or '[]')
+            if isinstance(parsed, list):
+                step_msgs = [str(x) for x in parsed if str(x).strip()]
+            elif isinstance(parsed, str) and parsed.strip():
+                step_msgs = [parsed.strip()]
+        except Exception:
+            step_msgs = []
+    if custom_variations:
+        step_msgs = custom_variations
+    if not step_msgs:
+        step_msgs = variations
+
+    def _chunk(lst, n):
+        return [lst[i:i + n] for i in range(0, len(lst), n)]
+
+    lead_chunks = _chunk(leads[:total_limit], per_instance_limit)
+    delay_min_sec = int(delay_min_minutes * 60)
+    delay_max_sec = int(delay_max_minutes * 60)
+    uazapi = UazapiService()
+
+    sends_created = []
+    errors = []
+    for idx, chunk in enumerate(lead_chunks):
+        if idx >= len(allowed_instances):
+            break
+        inst = allowed_instances[idx]
+        token = inst.get('apikey')
+        if not token:
+            continue
 
         messages = []
         lead_ids = []
-        for lead in leads:
+        for lead in chunk:
             raw = lead.get('phone') or lead.get('whatsapp_link')
             norm = _normalize_phone_for_api(raw)
             if not norm:
                 continue
-            msg_text = step_msg if isinstance(step_msg, str) else (step_msg or "Olá!")
+            msg_text = random.choice(step_msgs)
             if lead.get('name'):
-                msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name']).replace("{{nome}}", lead['name']).replace("{{name}}", lead['name'])
+                nm = lead['name']
+                msg_text = msg_text.replace("{nome}", nm).replace("{name}", nm).replace("{{nome}}", nm).replace("{{name}}", nm)
             messages.append({"number": norm, "type": "text", "text": msg_text})
             lead_ids.append(lead['id'])
-
         if not messages:
-            return json.dumps({"error": "Nenhum número válido"}), 400
+            continue
 
-        delay_min_sec = (campaign.get('delay_min_minutes') or 5) * 60
-        delay_max_sec = (campaign.get('delay_max_minutes') or 15) * 60
-        uazapi = UazapiService()
         result = uazapi.create_advanced_campaign(
-            token, delay_min_sec, delay_max_sec, messages,
-            info=f"Campanha {campaign_id} step {step}"
+            token, delay_min_sec, delay_max_sec, messages, info=f"Campaign {campaign_id} {stage} inst {inst['instance_id']}"
         )
         if not result or not result.get('folder_id'):
-            return json.dumps({"error": "Falha ao criar campanha na Uazapi"}), 502
+            errors.append(f"Instância {inst['instance_id']}: falha ao criar campanha")
+            continue
 
         folder_id = result['folder_id']
-        conn = get_db_connection()
-        with conn.cursor() as cur:
+        instance_remote_jid = _resolve_uazapi_remote_jid(uazapi, token)
+        sends_created.append({
+            "instance_id": inst['instance_id'],
+            "instance_remote_jid": instance_remote_jid,
+            "folder_id": folder_id,
+            "lead_ids": lead_ids,
+            "planned_count": len(lead_ids),
+        })
+
+    if not sends_created:
+        return json.dumps({"error": "Nenhuma sub-campanha foi criada", "details": errors}), 502
+
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        for send in sends_created:
+            cur.execute(
+                """INSERT INTO campaign_stage_sends
+                   (campaign_id, stage, instance_id, instance_remote_jid, uazapi_folder_id, status, planned_count, lead_ids,
+                    delay_min_minutes, delay_max_minutes, message_variations)
+                   VALUES (%s, %s, %s, %s, %s, 'running', %s, %s, %s, %s, %s)""",
+                (
+                    campaign_id,
+                    stage,
+                    send['instance_id'],
+                    send.get('instance_remote_jid'),
+                    send['folder_id'],
+                    send['planned_count'],
+                    json.dumps(send['lead_ids']),
+                    delay_min_minutes,
+                    delay_max_minutes,
+                    json.dumps(step_msgs),
+                ),
+            )
             cur.execute(
                 "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
-                (instance_id, campaign_id)
+                (send['instance_id'], campaign_id),
             )
-            if step == 1:
-                cur.execute(
-                    "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
-                    (folder_id, json.dumps(lead_ids), campaign_id)
-                )
-            else:
-                cfg = campaign.get('cadence_config') or {}
-                if isinstance(cfg, str):
-                    cfg = json.loads(cfg) if cfg else {}
-                key_fid = f'rollover_fu{step-1}_folder_id'
-                key_ids = f'rollover_fu{step-1}_lead_ids'
-                cfg[key_fid] = folder_id
-                cfg[key_ids] = lead_ids
-                cur.execute(
-                    "UPDATE campaigns SET cadence_config = %s WHERE id = %s",
-                    (json.dumps(cfg), campaign_id)
-                )
-        conn.commit()
-        conn.close()
 
-        return json.dumps({"success": True, "folder_id": folder_id, "count": len(lead_ids)})
+        # Compatibilidade com painel atual (mantém último folder da etapa no cadence_config)
+        cfg = campaign.get('cadence_config') or {}
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg) if cfg else {}
+            except Exception:
+                cfg = {}
+        key_fid = f'rollover_fu{step-1}_folder_id'
+        key_ids = f'rollover_fu{step-1}_lead_ids'
+        cfg[key_fid] = sends_created[-1]['folder_id']
+        cfg[key_ids] = [lid for s in sends_created for lid in s['lead_ids']]
+        cur.execute(
+            "UPDATE campaigns SET cadence_config = %s, status = 'running' WHERE id = %s",
+            (json.dumps(cfg), campaign_id),
+        )
+    conn.commit()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "step": step,
+        "stage": stage,
+        "instances_used": len(sends_created),
+        "count": sum(s["planned_count"] for s in sends_created),
+        "folders": [{"instance_id": s["instance_id"], "folder_id": s["folder_id"], "count": s["planned_count"]} for s in sends_created],
+        "warnings": errors,
+    })
+
+
+@app.route("/api/campaigns/<int:campaign_id>/stage-campaign", methods=["POST"])
+@login_required
+def stage_campaign(campaign_id):
+    try:
+        return _create_stage_campaign(campaign_id)
+    except Exception as e:
+        print(f"Erro ao criar stage campaign: {e}")
+        return json.dumps({"error": str(e)}), 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/gerar-campanha", methods=["POST"])
+@login_required
+def gerar_campanha(campaign_id):
+    """Compat: redireciona para stage-campaign (follow-ups)."""
+    try:
+        return _create_stage_campaign(campaign_id)
     except Exception as e:
         print(f"Erro ao gerar campanha: {e}")
         return json.dumps({"error": str(e)}), 500

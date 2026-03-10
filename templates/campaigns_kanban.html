@@ -212,6 +212,8 @@
             <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="1">
                 <span class="text-sm font-medium text-gray-200">{{ campaign.id }}</span>
                 <span class="text-xs text-gray-500">Principal</span>
+                <span class="text-[10px] text-gray-500 ml-1" data-stage-status="initial"></span>
+                <span class="text-[10px] text-gray-600" data-stage-details="initial"></span>
                 {% if campaign.use_uazapi_sender and campaign.uazapi_folder_id %}
                 <button onclick="toggleRolloverPause(1, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
                     <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -222,6 +224,8 @@
             <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="2">
                 <span class="text-sm font-medium text-gray-200">{{ campaign.id }}/1</span>
                 <span class="text-xs text-gray-500">Follow-up 1</span>
+                <span class="text-[10px] text-gray-500 ml-1" data-stage-status="follow1"></span>
+                <span class="text-[10px] text-gray-600" data-stage-details="follow1"></span>
                 {% if cfg.get('rollover_fu1_folder_id') %}
                 <button onclick="toggleRolloverPause(2, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
                     <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -234,6 +238,8 @@
             <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="3">
                 <span class="text-sm font-medium text-gray-200">{{ campaign.id }}/2</span>
                 <span class="text-xs text-gray-500">Follow-up 2</span>
+                <span class="text-[10px] text-gray-500 ml-1" data-stage-status="follow2"></span>
+                <span class="text-[10px] text-gray-600" data-stage-details="follow2"></span>
                 {% if cfg.get('rollover_fu2_folder_id') %}
                 <button onclick="toggleRolloverPause(3, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
                     <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -246,6 +252,8 @@
             <div class="subcampaign-card flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800/60 border border-gray-700/50" data-step="4">
                 <span class="text-sm font-medium text-gray-200">{{ campaign.id }}/3</span>
                 <span class="text-xs text-gray-500">Despedida</span>
+                <span class="text-[10px] text-gray-500 ml-1" data-stage-status="breakup"></span>
+                <span class="text-[10px] text-gray-600" data-stage-details="breakup"></span>
                 {% if cfg.get('rollover_fu3_folder_id') %}
                 <button onclick="toggleRolloverPause(4, event)" class="ml-2 text-gray-500 hover:text-yellow-400 transition-colors p-1" title="Pausar/Continuar">
                     <svg class="w-4 h-4 pause-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -269,9 +277,6 @@
                     <span class="text-sm font-semibold text-gray-200">Inicial</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
-                    <button onclick="gerarCampanha(1)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
-                    {% endif %}
                     <button onclick="openMessageModal(1, 'Inicial')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -298,7 +303,7 @@
                 </div>
                 <div class="flex items-center gap-2">
                     {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
-                    <button onclick="gerarCampanha(2)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    <button onclick="openStageCampaignModal(2, 'Follow-up 1')" data-generate-step="2" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed" title="Gerar campanha para esta etapa">Gerar</button>
                     {% endif %}
                     <button onclick="openMessageModal(2, 'Follow-up 1')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
@@ -326,7 +331,7 @@
                 </div>
                 <div class="flex items-center gap-2">
                     {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
-                    <button onclick="gerarCampanha(3)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    <button onclick="openStageCampaignModal(3, 'Follow-up 2')" data-generate-step="3" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed" title="Gerar campanha para esta etapa">Gerar</button>
                     {% endif %}
                     <button onclick="openMessageModal(3, 'Follow-up 2')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
@@ -354,7 +359,7 @@
                 </div>
                 <div class="flex items-center gap-2">
                     {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
-                    <button onclick="gerarCampanha(4)" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30" title="Gerar campanha para esta etapa">Gerar</button>
+                    <button onclick="openStageCampaignModal(4, 'Break-up')" data-generate-step="4" class="text-[10px] bg-green-600/20 text-green-400 px-2 py-1 rounded border border-green-500/30 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed" title="Gerar campanha para esta etapa">Gerar</button>
                     {% endif %}
                     <button onclick="openMessageModal(4, 'Break-up')"
                         class="text-xs text-gray-500 hover:text-white transition-colors" title="Editar Mensagem">
@@ -574,6 +579,70 @@
     </div>
 </div>
 
+<!-- Stage Campaign Modal -->
+<div id="stageCampaignModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50">
+    <div class="bg-[#0f1630] border border-gray-700 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4">
+        <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
+            <h3 class="text-lg font-bold text-white">Gerar Campanha - <span id="stageModalStepName"></span></h3>
+            <button onclick="closeStageCampaignModal()" class="text-gray-400 hover:text-white transition-colors">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            </button>
+        </div>
+        <div class="p-6 overflow-y-auto flex-1 space-y-5">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Data de envio</label>
+                    <input id="stageScheduledDate" type="date" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Horário</label>
+                    <input id="stageScheduledTime" type="time" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                </div>
+            </div>
+            <div class="flex items-center gap-3">
+                <label class="inline-flex items-center gap-2 text-sm text-gray-300">
+                    <input type="checkbox" id="stageSendNow" class="rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0" checked>
+                    Gerar agora
+                </label>
+                <p class="text-xs text-gray-500">Desmarque para agendar por data/hora.</p>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Delay mínimo (min)</label>
+                    <input id="stageDelayMin" type="number" min="1" max="60" value="5" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Delay máximo (min)</label>
+                    <input id="stageDelayMax" type="number" min="1" max="60" value="15" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Instâncias (Uazapi)</label>
+                <div id="stageInstanceList" class="space-y-2"></div>
+                <p id="stageCapacityPreview" class="text-xs text-emerald-300 mt-2 hidden"></p>
+            </div>
+
+            <div>
+                <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Variações da mensagem (máx. 5)</label>
+                <div id="stageVariationsContainer" class="space-y-3"></div>
+                <button onclick="addStageVariation()" type="button" class="w-full mt-3 py-2 border-2 border-dashed border-gray-700 hover:border-gray-500 text-gray-500 hover:text-gray-300 rounded-lg text-sm font-medium transition-colors">
+                    Adicionar variação
+                </button>
+            </div>
+        </div>
+        <div class="p-4 border-t border-gray-700 bg-gray-900/50 flex justify-end gap-3">
+            <button onclick="closeStageCampaignModal()" class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancelar</button>
+            <button onclick="submitStageCampaign()" id="stageSubmitBtn" class="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-blue-500/20">
+                Gerar Campanha
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
@@ -682,7 +751,12 @@
     }
     const CAMPAIGN_ID = {{ campaign.id }};
     const USE_UAZAPI = {{ campaign.use_uazapi_sender|tojson }};
+    const STAGE_DEFAULT_DELAY_MIN = {{ (campaign.delay_min_minutes or 5)|int }};
+    const STAGE_DEFAULT_DELAY_MAX = {{ (campaign.delay_max_minutes or 15)|int }};
+    const CAMPAIGN_INSTANCES = {{ (campaign_instances or [])|tojson }};
+    const UAZAPI_INSTANCES = CAMPAIGN_INSTANCES.filter(i => (i.api_provider || 'megaapi') === 'uazapi');
     let ALL_LEADS = {};
+    let STAGE_MODAL_STEP = null;
 
     async function validateLeads() {
         if (!USE_UAZAPI) return;
@@ -703,24 +777,182 @@
         }
     }
 
-    async function gerarCampanha(step) {
+    function renderStageInstanceOptions() {
+        const container = document.getElementById('stageInstanceList');
+        container.innerHTML = '';
+        UAZAPI_INSTANCES.forEach((inst, idx) => {
+            const row = document.createElement('label');
+            row.className = 'flex items-center gap-3 p-2 rounded-lg border border-gray-700/60 hover:bg-white/5 cursor-pointer';
+            const status = inst.status === 'connected' ? '● Conectado' : '○ Desconectado';
+            const statusClass = inst.status === 'connected'
+                ? 'text-green-400 border-green-500/30 bg-green-500/10'
+                : 'text-red-400 border-red-500/30 bg-red-500/10';
+            row.innerHTML = `
+                <input type="checkbox" onchange="updateStageCapacityPreview()" class="stage-instance-checkbox rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0" value="${inst.id}" ${idx === 0 ? 'checked' : ''}>
+                <div class="flex-1 flex items-center justify-between">
+                    <span class="text-sm text-gray-200">${inst.name}</span>
+                    <span class="text-[10px] px-2 py-0.5 rounded-full border ${statusClass}">${status}</span>
+                </div>
+            `;
+            container.appendChild(row);
+        });
+        updateStageCapacityPreview();
+    }
+
+    function addStageVariation(value = '') {
+        const container = document.getElementById('stageVariationsContainer');
+        if (container.children.length >= 5) {
+            showToast('Máximo de 5 variações atingido.', 'warning');
+            return;
+        }
+        const row = document.createElement('div');
+        row.className = 'flex gap-2 items-start';
+        row.innerHTML = `
+            <textarea class="stage-variation-input w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none h-20 resize-none" placeholder="Digite a mensagem...">${value}</textarea>
+            <button type="button" onclick="this.parentElement.remove()" class="text-gray-500 hover:text-red-400 p-2 rounded hover:bg-red-500/10 transition-colors" title="Remover variação">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+            </button>
+        `;
+        container.appendChild(row);
+    }
+
+    function updateStageCapacityPreview() {
+        const preview = document.getElementById('stageCapacityPreview');
+        const selected = document.querySelectorAll('.stage-instance-checkbox:checked').length;
+        if (!preview) return;
+        if (selected <= 0) {
+            preview.classList.add('hidden');
+            return;
+        }
+        preview.classList.remove('hidden');
+        preview.textContent = `Capacidade diária prevista: 30 x ${selected} = ${selected * 30} leads/dia.`;
+    }
+
+    function toggleStageScheduleInputs() {
+        const sendNow = document.getElementById('stageSendNow').checked;
+        document.getElementById('stageScheduledDate').disabled = sendNow;
+        document.getElementById('stageScheduledTime').disabled = sendNow;
+    }
+
+    function openStageCampaignModal(step, stepName) {
         if (!USE_UAZAPI) return;
+        const btn = document.querySelector(`[data-generate-step="${step}"]`);
+        if (btn && btn.disabled) {
+            showToast('Etapa anterior ainda não está concluída em todas as instâncias.', 'warning');
+            return;
+        }
+        STAGE_MODAL_STEP = step;
+        document.getElementById('stageModalStepName').textContent = stepName;
+        document.getElementById('stageSendNow').checked = true;
+        document.getElementById('stageScheduledDate').value = '';
+        document.getElementById('stageScheduledTime').value = '';
+        toggleStageScheduleInputs();
+        document.getElementById('stageDelayMin').value = String(STAGE_DEFAULT_DELAY_MIN);
+        document.getElementById('stageDelayMax').value = String(STAGE_DEFAULT_DELAY_MAX);
+        renderStageInstanceOptions();
+        const variationsContainer = document.getElementById('stageVariationsContainer');
+        variationsContainer.innerHTML = '';
+        addStageVariation();
+        addStageVariation();
+        document.getElementById('stageCampaignModal').classList.remove('hidden');
+    }
+
+    function closeStageCampaignModal() {
+        document.getElementById('stageCampaignModal').classList.add('hidden');
+        STAGE_MODAL_STEP = null;
+    }
+
+    async function submitStageCampaign() {
+        if (!STAGE_MODAL_STEP) return;
+        const instanceIds = Array.from(document.querySelectorAll('.stage-instance-checkbox:checked'))
+            .map(cb => parseInt(cb.value, 10))
+            .filter(Boolean);
+        if (instanceIds.length === 0) {
+            showToast('Selecione ao menos uma instância.', 'warning');
+            return;
+        }
+
+        const variations = Array.from(document.querySelectorAll('.stage-variation-input'))
+            .map(t => t.value.trim())
+            .filter(Boolean)
+            .slice(0, 5);
+        const sendNow = document.getElementById('stageSendNow').checked;
+        const date = document.getElementById('stageScheduledDate').value;
+        const time = document.getElementById('stageScheduledTime').value;
+        if (!sendNow && (!date || !time)) {
+            showToast('Informe data e horário para agendar.', 'warning');
+            return;
+        }
+
+        const delayMin = parseInt(document.getElementById('stageDelayMin').value, 10) || 5;
+        const delayMax = parseInt(document.getElementById('stageDelayMax').value, 10) || 15;
+        const payload = {
+            step: STAGE_MODAL_STEP,
+            instance_ids: instanceIds,
+            delay_min_minutes: delayMin,
+            delay_max_minutes: delayMax,
+            message_variations: variations
+        };
+        if (!sendNow) {
+            payload.scheduled_for = `${date}T${time}:00`;
+        }
+
+        const btn = document.getElementById('stageSubmitBtn');
+        const original = btn.textContent;
+        btn.textContent = 'Enviando...';
+        btn.disabled = true;
         try {
-            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/gerar-campanha`, {
+            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/stage-campaign`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ step })
+                body: JSON.stringify(payload)
             });
             const data = await res.json();
             if (res.ok) {
-                showToast(`Campanha criada: ${data.count || 0} leads`, 'success');
+                const modeLabel = data.scheduled ? 'agendada' : 'criada';
+                showToast(`Campanha ${modeLabel}: ${data.count || 0} leads (${data.instances_used || 1} inst.)`, 'success');
+                closeStageCampaignModal();
                 refreshBoard();
             } else {
                 showToast(data.error || 'Erro ao gerar campanha', 'error');
             }
         } catch (e) {
             showToast('Erro de conexão', 'error');
+        } finally {
+            btn.textContent = original;
+            btn.disabled = false;
         }
+    }
+
+    function renderStageProgress(stageProgress) {
+        const stages = (stageProgress && stageProgress.stages) ? stageProgress.stages : {};
+        ['initial', 'follow1', 'follow2', 'breakup'].forEach(stage => {
+            const statusEl = document.querySelector(`[data-stage-status="${stage}"]`);
+            const detailEl = document.querySelector(`[data-stage-details="${stage}"]`);
+            const payload = stages[stage];
+            if (!statusEl || !detailEl || !payload) return;
+
+            const status = (payload.status || 'idle').toUpperCase();
+            const success = payload.success_count || 0;
+            const planned = payload.planned_count || 0;
+            const instCount = (payload.instances || []).length;
+            statusEl.textContent = status === 'IDLE' ? '' : status;
+            detailEl.textContent = planned > 0 ? `(${success}/${planned} • ${instCount} inst.)` : '';
+        });
+    }
+
+    function applyStageLocks(stageUnlocks) {
+        [2, 3, 4].forEach(step => {
+            const btn = document.querySelector(`[data-generate-step="${step}"]`);
+            if (!btn) return;
+            const unlocked = !!(stageUnlocks && stageUnlocks[String(step)]);
+            btn.disabled = !unlocked;
+            if (!unlocked) {
+                btn.title = 'Etapa anterior precisa estar DONE em todas as instâncias';
+            } else {
+                btn.title = 'Gerar campanha para esta etapa';
+            }
+        });
     }
     const ROLLOVER_PAUSED = {}; // step -> true se pausado (estado local)
 
@@ -933,6 +1165,9 @@
                 statsEl.classList.add('hidden');
             }
 
+            renderStageProgress(data.stage_progress);
+            applyStageLocks(data.stage_unlocks);
+
         } catch (err) {
             console.error('Board refresh error:', err);
             showToast('Erro ao carregar board', 'error');
@@ -1064,12 +1299,19 @@
 
     // Close on escape
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeLeadModal();
+        if (e.key === 'Escape') {
+            closeLeadModal();
+            closeMessageModal();
+            closeStageCampaignModal();
+        }
     });
 
     // Close on click outside
     document.getElementById('leadModal').addEventListener('click', (e) => {
         if (e.target.id === 'leadModal') closeLeadModal();
+    });
+    document.getElementById('stageCampaignModal').addEventListener('click', (e) => {
+        if (e.target.id === 'stageCampaignModal') closeStageCampaignModal();
     });
 
     // Format phone helper
@@ -1101,6 +1343,10 @@
     // Initial load
     document.addEventListener('DOMContentLoaded', () => {
         refreshBoard();
+        const sendNowToggle = document.getElementById('stageSendNow');
+        if (sendNowToggle) {
+            sendNowToggle.addEventListener('change', toggleStageScheduleInputs);
+        }
         // Polling: atualizar board quando campanha está ativa (envios em andamento)
         const CAMPAIGN_STATUS = "{{ campaign.status }}";
         if (CAMPAIGN_STATUS === 'running' || CAMPAIGN_STATUS === 'pending') {

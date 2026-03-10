@@ -41,7 +41,7 @@ except ImportError:
     uazapi_service = None
 
 # Limites compartilhados
-from utils.limits import check_daily_limit, get_user_daily_limit
+from utils.limits import check_daily_limit, get_user_daily_limit, can_create_campaign_today
 from utils.sync_uazapi import (
     sync_campaign_leads_from_uazapi,
     get_uazapi_campaign_counts,
@@ -60,6 +60,9 @@ CHATWOOT_ACCOUNT_ID = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
 
 CADENCE_POLL_INTERVAL = 60  # seconds between each poll cycle
 SAFETY_BUFFER_MINUTES = 5
+PRE_DISPARO_WINDOW_MIN = 2
+PRE_DISPARO_WINDOW_MAX = 5
+STAGE_SYNC_INTERVAL_MINUTES = 15
 
 def get_db_connection():
     return psycopg2.connect(
@@ -306,14 +309,319 @@ def get_campaign_instance(campaign_id, conn):
         row = cur.fetchone()
         return dict(row) if row else None
 
+
+def _resolve_uazapi_remote_jid(token):
+    """Resolve remote_jid ativo da instância; best-effort."""
+    if not uazapi_service or not token:
+        return None
+    try:
+        result = uazapi_service.get_status(token) or {}
+        remote_jid = result.get("id") or result.get("me")
+        if not remote_jid and isinstance(result.get("instance_data"), dict):
+            remote_jid = (
+                result["instance_data"].get("phone")
+                or result["instance_data"].get("user")
+                or result["instance_data"].get("jid")
+            )
+        return remote_jid
+    except Exception:
+        return None
+
+
+def _load_step_messages(conn, campaign_id, step):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
+            (campaign_id, step),
+        )
+        row = cur.fetchone() or {}
+    raw = row.get("message_template") or "[]"
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        if isinstance(parsed, str) and parsed.strip():
+            return [parsed.strip()]
+    except Exception:
+        pass
+    return ["Olá!"]
+
+
+def _materialize_scheduled_stage_sends(conn):
+    """
+    Pré-disparo determinístico (2-5 min antes):
+    - recalcula elegíveis imediatamente antes do envio
+    - exclui converted/lost/removed_from_funnel
+    - cria folder só na janela curta
+    """
+    if not uazapi_service:
+        return
+
+    now_br = datetime.now(BRAZIL_TZ)
+    now_naive = now_br.replace(tzinfo=None)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
+                   css.status, i.apikey,
+                   css.delay_min_minutes, css.delay_max_minutes, css.message_variations,
+                   c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max
+            FROM campaign_stage_sends css
+            JOIN campaigns c ON c.id = css.campaign_id
+            JOIN instances i ON i.id = css.instance_id
+            WHERE css.status = 'scheduled'
+              AND css.uazapi_folder_id IS NULL
+              AND css.scheduled_for IS NOT NULL
+              AND css.scheduled_for <= (NOW() + INTERVAL '5 minutes')
+            ORDER BY css.scheduled_for ASC, css.id ASC
+            """
+        )
+        rows = cur.fetchall() or []
+
+    stage_to_step = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
+    grouped = {}
+    for row in rows:
+        sched = row.get("scheduled_for")
+        if not sched:
+            continue
+        remaining = (sched - now_naive).total_seconds()
+        if remaining > PRE_DISPARO_WINDOW_MAX * 60:
+            continue
+        if remaining < -15 * 60:
+            continue
+        key = (row["campaign_id"], row["stage"], sched)
+        grouped.setdefault(key, []).append(row)
+
+    for (campaign_id, stage, scheduled_for), sends in grouped.items():
+        step = stage_to_step.get(stage)
+        if not step:
+            continue
+        sends = sorted(sends, key=lambda x: x.get("instance_id") or 0)
+        per_instance_limit = 30
+        total_limit = per_instance_limit * len(sends)
+        if total_limit <= 0:
+            continue
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, phone, whatsapp_link, name
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                  AND status = 'sent'
+                  AND current_step = %s
+                  AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                  AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
+                ORDER BY COALESCE(send_batch, 999) ASC, id ASC
+                LIMIT %s
+                """,
+                (campaign_id, step, total_limit),
+            )
+            leads = cur.fetchall() or []
+
+        if not leads:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_stage_sends
+                    SET status = 'failed',
+                        updated_at = NOW()
+                    WHERE campaign_id = %s
+                      AND stage = %s
+                      AND scheduled_for = %s
+                      AND status = 'scheduled'
+                    """,
+                    (campaign_id, stage, scheduled_for),
+                )
+            conn.commit()
+            continue
+
+        chunks = [leads[i : i + per_instance_limit] for i in range(0, len(leads), per_instance_limit)]
+
+        for idx, send in enumerate(sends):
+            send_id = send["id"]
+            token = send.get("apikey")
+            chunk = chunks[idx] if idx < len(chunks) else []
+            custom_variations = send.get("message_variations")
+            if isinstance(custom_variations, str):
+                try:
+                    custom_variations = json.loads(custom_variations)
+                except Exception:
+                    custom_variations = []
+            if not isinstance(custom_variations, list):
+                custom_variations = []
+            custom_variations = [str(v).strip() for v in custom_variations if str(v).strip()]
+            step_msgs = custom_variations or _load_step_messages(conn, campaign_id, step)
+            if not token:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                continue
+            if not chunk:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'done', planned_count = 0, success_count = 0, failed_count = 0, updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                continue
+
+            messages = []
+            lead_ids = []
+            for lead in chunk:
+                raw = lead.get("phone") or lead.get("whatsapp_link")
+                clean = re.sub(r"\D", "", str(raw or ""))
+                if len(clean) <= 11 and clean and not clean.startswith("55"):
+                    clean = "55" + clean
+                if not clean:
+                    continue
+                text = random.choice(step_msgs)
+                name = lead.get("name")
+                if name:
+                    text = (
+                        text.replace("{nome}", name)
+                        .replace("{name}", name)
+                        .replace("{{nome}}", name)
+                        .replace("{{name}}", name)
+                    )
+                messages.append({"number": clean, "type": "text", "text": text})
+                lead_ids.append(lead["id"])
+
+            if not messages:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'done', planned_count = 0, success_count = 0, failed_count = 0, updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                continue
+
+            if not can_create_campaign_today(send.get("instance_id")):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                continue
+
+            delay_min_src = send.get("delay_min_minutes") or send.get("campaign_delay_min") or 5
+            delay_max_src = send.get("delay_max_minutes") or send.get("campaign_delay_max") or 15
+            delay_min_sec = int(delay_min_src * 60)
+            delay_max_sec = int(delay_max_src * 60)
+            if delay_max_sec < delay_min_sec:
+                delay_max_sec = delay_min_sec
+            result = uazapi_service.create_advanced_campaign(
+                token=token,
+                delay_min_sec=delay_min_sec,
+                delay_max_sec=delay_max_sec,
+                messages=messages,
+                info=f"Campaign {campaign_id} {stage} inst {send.get('instance_id')}",
+            )
+            if not result or not result.get("folder_id"):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                continue
+
+            folder_id = result["folder_id"]
+            remote_jid = _resolve_uazapi_remote_jid(token)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_stage_sends
+                    SET uazapi_folder_id = %s,
+                        instance_remote_jid = %s,
+                        lead_ids = %s,
+                        planned_count = %s,
+                        status = 'running',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (folder_id, remote_jid, json.dumps(lead_ids), len(lead_ids), send_id),
+                )
+                cur.execute(
+                    "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
+                    (send.get("instance_id"), campaign_id),
+                )
+            conn.commit()
+
+
+def _sync_active_stage_folders(conn):
+    """
+    Sync explícito de folders ativos a cada 15 min.
+    Atualiza progresso por stage/instância com base em listfolders.
+    """
+    if not uazapi_service:
+        return
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT css.campaign_id, c.uazapi_folder_id, i.apikey
+            FROM campaign_stage_sends css
+            JOIN campaigns c ON c.id = css.campaign_id
+            JOIN campaign_instances ci ON ci.campaign_id = css.campaign_id
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE css.status IN ('scheduled', 'running', 'partial')
+              AND css.uazapi_folder_id IS NOT NULL
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+              AND (
+                    css.last_sync_at IS NULL
+                    OR css.last_sync_at <= (NOW() - INTERVAL '15 minutes')
+                  )
+            ORDER BY css.campaign_id ASC
+            """
+        )
+        rows = cur.fetchall() or []
+
+    if not rows:
+        return
+
+    by_campaign = {}
+    for row in rows:
+        by_campaign.setdefault(row["campaign_id"], row)
+
+    for row in by_campaign.values():
+        try:
+            sync_campaign_leads_from_uazapi(
+                conn,
+                row["campaign_id"],
+                row["apikey"],
+                row.get("uazapi_folder_id"),
+                uazapi_service,
+            )
+        except Exception as e:
+            print(f"  ⚠️ [Stage Sync] Campaign {row['campaign_id']}: falha no sync: {e}")
+
 # --- MAIN LOGIC ---
 
 def process_cadence():
     print("🔄 Starting Intelligent Cadence Worker...")
+    last_stage_sync_at = None
 
     while True:
         try:
             conn = get_db_connection()
+
+            # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)
+            _materialize_scheduled_stage_sends(conn)
+
+            now_sync = datetime.now(BRAZIL_TZ)
+            should_sync = (
+                last_stage_sync_at is None
+                or (now_sync - last_stage_sync_at).total_seconds() >= STAGE_SYNC_INTERVAL_MINUTES * 60
+            )
+            if should_sync:
+                _sync_active_stage_folders(conn)
+                last_stage_sync_at = now_sync
 
             # --- PART A: SAFETY BUFFER CHECK (Monitoring Phase) ---
             check_monitoring_leads(conn)
