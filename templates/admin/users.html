@@ -78,6 +78,8 @@
                             {% set plan_color = 'text-orange-400' %}
                             {% elif user.license_type == 'semestral' %}
                             {% set plan_color = 'text-yellow-400' %}
+                            {% elif user.license_type == 'infinite' %}
+                            {% set plan_color = 'text-cyan-400' %}
                             {% endif %}
 
                             <span class="{{ plan_color }} font-bold">{{ user.license_type|default('Sem Plano')|upper
@@ -173,6 +175,7 @@
                             <option value="starter">Starter (10 msg/dia)</option>
                             <option value="pro">Pro (20 msg/dia)</option>
                             <option value="scale">Scale (30 msg/dia)</option>
+                            <option value="infinite">Infinite (50 msg/dia, 10k extração/mês)</option>
                         </select>
                         <button type="submit" class="btn btn-primary text-sm whitespace-nowrap">Aplicar</button>
                     </form>

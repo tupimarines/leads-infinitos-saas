@@ -96,7 +96,7 @@ def init_db() -> None:
             user_id INTEGER NOT NULL REFERENCES users(id),
             hotmart_purchase_id TEXT UNIQUE NOT NULL,
             hotmart_product_id TEXT NOT NULL,
-            license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'semestral', 'anual')),
+            license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'semestral', 'anual', 'infinite')),
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
             purchase_date TIMESTAMP NOT NULL,
             expires_at TIMESTAMP NOT NULL,
@@ -569,6 +569,8 @@ class License:
 
     @property
     def daily_limit(self) -> int:
+        if self.license_type == 'infinite':
+            return 50
         if self.license_type == 'scale':
             return 30
         elif self.license_type == 'pro':
@@ -576,6 +578,13 @@ class License:
         elif self.license_type == 'starter':
             return 10
         return 10  # Fallback
+
+    @property
+    def monthly_extraction_limit(self) -> int:
+        """Limite mensal de extração de leads (scraping)."""
+        if self.license_type == 'infinite':
+            return 10000
+        return 2000  # starter, pro, scale, semestral, anual
 
     @staticmethod
     def create(user_id: int, hotmart_purchase_id: str, hotmart_product_id: str, 
@@ -1740,8 +1749,8 @@ def scrape():
     # Calcular uso mensal
     cycle_info = ScrapingJob.get_monthly_lead_count(current_user.id, subscription_date)
     
-    # Validar limite (2000 leads por mês)
-    MONTHLY_LIMIT = 2000
+    # Limite mensal conforme plano (infinite=10000, demais=2000)
+    MONTHLY_LIMIT = active_license.monthly_extraction_limit
     requested_leads = total
     
     if cycle_info['used'] + requested_leads > MONTHLY_LIMIT:

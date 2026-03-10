@@ -35,7 +35,9 @@ def get_user_daily_limit(user_id: int) -> int:
         limit = 10
         for row in rows:
             lt = (row.get('license_type') or '').lower()
-            if lt == 'scale':
+            if lt == 'infinite':
+                limit = max(limit, 50)
+            elif lt == 'scale':
                 limit = max(limit, 30)
             elif lt == 'pro':
                 limit = max(limit, 20)
