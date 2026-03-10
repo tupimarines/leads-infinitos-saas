@@ -4870,7 +4870,9 @@ def _stage_label_from_step(step):
 
 def _parse_iso_datetime_local(raw_value):
     """
-    Parse de datetime ISO (naive ou com timezone) para datetime local naive.
+    Parse de datetime ISO para UTC naive (armazenamento consistente no backend/DB).
+    - Se vier sem timezone (caso do input datetime-local do navegador), assume America/Sao_Paulo.
+    - Se vier com timezone explícito, respeita e converte para UTC.
     Retorna None quando valor ausente/inválido.
     """
     if not raw_value:
@@ -4883,9 +4885,10 @@ def _parse_iso_datetime_local(raw_value):
             if text.endswith("Z"):
                 text = text[:-1] + "+00:00"
             parsed = datetime.fromisoformat(text)
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone().replace(tzinfo=None)
-        return parsed
+        if parsed.tzinfo is None:
+            # Inputs do modal chegam sem timezone; assumir horário de Brasília.
+            parsed = BRAZIL_TZ.localize(parsed)
+        return parsed.astimezone(pytz.UTC).replace(tzinfo=None)
     except Exception:
         return None
 
@@ -5199,7 +5202,7 @@ def _create_stage_campaign(campaign_id):
     scheduled_for = _parse_iso_datetime_local(
         data.get("scheduled_for") or data.get("scheduled_at") or data.get("scheduled_start")
     )
-    schedule_mode = bool(scheduled_for and scheduled_for > datetime.now())
+    schedule_mode = bool(scheduled_for and scheduled_for > datetime.utcnow())
     requested_instance_ids = data.get("instance_ids") or []
     if not isinstance(requested_instance_ids, list):
         requested_instance_ids = []
