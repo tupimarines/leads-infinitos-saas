@@ -2290,7 +2290,7 @@ def campaign_kanban_data(campaign_id):
         return json.dumps({'error': 'Campanha não encontrada'}), 404
 
     stats = None
-    if getattr(campaign, 'use_uazapi_sender', False) and getattr(campaign, 'uazapi_folder_id', None):
+    if getattr(campaign, 'use_uazapi_sender', False):
         conn_sync = get_db_connection()
         try:
             with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2305,13 +2305,14 @@ def campaign_kanban_data(campaign_id):
                 from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
                 uazapi = UazapiService()
                 sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
-                counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
-                stats = {
-                    "sent": counts.get("sent", 0),
-                    "failed": counts.get("failed", 0),
-                    "scheduled": counts.get("scheduled", 0),
-                    "initial_campaign_finished": is_initial_campaign_finished(counts),
-                }
+                if campaign.uazapi_folder_id:
+                    counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
+                    stats = {
+                        "sent": counts.get("sent", 0),
+                        "failed": counts.get("failed", 0),
+                        "scheduled": counts.get("scheduled", 0),
+                        "initial_campaign_finished": is_initial_campaign_finished(counts),
+                    }
         finally:
             conn_sync.close()
 
@@ -4720,8 +4721,8 @@ def sync_campaign_uazapi_stats(campaign_id):
             )
             campaign = cur.fetchone()
         conn.close()
-        if not campaign or not campaign.get('use_uazapi_sender') or not campaign.get('uazapi_folder_id'):
-            return json.dumps({"error": "Campanha não usa Uazapi ou sem folder_id"}), 400
+        if not campaign or not campaign.get('use_uazapi_sender'):
+            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -4739,7 +4740,7 @@ def sync_campaign_uazapi_stats(campaign_id):
         from utils.sync_uazapi import sync_campaign_leads_from_uazapi
         uazapi = UazapiService()
         token = inst['apikey']
-        folder_id = campaign['uazapi_folder_id']
+        folder_id = campaign.get('uazapi_folder_id')
         conn = get_db_connection()
         try:
             result = sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi)
