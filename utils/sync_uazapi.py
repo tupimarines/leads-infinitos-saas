@@ -16,6 +16,44 @@ def _normalize_folder_id(value):
     return str(value).strip()
 
 
+def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed_phones):
+    """
+    Reconcilia sucesso/falha por lead usando list_messages (Sent/Failed).
+    Evita confiar apenas no agregado log_sucess/log_failed quando houver divergência.
+    """
+    if not lead_ids:
+        return set(), set()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT id, phone, whatsapp_link
+               FROM campaign_leads
+               WHERE campaign_id = %s
+                 AND id = ANY(%s)""",
+            (campaign_id, lead_ids),
+        )
+        rows = cur.fetchall() or []
+
+    sent_normalized = set()
+    for ph in sent_phones or []:
+        sent_normalized |= normalize_phone_for_match(ph)
+    failed_normalized = set()
+    for ph in failed_phones or []:
+        failed_normalized |= normalize_phone_for_match(ph)
+
+    sent_ids = set()
+    failed_ids = set()
+    for row in rows:
+        variants = normalize_phone_for_match(row.get("phone")) | normalize_phone_for_match(row.get("whatsapp_link"))
+        if not variants:
+            continue
+        if variants & sent_normalized:
+            sent_ids.add(row["id"])
+            continue
+        if variants & failed_normalized:
+            failed_ids.add(row["id"])
+    return sent_ids, failed_ids
+
+
 def _normalize_phone_for_api(phone: str):
     """
     Normaliza número para envio à API Uazapi (POST /chat/check, create_advanced_campaign).
@@ -326,13 +364,87 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 )
                 updated_sent += n
 
+        reconciled_success = 0
+        reconciled_failed = 0
+        if status == "done" and planned_count > 0 and (log_success + log_failed) < planned_count:
+            sent_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent")
+            failed_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed")
+            sent_ids_done, failed_ids_done = _reconcile_send_by_messages(
+                conn=conn,
+                campaign_id=campaign_id,
+                lead_ids=lead_ids,
+                sent_phones=sent_phones_done,
+                failed_phones=failed_phones_done,
+            )
+            reconciled_success = len(sent_ids_done)
+            reconciled_failed = len(failed_ids_done)
+
+            if sent_ids_done:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE campaign_leads
+                           SET status = 'sent',
+                               sent_at = NOW(),
+                               current_step = %s,
+                               last_message_sent_at = NOW(),
+                               last_sent_stage = COALESCE(%s, last_sent_stage),
+                               last_sent_instance_id = COALESCE(%s, last_sent_instance_id),
+                               last_sent_instance_remote_jid = COALESCE(%s, last_sent_instance_remote_jid),
+                               last_sent_folder_id = COALESCE(%s, last_sent_folder_id)
+                           WHERE id = ANY(%s)
+                             AND campaign_id = %s
+                             AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                        (
+                            stage_to_next_step.get(send.get("stage"), 4),
+                            send.get("stage"),
+                            send.get("instance_id"),
+                            send.get("instance_remote_jid"),
+                            fid,
+                            list(sent_ids_done),
+                            campaign_id,
+                        ),
+                    )
+                    updated_sent += cur.rowcount
+
+            if failed_ids_done:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE campaign_leads
+                           SET status = 'failed',
+                               sent_at = COALESCE(sent_at, NOW()),
+                               last_sent_stage = COALESCE(%s, last_sent_stage),
+                               last_sent_instance_id = COALESCE(%s, last_sent_instance_id),
+                               last_sent_instance_remote_jid = COALESCE(%s, last_sent_instance_remote_jid),
+                               last_sent_folder_id = COALESCE(%s, last_sent_folder_id)
+                           WHERE id = ANY(%s)
+                             AND campaign_id = %s
+                             AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                        (
+                            send.get("stage"),
+                            send.get("instance_id"),
+                            send.get("instance_remote_jid"),
+                            fid,
+                            list(failed_ids_done),
+                            campaign_id,
+                        ),
+                    )
+                    updated_failed += cur.rowcount
+
+        effective_success = max(log_success, reconciled_success)
+        effective_failed = max(log_failed, reconciled_failed)
+        reconciled_total = effective_success + effective_failed
+
         # Regra estrita de conclusão: só fecha done quando list_folders confirma status done
         # e sucesso >= planejado para o send da instância.
-        if status == "done" and planned_count > 0 and log_success >= planned_count:
+        if status == "done" and planned_count > 0 and reconciled_total >= planned_count:
             normalized_status = "done"
         elif status in ("failed", "error", "cancelled", "canceled") and log_success == 0:
             normalized_status = "failed"
-        elif log_success > 0 or log_failed > 0 or status == "done":
+        elif status == "done" and planned_count > 0 and reconciled_total < planned_count:
+            normalized_status = "inconsistent"
+        elif effective_success > 0 or effective_failed > 0:
             normalized_status = "partial"
         else:
             normalized_status = "running"
@@ -346,7 +458,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                        last_sync_at = NOW(),
                        updated_at = NOW()
                    WHERE id = %s""",
-                (log_success, log_failed, normalized_status, send["id"]),
+                (effective_success, effective_failed, normalized_status, send["id"]),
             )
 
     # 2) Compat legado (campanhas antigas sem stage_sends)

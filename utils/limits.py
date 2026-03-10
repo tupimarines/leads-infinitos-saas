@@ -7,6 +7,8 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+
 
 def get_db_connection():
     return psycopg2.connect(
@@ -99,6 +101,26 @@ def can_create_campaign_today(instance_id: int) -> bool:
     Retorna True se a instância ainda pode criar campanha hoje (1 por instância por dia).
     Nova campanha liberada apenas após meia-noite BRT.
     """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT u.email
+                FROM instances i
+                JOIN users u ON u.id = i.user_id
+                WHERE i.id = %s
+                LIMIT 1
+                """,
+                (instance_id,),
+            )
+            row = cur.fetchone() or {}
+        # Superadmin não fica limitado a 1 campanha/instância/dia.
+        if (row.get('email') or '').strip().lower() == SUPER_ADMIN_EMAIL:
+            return True
+    finally:
+        conn.close()
+
     return get_sent_today_count_by_instance(instance_id) < 1
 
 

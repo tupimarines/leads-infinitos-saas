@@ -4892,7 +4892,7 @@ def _parse_iso_datetime_local(raw_value):
 
 def _status_rank_for_stage_send(status):
     # Maior valor = estado mais "avançado" na resolução da etapa.
-    ranks = {"failed": 1, "scheduled": 2, "running": 3, "partial": 4, "done": 5}
+    ranks = {"failed": 1, "scheduled": 2, "running": 3, "partial": 4, "inconsistent": 5, "done": 6}
     return ranks.get((status or "").lower(), 0)
 
 
@@ -4990,6 +4990,8 @@ def _get_campaign_stage_progress(conn, campaign_id):
             statuses = [(i.get("status") or "scheduled").lower() for i in instances]
             if all(s == "done" for s in statuses):
                 stage_status = "done"
+            elif any(s == "inconsistent" for s in statuses):
+                stage_status = "inconsistent"
             elif any(s == "running" for s in statuses):
                 stage_status = "running"
             elif any(s == "partial" for s in statuses):
@@ -5523,6 +5525,62 @@ def gerar_campanha(campaign_id):
     except Exception as e:
         print(f"Erro ao gerar campanha: {e}")
         return json.dumps({"error": str(e)}), 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/force-complete-stage", methods=["POST"])
+@login_required
+def force_complete_stage(campaign_id):
+    """
+    Força conclusão da etapa anterior quando houver divergência de reconciliação.
+    Uso controlado para destravar operação sem falso positivo silencioso.
+    """
+    data = request.get_json() or {}
+    try:
+        step = int(data.get("step") or 0)
+    except Exception:
+        step = 0
+    if step not in (2, 3, 4):
+        return json.dumps({"error": "Parâmetro step inválido"}), 400
+
+    prev_stage = _stage_label_from_step(step - 1)
+    if not prev_stage:
+        return json.dumps({"error": "Etapa anterior inválida"}), 400
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM campaigns WHERE id = %s AND user_id = %s",
+                (campaign_id, current_user.id),
+            )
+            if not cur.fetchone():
+                return json.dumps({"error": "Campanha não encontrada"}), 404
+            cur.execute(
+                """
+                UPDATE campaign_stage_sends
+                SET failed_count = GREATEST(COALESCE(failed_count, 0), GREATEST(COALESCE(planned_count, 0) - COALESCE(success_count, 0), 0)),
+                    status = 'done',
+                    last_sync_at = NOW(),
+                    updated_at = NOW()
+                WHERE campaign_id = %s
+                  AND stage = %s
+                  AND status IN ('running', 'partial', 'inconsistent', 'failed', 'scheduled')
+                """,
+                (campaign_id, prev_stage),
+            )
+            affected = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+
+    if affected <= 0:
+        return json.dumps({"error": "Nenhum envio elegível para forçar conclusão"}), 409
+
+    print(
+        f"⚠️ [Stage Force Complete] campaign={campaign_id} prev_stage={prev_stage} "
+        f"forced_by_user={current_user.id} rows={affected}"
+    )
+    return json.dumps({"success": True, "forced_stage": prev_stage, "rows": affected})
 
 
 @app.route("/api/campaigns/<int:campaign_id>/sync-debug", methods=["GET"])
