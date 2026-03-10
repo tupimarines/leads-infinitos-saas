@@ -151,6 +151,14 @@
     h3 {
         color: #e8ecf6;
     }
+
+    body.modal-open {
+        overflow: hidden;
+    }
+
+    #stageCampaignModal {
+        overscroll-behavior: contain;
+    }
 </style>
 {% endblock %}
 
@@ -611,6 +619,7 @@
                 </label>
                 <p class="text-xs text-gray-500">Desmarque para agendar por data/hora.</p>
             </div>
+            <p id="stageScheduleStatus" class="text-xs text-gray-500 -mt-3"></p>
 
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -658,6 +667,7 @@
         document.getElementById('msgModalStepName').textContent = stepName;
         document.getElementById('msgVariationsContainer').innerHTML = '<div class="text-center text-gray-500 py-4">Carregando...</div>';
         document.getElementById('messageModal').classList.remove('hidden');
+        updateModalBodyLock();
 
         try {
             const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/steps/${stepNumber}`);
@@ -678,6 +688,7 @@
     function closeMessageModal() {
         document.getElementById('messageModal').classList.add('hidden');
         CURRENT_STEP_NUMBER = null;
+        updateModalBodyLock();
     }
 
     function renderVariations(variations) {
@@ -833,8 +844,38 @@
 
     function toggleStageScheduleInputs() {
         const sendNow = document.getElementById('stageSendNow').checked;
-        document.getElementById('stageScheduledDate').disabled = sendNow;
-        document.getElementById('stageScheduledTime').disabled = sendNow;
+        const dateInput = document.getElementById('stageScheduledDate');
+        const timeInput = document.getElementById('stageScheduledTime');
+        const statusEl = document.getElementById('stageScheduleStatus');
+        dateInput.disabled = sendNow;
+        timeInput.disabled = sendNow;
+        dateInput.classList.toggle('opacity-50', sendNow);
+        timeInput.classList.toggle('opacity-50', sendNow);
+        if (sendNow) {
+            statusEl.textContent = 'Envio imediato ativo. Data e horário ficam desabilitados.';
+            return;
+        }
+
+        const now = new Date();
+        const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        if (!dateInput.value) {
+            dateInput.value = localDate;
+        }
+        if (!timeInput.value) {
+            const roundedMin = Math.ceil(now.getMinutes() / 5) * 5;
+            now.setMinutes(roundedMin >= 60 ? 0 : roundedMin, 0, 0);
+            if (roundedMin >= 60) now.setHours(now.getHours() + 1);
+            timeInput.value = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        }
+        statusEl.textContent = 'Agendamento ativo. Selecione data e horário de disparo.';
+    }
+
+    function updateModalBodyLock() {
+        const hasOpenModal =
+            !document.getElementById('leadModal').classList.contains('hidden') ||
+            !document.getElementById('messageModal').classList.contains('hidden') ||
+            !document.getElementById('stageCampaignModal').classList.contains('hidden');
+        document.body.classList.toggle('modal-open', hasOpenModal);
     }
 
     function openStageCampaignModal(step, stepName) {
@@ -849,6 +890,9 @@
         document.getElementById('stageSendNow').checked = true;
         document.getElementById('stageScheduledDate').value = '';
         document.getElementById('stageScheduledTime').value = '';
+        const now = new Date();
+        const minDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        document.getElementById('stageScheduledDate').min = minDate;
         toggleStageScheduleInputs();
         document.getElementById('stageDelayMin').value = String(STAGE_DEFAULT_DELAY_MIN);
         document.getElementById('stageDelayMax').value = String(STAGE_DEFAULT_DELAY_MAX);
@@ -858,11 +902,13 @@
         addStageVariation();
         addStageVariation();
         document.getElementById('stageCampaignModal').classList.remove('hidden');
+        updateModalBodyLock();
     }
 
     function closeStageCampaignModal() {
         document.getElementById('stageCampaignModal').classList.add('hidden');
         STAGE_MODAL_STEP = null;
+        updateModalBodyLock();
     }
 
     async function submitStageCampaign() {
@@ -1305,11 +1351,13 @@
 
         // Show
         document.getElementById('leadModal').classList.remove('hidden');
+        updateModalBodyLock();
     }
 
     function closeLeadModal() {
         document.getElementById('leadModal').classList.add('hidden');
         CURRENT_LEAD_ID = null;
+        updateModalBodyLock();
     }
 
     async function saveNote() {
