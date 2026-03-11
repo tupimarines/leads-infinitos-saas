@@ -365,10 +365,11 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 folder_info = f
                 break
         if not folder_info:
-            print(
-                f"⚠️ [Uazapi Sync] folder não encontrado em list_folders "
-                f"(campaign={campaign_id}, send_id={send.get('id')}, stage={send.get('stage')}, folder_id={fid})"
-            )
+            if debug:
+                print(
+                    f"ℹ️ [Uazapi Sync] folder ainda não encontrado em list_folders "
+                    f"(campaign={campaign_id}, send_id={send.get('id')}, stage={send.get('stage')}, folder_id={fid})"
+                )
             continue
 
         log_success = int(folder_info.get("log_sucess") or folder_info.get("log_success") or 0)
@@ -384,10 +385,11 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         if planned_count <= 0 and lead_ids:
             planned_count = len(lead_ids)
 
-        print(
-            f"🔎 [Uazapi Sync] campaign={campaign_id} send_id={send.get('id')} stage={send.get('stage')} "
-            f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
-        )
+        if debug or status in ("done", "failed", "error", "cancelled", "canceled", "inconsistent"):
+            print(
+                f"ℹ️ [Uazapi Sync] campaign={campaign_id} send_id={send.get('id')} stage={send.get('stage')} "
+                f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
+            )
 
         updated_from_listfolders = 0
         if log_success > 0 and lead_ids:

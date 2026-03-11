@@ -43,6 +43,7 @@ SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
 # Throttling para warning de stats Uazapi (evitar spam a cada polling)
 _stats_uazapi_warning_last = {}  # campaign_id -> timestamp
 STATS_UAZAPI_WARNING_COOLDOWN = 300  # 5 min
+UAZAPI_SYNC_WEB_INTERVAL_MINUTES = 10
 
 # Configuração Redis
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
@@ -2304,7 +2305,24 @@ def campaign_kanban_data(campaign_id):
             if inst and inst.get('apikey'):
                 from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
                 uazapi = UazapiService()
-                sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
+                should_sync = True
+                with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT MAX(last_sync_at) AS last_sync_at
+                        FROM campaign_stage_sends
+                        WHERE campaign_id = %s
+                        """,
+                        (campaign_id,),
+                    )
+                    sync_row = cur.fetchone() or {}
+                last_sync_at = sync_row.get("last_sync_at")
+                if last_sync_at:
+                    now_utc = datetime.utcnow()
+                    should_sync = (now_utc - last_sync_at).total_seconds() >= (UAZAPI_SYNC_WEB_INTERVAL_MINUTES * 60)
+
+                if should_sync:
+                    sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
                 if campaign.uazapi_folder_id:
                     counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
                     stats = {

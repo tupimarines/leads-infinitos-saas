@@ -62,7 +62,7 @@ CADENCE_POLL_INTERVAL = 60  # seconds between each poll cycle
 SAFETY_BUFFER_MINUTES = 5
 PRE_DISPARO_WINDOW_MIN = 2
 PRE_DISPARO_WINDOW_MAX = 5
-STAGE_SYNC_INTERVAL_MINUTES = 15
+STAGE_SYNC_INTERVAL_MINUTES = 10
 
 def get_db_connection():
     return psycopg2.connect(
