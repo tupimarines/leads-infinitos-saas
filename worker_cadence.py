@@ -1223,10 +1223,22 @@ def bootstrap_pending_leads(campaign, conn):
     Also tries to discover their Chatwoot conversation ID if missing.
     """
     cid = campaign['id']
+
+    # Uazapi + modo manual no Kanban: não fazer bootstrap automático
+    # para evitar conflito com o fluxo "Gerar Campanha" por etapa.
+    cfg = campaign.get('cadence_config') or {}
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg) if cfg else {}
+        except Exception:
+            cfg = {}
+    setup_mode = str(cfg.get('cadence_setup_mode') or '').strip().lower()
+    if campaign.get('use_uazapi_sender') and setup_mode == 'kanban_later':
+        return
     
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT id, phone, name, chatwoot_conversation_id
+            SELECT id, phone, name, chatwoot_conversation_id, current_step
             FROM campaign_leads
             WHERE campaign_id = %s
               AND status = 'sent'
@@ -1240,22 +1252,35 @@ def bootstrap_pending_leads(campaign, conn):
     
     print(f"  🔄 Campaign '{campaign['name']}': Bootstrapping {len(pending_leads)} pending sent leads into cadence...")
     
-    # Get step 2 delay for snooze calculation
+    # Build next-step delay map to preserve stage progression for all steps.
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            "SELECT delay_days FROM campaign_steps WHERE campaign_id = %s AND step_number = 2 LIMIT 1",
+            "SELECT step_number, delay_days FROM campaign_steps WHERE campaign_id = %s",
             (cid,)
         )
-        step2 = cur.fetchone()
-    
-    delay_days = step2.get('delay_days') if step2 else None
-    delay_days = 1 if delay_days is None else int(delay_days)
-    now_br = datetime.now(BRAZIL_TZ)
-    snooze_until = now_br + timedelta(minutes=2) if delay_days <= 0 else now_br + timedelta(days=delay_days)
-    
+        steps = cur.fetchall() or []
+    delay_by_step = {}
+    for s in steps:
+        try:
+            delay_by_step[int(s.get('step_number'))] = int(s.get('delay_days')) if s.get('delay_days') is not None else 1
+        except Exception:
+            continue
+    max_step = max(delay_by_step.keys()) if delay_by_step else 4
+
     for lead in pending_leads:
         lead_id = lead['id']
         conv_id = lead['chatwoot_conversation_id']
+        try:
+            current_step = int(lead.get('current_step') or 1)
+        except Exception:
+            current_step = 1
+        if current_step < 1:
+            current_step = 1
+
+        next_step = current_step + 1 if current_step < max_step else current_step
+        delay_days = delay_by_step.get(next_step, 1)
+        now_br = datetime.now(BRAZIL_TZ)
+        snooze_until = now_br + timedelta(minutes=2) if delay_days <= 0 else now_br + timedelta(days=delay_days)
         
         # Try to discover Chatwoot conversation if missing
         if not conv_id:
@@ -1267,19 +1292,19 @@ def bootstrap_pending_leads(campaign, conn):
                 print(f"    🔗 Lead #{lead_id}: Linked to Chatwoot conv {conv_id}")
                 time.sleep(0.3)  # Rate limit
         
-        # Set to snoozed so cadence worker picks them up
+        # Set to snoozed so cadence worker picks them up.
+        # IMPORTANT: never overwrite current_step (prevents regression).
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE campaign_leads 
-                SET current_step = 1, 
-                    cadence_status = 'snoozed', 
+                SET cadence_status = 'snoozed', 
                     snooze_until = %s,
                     last_message_sent_at = COALESCE(last_message_sent_at, sent_at, NOW())
                 WHERE id = %s
             """, (snooze_until, lead_id))
         conn.commit()
-    
-    print(f"  ✅ {len(pending_leads)} leads bootstrapped into cadence (snoozed until {snooze_until.strftime('%d/%m %H:%M')}).")
+
+    print(f"  ✅ {len(pending_leads)} leads bootstrapped into cadence.")
 
 
 def process_campaign_sends(campaign, conn):
