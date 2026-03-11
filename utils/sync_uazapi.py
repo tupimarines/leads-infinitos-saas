@@ -54,6 +54,49 @@ def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed
     return sent_ids, failed_ids
 
 
+def _reconcile_stage_by_messages(conn, campaign_id, stage, sent_phones, failed_phones):
+    """
+    Reconcilia por etapa quando lead_ids do send não está disponível/confiável.
+    Usa etapa atual do lead como janela de elegibilidade.
+    """
+    stage_to_current_step = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
+    current_step = stage_to_current_step.get(stage)
+    if not current_step:
+        return set(), set()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT id, phone, whatsapp_link
+               FROM campaign_leads
+               WHERE campaign_id = %s
+                 AND current_step = %s
+                 AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                 AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+            (campaign_id, current_step),
+        )
+        rows = cur.fetchall() or []
+
+    sent_normalized = set()
+    for ph in sent_phones or []:
+        sent_normalized |= normalize_phone_for_match(ph)
+    failed_normalized = set()
+    for ph in failed_phones or []:
+        failed_normalized |= normalize_phone_for_match(ph)
+
+    sent_ids = set()
+    failed_ids = set()
+    for row in rows:
+        variants = normalize_phone_for_match(row.get("phone")) | normalize_phone_for_match(row.get("whatsapp_link"))
+        if not variants:
+            continue
+        if variants & sent_normalized:
+            sent_ids.add(row["id"])
+            continue
+        if variants & failed_normalized:
+            failed_ids.add(row["id"])
+    return sent_ids, failed_ids
+
+
 def _normalize_phone_for_api(phone: str):
     """
     Normaliza número para envio à API Uazapi (POST /chat/check, create_advanced_campaign).
@@ -346,6 +389,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
         )
 
+        updated_from_listfolders = 0
         if log_success > 0 and lead_ids:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 n = _sync_folder_via_listfolders(
@@ -362,20 +406,38 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     instance_id=send.get("instance_id"),
                     instance_remote_jid=send.get("instance_remote_jid"),
                 )
+                updated_from_listfolders = n
                 updated_sent += n
 
         reconciled_success = 0
         reconciled_failed = 0
-        if status == "done" and planned_count > 0 and (log_success + log_failed) < planned_count:
+        needs_reconcile = (
+            status == "done"
+            and (
+                not lead_ids
+                or (log_success > 0 and updated_from_listfolders < log_success)
+                or (planned_count > 0 and (log_success + log_failed) < planned_count)
+            )
+        )
+        if needs_reconcile:
             sent_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent")
             failed_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed")
-            sent_ids_done, failed_ids_done = _reconcile_send_by_messages(
-                conn=conn,
-                campaign_id=campaign_id,
-                lead_ids=lead_ids,
-                sent_phones=sent_phones_done,
-                failed_phones=failed_phones_done,
-            )
+            if lead_ids:
+                sent_ids_done, failed_ids_done = _reconcile_send_by_messages(
+                    conn=conn,
+                    campaign_id=campaign_id,
+                    lead_ids=lead_ids,
+                    sent_phones=sent_phones_done,
+                    failed_phones=failed_phones_done,
+                )
+            else:
+                sent_ids_done, failed_ids_done = _reconcile_stage_by_messages(
+                    conn=conn,
+                    campaign_id=campaign_id,
+                    stage=send.get("stage"),
+                    sent_phones=sent_phones_done,
+                    failed_phones=failed_phones_done,
+                )
             reconciled_success = len(sent_ids_done)
             reconciled_failed = len(failed_ids_done)
 
