@@ -330,7 +330,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config
+            """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence
                FROM campaigns WHERE id = %s""",
             (campaign_id,),
         )
@@ -430,6 +430,16 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     sent_phones=sent_phones_done,
                     failed_phones=failed_phones_done,
                 )
+                # Se lead_ids do send estiver desalinhado, faz fallback por etapa.
+                # Isso evita travar avanço quando folder está done com sucesso na API.
+                if not sent_ids_done and not failed_ids_done and (log_success > 0 or log_failed > 0):
+                    sent_ids_done, failed_ids_done = _reconcile_stage_by_messages(
+                        conn=conn,
+                        campaign_id=campaign_id,
+                        stage=send.get("stage"),
+                        sent_phones=sent_phones_done,
+                        failed_phones=failed_phones_done,
+                    )
             else:
                 sent_ids_done, failed_ids_done = _reconcile_stage_by_messages(
                     conn=conn,
@@ -522,6 +532,12 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                    WHERE id = %s""",
                 (effective_success, effective_failed, normalized_status, send["id"]),
             )
+
+    # Regra para cadências: sincronizar exclusivamente via campaign_stage_sends.
+    # Evita regressão de etapa por fallback legado (folder principal / payload antigo).
+    if campaign_row.get("enable_cadence"):
+        conn.commit()
+        return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
 
     # 2) Compat legado (campanhas antigas sem stage_sends)
     lead_ids_by_step = {}
