@@ -183,14 +183,7 @@
                 </p>
             </div>
         </div>
-        <div class="flex items-center gap-3">
-            <div id="uazapiStats" class="hidden flex items-center gap-3 text-xs">
-                <span class="text-green-400" title="Enviados">✓ <span id="statSent">0</span></span>
-                <span class="text-amber-400" title="Agendados">⏳ <span id="statScheduled">0</span></span>
-                <span class="text-red-400" title="Falhas">✗ <span id="statFailed">0</span></span>
-                <span id="statCampaignFinished" class="hidden text-green-500/80" title="Campanha inicial concluída">• Envios concluídos</span>
-            </div>
-        </div>
+        <div class="flex items-center gap-3"></div>
     </div>
 
     <!-- Sub-campanhas (Principal + Follow-ups) -->
@@ -1205,24 +1198,6 @@
             });
 
             document.getElementById('totalLeads').textContent = leads.length;
-
-            // Uazapi stats (Sent/Scheduled/Failed)
-            const statsEl = document.getElementById('uazapiStats');
-            if (data.uazapi_stats) {
-                const s = data.uazapi_stats;
-                document.getElementById('statSent').textContent = s.sent || 0;
-                document.getElementById('statScheduled').textContent = s.scheduled || 0;
-                document.getElementById('statFailed').textContent = s.failed || 0;
-                statsEl.classList.remove('hidden');
-                const finishedEl = document.getElementById('statCampaignFinished');
-                if (s.initial_campaign_finished) {
-                    finishedEl.classList.remove('hidden');
-                } else {
-                    finishedEl.classList.add('hidden');
-                }
-            } else if (statsEl) {
-                statsEl.classList.add('hidden');
-            }
 
             renderStageProgress(data.stage_progress);
             applyStageLocks(data.stage_unlocks, data.stage_progress);
