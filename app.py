@@ -4626,9 +4626,7 @@ def get_campaign_stats(campaign_id):
         total_leads = stats['total_leads'] or 0
         uazapi_debug = {}  # para ?debug=1
 
-        # Campanhas Uazapi: campaign_leads nunca é atualizado pelo envio remoto.
-        # Buscar contagens reais via API Uazapi.
-        # Estratégia: 1) list_folders (log_sucess/log_failed) como fonte primária; 2) list_messages como fallback.
+        # Campanhas API 2.0: usar list_folders/log_sucess como fonte de verdade para "enviados".
         uazapi_scheduled = 0
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
             try:
@@ -4650,37 +4648,27 @@ def get_campaign_stats(campaign_id):
                     uazapi_debug = {}
                     source_used = None
 
-                    # 1) Tentar list_folders (Active) — MessageQueueFolder tem log_sucess, log_failed, log_total
-                    folders = uazapi.list_folders(token, status='Active')
+                    # list_folders sem filtro de status para capturar folder ativo/concluído.
+                    folders = uazapi.list_folders(token)
                     if isinstance(folders, dict):
                         folders = folders.get('folders') or folders.get('data') or folders.get('items') or []
                     if isinstance(folders, list):
                         for f in folders:
                             fid = f.get('id') or f.get('folder_id') or f.get('folderId')
                             if str(fid) == str(folder_id):
-                                # log_sucess (typo na spec), log_delivered, log_failed
+                                # log_sucess (typo na spec) é a fonte oficial para enviados.
                                 uazapi_sent = int(f.get('log_sucess', 0) or f.get('log_delivered', 0) or f.get('log_success', 0) or 0)
                                 uazapi_failed = int(f.get('log_failed', 0) or 0)
-                                uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "source": "list_folders"}
+                                log_total = int(f.get('log_total', 0) or 0)
+                                uazapi_scheduled = max(0, log_total - uazapi_sent - uazapi_failed)
+                                uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled, "source": "list_folders"}
                                 source_used = "list_folders"
                                 break
 
-                    # 2) Fallback: list_messages com paginação completa (get_uazapi_campaign_counts)
-                    if source_used is None:
-                        from utils.sync_uazapi import get_uazapi_campaign_counts
-                        counts = get_uazapi_campaign_counts(uazapi, token, folder_id)
-                        uazapi_sent = counts.get("sent", 0)
-                        uazapi_failed = counts.get("failed", 0)
-                        uazapi_scheduled = counts.get("scheduled", 0)
-                        uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled, "source": "list_messages"}
-                        source_used = "list_messages"
-                        if request.args.get('debug') == '1' and uazapi_sent == 0 and uazapi_failed == 0 and uazapi_scheduled == 0:
-                            uazapi_debug["_counts"] = counts
-
-                    if uazapi_sent > 0 or uazapi_failed > 0 or uazapi_scheduled > 0:
+                    if source_used is not None:
                         sent = uazapi_sent
                         failed = uazapi_failed
-                        # invalid = subconjunto de failed (números inválidos); para Uazapi não distinguimos, então failed inclui inválidos
+                        # invalid = subconjunto de failed (números inválidos); para API 2.0 não distinguimos.
                         pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
                     elif campaign.get('status') == 'running' and total_leads > 0:
                         now_ts = time.time()
@@ -5822,12 +5810,13 @@ def get_dashboard_overview():
             )
             today_leads = cur.fetchone()['total']
             
-            # Mensagens enviadas NO MÊS (ALTERADO de hoje para mês)
+            # Mensagens enviadas no mês (campanhas não-API 2.0, fonte DB)
             cur.execute(
                 """
                 SELECT COUNT(*) as count FROM campaign_leads cl
                 JOIN campaigns c ON cl.campaign_id = c.id
                 WHERE c.user_id = %s 
+                  AND COALESCE(c.use_uazapi_sender, FALSE) = FALSE
                   AND EXTRACT(MONTH FROM cl.sent_at) = EXTRACT(MONTH FROM CURRENT_DATE)
                   AND EXTRACT(YEAR FROM cl.sent_at) = EXTRACT(YEAR FROM CURRENT_DATE)
                   AND cl.status = 'sent'
@@ -5835,6 +5824,58 @@ def get_dashboard_overview():
                 (current_user.id,)
             )
             month_sent = cur.fetchone()['count']
+
+            # Somar log_sucess das campanhas API 2.0 (fonte: list_folders por folder)
+            cur.execute(
+                """
+                SELECT c.id as campaign_id, c.uazapi_folder_id, tok.apikey
+                FROM campaigns c
+                LEFT JOIN LATERAL (
+                    SELECT i.apikey
+                    FROM campaign_instances ci
+                    JOIN instances i ON i.id = ci.instance_id
+                    WHERE ci.campaign_id = c.id
+                      AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                      AND i.apikey IS NOT NULL
+                    ORDER BY ci.id ASC
+                    LIMIT 1
+                ) tok ON TRUE
+                WHERE c.user_id = %s
+                  AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+                  AND c.uazapi_folder_id IS NOT NULL
+                """,
+                (current_user.id,)
+            )
+            uazapi_campaigns = cur.fetchall() or []
+
+            uazapi_sent_total = 0
+            uazapi = UazapiService()
+            for row in uazapi_campaigns:
+                token = row.get('apikey')
+                folder_id = row.get('uazapi_folder_id')
+                if not token or folder_id is None:
+                    continue
+                try:
+                    folders = uazapi.list_folders(token)
+                    if isinstance(folders, dict):
+                        folders = folders.get('folders') or folders.get('data') or folders.get('items') or []
+                    if not isinstance(folders, list):
+                        continue
+                    for folder in folders:
+                        fid = folder.get('id') or folder.get('folder_id') or folder.get('folderId')
+                        if str(fid) == str(folder_id):
+                            sent_count_folder = int(
+                                folder.get('log_sucess', 0)
+                                or folder.get('log_delivered', 0)
+                                or folder.get('log_success', 0)
+                                or 0
+                            )
+                            uazapi_sent_total += max(0, sent_count_folder)
+                            break
+                except Exception as folder_err:
+                    print(f"⚠️ [Dashboard] Falha ao ler log_sucess da campanha {row.get('campaign_id')}: {folder_err}")
+
+            month_sent += uazapi_sent_total
             
             # Taxa de sucesso NO MÊS (ALTERADO de hoje para mês)
             cur.execute(
@@ -5851,7 +5892,7 @@ def get_dashboard_overview():
                 (current_user.id,)
             )
             success_data = cur.fetchone()
-            sent_count = success_data['sent'] or 0
+            sent_count = month_sent
             failed_count = success_data['failed'] or 0
             total_attempted = sent_count + failed_count
             success_rate = round((sent_count / total_attempted * 100), 1) if total_attempted > 0 else 0

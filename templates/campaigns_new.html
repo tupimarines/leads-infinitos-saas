@@ -335,9 +335,9 @@
                     <div class="flex justify-between items-center">
                         <div>
                             <label class="block text-sm font-semibold text-gray-300">
-                                🚀 Envio em massa Uazapi
+                                🚀 Envio em massa 2.0
                             </label>
-                            <p class="text-xs text-gray-500 mt-1">Usar API nativa Uazapi com delays configuráveis entre mensagens</p>
+                            <p class="text-xs text-gray-500 mt-1">Usar API 2.0 com delays configuraveis entre mensagens</p>
                         </div>
                         <label class="relative inline-flex items-center cursor-pointer">
                             <input type="checkbox" id="use_uazapi_sender" class="sr-only peer">
@@ -389,7 +389,7 @@
 
                 <div id="cadenceSetupModeBox" class="glass-panel p-4 rounded-xl hidden"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.2);">
-                    <label class="block text-sm font-semibold text-gray-300 mb-2">Configuração dos follow-ups (Uazapi)</label>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Configuração dos follow-ups (API 2.0)</label>
                     <p class="text-xs text-gray-500 mb-3">Escolha se quer definir mensagens/dias agora ou configurar depois no botão de cada etapa do Kanban.</p>
                     <div class="flex flex-col gap-2">
                         <label class="flex items-center gap-2 cursor-pointer">
@@ -680,7 +680,7 @@
                             <input type="number" id="rollover_test_delay_minutes" value="5" min="1" max="60"
                                 class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm"
                                 title="Tempo mínimo desde o envio mais antigo antes de mover leads para FU1">
-                            <p class="text-xs text-gray-500 mt-1">Dá tempo para a Uazapi finalizar envios e para mover cards para Convertido/Perdido.</p>
+                            <p class="text-xs text-gray-500 mt-1">Da tempo para a API 2.0 finalizar envios e para mover cards para Convertido/Perdido.</p>
                         </div>
                     </div>
                     <div class="flex flex-wrap gap-6">
@@ -774,10 +774,10 @@
                         {% endif %}
                     </p>
                     <p id="uazapi-instance-hint" class="text-xs text-blue-400 mt-2 hidden">
-                        Com envio em massa Uazapi, apenas instâncias Uazapi são exibidas. Selecione uma.
+                        Com envio em massa 2.0, apenas instâncias da API 2.0 são exibidas. Selecione uma.
                     </p>
                     <p id="uazapi-no-instances" class="text-xs text-amber-400 mt-2 hidden">
-                        Nenhuma instância Uazapi disponível. Crie uma em Configurações → WhatsApp para usar envio em massa.
+                        Nenhuma instância da API 2.0 disponível. Crie uma em Configurações → WhatsApp para usar envio em massa.
                     </p>
                     <p id="uazapi-capacity-preview" class="text-xs text-emerald-300 mt-2 hidden">
                         Capacidade diária prevista: 30 x 1 = 30 leads/dia.
@@ -788,7 +788,7 @@
                 <div id="initial-flow-summary" class="glass-panel p-4 rounded-xl border border-blue-500/20 bg-blue-500/5">
                     <p class="text-xs uppercase tracking-wider text-blue-300 mb-2">Resumo do disparo inicial</p>
                     <div class="text-xs text-gray-300 space-y-1">
-                        <p>• Multi-instância: selecione 1 ou mais instâncias Uazapi para escalar capacidade.</p>
+                        <p>• Multi-instância: selecione 1 ou mais instâncias da API 2.0 para escalar capacidade.</p>
                         <p>• Capacidade total: 30 por instância, por dia (ex.: 3 instâncias = 90/dia).</p>
                         <p>• Agendamento: "Início (opcional)" define quando a campanha começa.</p>
                         <p>• Variações + intervalo: até 5 mensagens com delay min/max entre envios.</p>
@@ -814,8 +814,6 @@
                         <li>• A <strong class="text-yellow-400">responsabilidade pelo uso</strong> da ferramenta é
                             exclusivamente sua.</li>
                         <li>• Recomendamos usar mensagens personalizadas e respeitar os limites diários.</li>
-                        <li>• Follow-ups automáticos <strong class="text-yellow-400">param automaticamente</strong> se o
-                            lead responder ou for marcado no Chatwoot.</li>
                         <li>• O Lead's Infinitos não se responsabiliza por bloqueios resultantes do uso da
                             ferramenta.</li>
                     </ul>
@@ -1279,7 +1277,7 @@
                 return label && label.dataset.apiProvider === 'uazapi';
             });
             if (uazapiChecked.length === 0) {
-                alert('Para envio em massa Uazapi, selecione uma instância Uazapi.');
+                alert('Para envio em massa 2.0, selecione uma instância da API 2.0.');
                 btn.disabled = false;
                 btn.innerHTML = originalText;
                 return;

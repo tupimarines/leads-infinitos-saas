@@ -151,8 +151,8 @@
 
                     <!-- Edit Button -->
                     <a href="/campaigns/{{ campaign.id }}/edit"
-                        class="text-gray-500 hover:text-blue-400 transition-colors p-1" title="Editar Campanha">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                        class="text-gray-400 hover:text-blue-300 transition-colors p-2 rounded-lg border border-white/10 bg-white/5" title="Editar Campanha">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
@@ -161,21 +161,22 @@
 
                     <!-- Kanban Board Button -->
                     <a href="/campaigns/{{ campaign.id }}/kanban"
-                        class="text-gray-500 hover:text-purple-400 transition-colors p-1" title="Kanban Cadência">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                        class="text-gray-400 hover:text-purple-300 transition-colors p-2 rounded-lg border border-white/10 bg-white/5 inline-flex items-center gap-2" title="Kanban Cadência">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" />
                         </svg>
+                        <span class="text-xs font-semibold">Kanban</span>
                     </a>
 
                     <!-- Pause/Resume Button -->
                     {% if campaign.status in ['running', 'paused', 'pending'] %}
                     <button onclick="togglePause({{ campaign.id }})"
-                        class="text-gray-500 hover:text-yellow-400 transition-colors p-1"
+                        class="{% if campaign.status == 'paused' %}text-green-300 hover:text-green-200 border-green-500/40 bg-green-500/10{% else %}text-red-300 hover:text-red-200 border-red-500/40 bg-red-500/10{% endif %} transition-colors p-2 rounded-lg border"
                         title="{% if campaign.status == 'paused' %}Continuar{% if campaign.enable_cadence %} (inclui follow-ups){% endif %}{% else %}Pausar{% if campaign.enable_cadence %} (afeta também os follow-ups){% endif %}{% endif %}">
                         {% if campaign.status == 'paused' %}
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -183,36 +184,12 @@
                                 d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                         {% else %}
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                         {% endif %}
-                    </button>
-                    {% endif %}
-                    <!-- Validar lista (Uazapi - antes ou durante envio) -->
-                    {% if campaign.use_uazapi_sender %}
-                    <button onclick="validateLeads({{ campaign.id }}, event)"
-                        class="text-gray-500 hover:text-amber-400 transition-colors p-1"
-                        title="Validar números via WhatsApp (remove inválidos)">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
-                            stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                    </button>
-                    {% endif %}
-                    <!-- Sync Uazapi Button (apenas campanhas Uazapi com folder) -->
-                    {% if campaign.use_uazapi_sender and campaign.uazapi_folder_id %}
-                    <button onclick="syncUazapiStats({{ campaign.id }}, event)"
-                        class="text-gray-500 hover:text-blue-400 transition-colors p-1"
-                        title="Sincronizar contagem com API Uazapi">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
-                            stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
                     </button>
                     {% endif %}
                 </div>
@@ -227,14 +204,6 @@
                 <div class="bg-white/5 rounded-lg p-3">
                     <div class="text-xs text-gray-400">Enviados</div>
                     <div class="text-2xl font-bold text-green-400" id="sent-{{ campaign.id }}">-</div>
-                </div>
-                <div class="bg-white/5 rounded-lg p-3">
-                    <div class="text-xs text-gray-400">Pendentes</div>
-                    <div class="text-2xl font-bold text-yellow-400" id="pending-{{ campaign.id }}">-</div>
-                </div>
-                <div class="bg-white/5 rounded-lg p-3">
-                    <div class="text-xs text-gray-400">Falhas</div>
-                    <div class="text-2xl font-bold text-red-400" id="failed-{{ campaign.id }}">-</div>
                 </div>
             </div>
 
@@ -253,6 +222,9 @@
             <div class="text-sm text-gray-300 mb-3">
                 Taxa de Sucesso: <span class="font-bold text-green-400" id="success-rate-{{ campaign.id }}">-</span>
             </div>
+
+            <div id="stage-progress-{{ campaign.id }}" class="hidden text-[11px] text-gray-300 bg-white/5 rounded-lg border border-white/10 p-3 mb-3"></div>
+            <div id="stage-sync-{{ campaign.id }}" class="hidden text-[10px] text-gray-500 mb-2"></div>
 
             <!-- Deal Tracker -->
             <div class="deals-tracker">
@@ -296,6 +268,51 @@
 </div>
 
 <script>
+    function renderStageProgressCard(campaignId, stageProgress, lastSyncAt) {
+        const container = document.getElementById(`stage-progress-${campaignId}`);
+        const syncEl = document.getElementById(`stage-sync-${campaignId}`);
+        if (!container || !syncEl || !stageProgress || !stageProgress.stages) {
+            if (container) container.classList.add('hidden');
+            if (syncEl) syncEl.classList.add('hidden');
+            return;
+        }
+
+        const labels = {
+            initial: 'Inicial',
+            follow1: 'Follow-up 1',
+            follow2: 'Follow-up 2',
+            breakup: 'Break-up'
+        };
+        const stages = ['initial', 'follow1', 'follow2', 'breakup'];
+        const rows = [];
+        stages.forEach(stage => {
+            const payload = stageProgress.stages[stage];
+            if (!payload) return;
+            const planned = payload.planned_count || 0;
+            const success = payload.success_count || 0;
+            const failed = payload.failed_count || 0;
+            const inst = (payload.instances || []).length;
+            if (planned <= 0 && success <= 0 && failed <= 0) return;
+            rows.push(`<div>${labels[stage]}: <span class="text-green-400">${success}</span>/<span class="text-blue-300">${planned}</span> • <span class="text-red-400">${failed} falhas</span> • <span class="text-gray-400">${inst} inst.</span></div>`);
+        });
+
+        if (rows.length === 0) {
+            container.classList.add('hidden');
+            syncEl.classList.add('hidden');
+            return;
+        }
+
+        container.innerHTML = rows.join('');
+        container.classList.remove('hidden');
+        if (lastSyncAt) {
+            const dt = new Date(lastSyncAt);
+            syncEl.textContent = `Última sync por instância: ${dt.toLocaleDateString('pt-BR')} ${dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+            syncEl.classList.remove('hidden');
+        } else {
+            syncEl.classList.add('hidden');
+        }
+    }
+
     // Função para atualizar métricas da campanha
     async function updateCampaignStats(campaignId) {
         try {
@@ -310,8 +327,6 @@
             // Atualizar números
             document.getElementById(`total-${campaignId}`).textContent = data.total_leads || 0;
             document.getElementById(`sent-${campaignId}`).textContent = data.sent || 0;
-            document.getElementById(`pending-${campaignId}`).textContent = data.pending || 0;
-            document.getElementById(`failed-${campaignId}`).textContent = data.failed || 0;
             document.getElementById(`deals-${campaignId}`).textContent = data.closed_deals || 0;
 
             // Calcular e atualizar progresso
@@ -336,6 +351,8 @@
                 document.getElementById(`last-sent-${campaignId}`).textContent =
                     `Último: ${lastSent.toLocaleDateString('pt-BR')} ${lastSent.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
             }
+
+            renderStageProgressCard(campaignId, data.stage_progress, data.last_sync_at);
         } catch (error) {
             console.error('Erro ao atualizar stats:', error);
         }
@@ -367,49 +384,6 @@
         } catch (error) {
             console.error('Erro ao atualizar deals:', error);
             alert('Erro ao atualizar negócios fechados');
-        }
-    }
-
-    // Validar lista (check_phone batch) — remove números sem WhatsApp
-    async function validateLeads(campaignId, ev) {
-        if (ev) ev.stopPropagation();
-        const btn = ev?.target?.closest('button');
-        if (btn) btn.disabled = true;
-        try {
-            const response = await fetch(`/api/campaigns/${campaignId}/validate-leads`, { method: 'POST' });
-            const data = await response.json();
-            if (data.error) {
-                alert('Erro: ' + data.error);
-                return;
-            }
-            const msg = `${data.valid || 0} válidos, ${data.invalid || 0} inválidos` + (data.partial ? ' (parcial)' : '');
-            alert(msg);
-            await updateCampaignStats(campaignId);
-        } catch (error) {
-            console.error('Erro ao validar:', error);
-            alert('Erro ao validar lista');
-        } finally {
-            if (btn) btn.disabled = false;
-        }
-    }
-
-    // Sincronizar stats Uazapi → DB (para campanhas com envio em massa Uazapi)
-    async function syncUazapiStats(campaignId, ev) {
-        try {
-            const btn = ev?.target?.closest('button');
-            if (btn) btn.disabled = true;
-            const response = await fetch(`/api/campaigns/${campaignId}/sync-uazapi`, { method: 'POST' });
-            const data = await response.json();
-            if (data.error) {
-                alert('Erro: ' + data.error);
-                return;
-            }
-            await updateCampaignStats(campaignId);
-            if (btn) btn.disabled = false;
-        } catch (error) {
-            console.error('Erro ao sincronizar:', error);
-            alert('Erro ao sincronizar com Uazapi');
-            if (ev?.target?.closest('button')) ev.target.closest('button').disabled = false;
         }
     }
 

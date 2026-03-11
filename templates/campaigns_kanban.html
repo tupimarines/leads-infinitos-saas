@@ -190,24 +190,6 @@
                 <span class="text-red-400" title="Falhas">✗ <span id="statFailed">0</span></span>
                 <span id="statCampaignFinished" class="hidden text-green-500/80" title="Campanha inicial concluída">• Envios concluídos</span>
             </div>
-            {% if campaign.use_uazapi_sender %}
-            <button onclick="validateLeads()"
-                class="text-xs bg-amber-800/30 text-amber-300 px-3 py-2 rounded-lg border border-amber-600/30 hover:bg-amber-700/40 transition-colors flex items-center gap-1.5">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                </svg>
-                Validar lista
-            </button>
-            {% endif %}
-            <button onclick="refreshBoard()"
-                class="text-xs bg-gray-800/50 text-gray-300 px-3 py-2 rounded-lg border border-gray-700/50 hover:bg-gray-700/50 transition-colors flex items-center gap-1.5">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
-                    </path>
-                </svg>
-                Atualizar
-            </button>
         </div>
     </div>
 
@@ -633,7 +615,7 @@
             </div>
 
             <div>
-                <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Instâncias (Uazapi)</label>
+                <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Instâncias (API 2.0)</label>
                 <div id="stageInstanceList" class="space-y-2"></div>
                 <p id="stageCapacityPreview" class="text-xs text-emerald-300 mt-2 hidden"></p>
             </div>
@@ -771,25 +753,6 @@
     const UAZAPI_INSTANCES = CAMPAIGN_INSTANCES.filter(i => (i.api_provider || 'megaapi') === 'uazapi');
     let ALL_LEADS = {};
     let STAGE_MODAL_STEP = null;
-
-    async function validateLeads() {
-        if (!USE_UAZAPI) return;
-        try {
-            const res = await fetch(`/api/campaigns/${CAMPAIGN_ID}/validate-leads`, { method: 'POST' });
-            const data = await res.json();
-            if (res.ok) {
-                const msg = data.partial && data.message
-                    ? `${data.valid || 0} válidos, ${data.invalid || 0} inválidos. ${data.message}`
-                    : `${data.valid || 0} válidos, ${data.invalid || 0} inválidos`;
-                showToast(msg, data.partial ? 'warning' : 'success');
-                refreshBoard();
-            } else {
-                showToast(data.error || 'Erro ao validar', 'error');
-            }
-        } catch (e) {
-            showToast('Erro de conexão', 'error');
-        }
-    }
 
     function renderStageInstanceOptions() {
         const container = document.getElementById('stageInstanceList');
