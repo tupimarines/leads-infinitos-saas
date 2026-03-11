@@ -387,6 +387,22 @@
                     <input type="hidden" id="enable_cadence" value="false">
                 </div>
 
+                <div id="cadenceSetupModeBox" class="glass-panel p-4 rounded-xl hidden"
+                    style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.2);">
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Configuração dos follow-ups (Uazapi)</label>
+                    <p class="text-xs text-gray-500 mb-3">Escolha se quer definir mensagens/dias agora ou configurar depois no botão de cada etapa do Kanban.</p>
+                    <div class="flex flex-col gap-2">
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="cadence_setup_mode" value="kanban_later" checked class="text-blue-600 focus:ring-blue-500">
+                            <span class="text-sm text-gray-300">Configurar depois no Kanban (recomendado)</span>
+                        </label>
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="cadence_setup_mode" value="now" class="text-blue-600 focus:ring-blue-500">
+                            <span class="text-sm text-gray-300">Configurar agora (mensagens + dias na criação)</span>
+                        </label>
+                    </div>
+                </div>
+
                 <!-- ============================================ -->
                 <!-- CADENCE STEPS (hidden by default) -->
                 <!-- ============================================ -->
@@ -763,8 +779,21 @@
                     <p id="uazapi-no-instances" class="text-xs text-amber-400 mt-2 hidden">
                         Nenhuma instância Uazapi disponível. Crie uma em Configurações → WhatsApp para usar envio em massa.
                     </p>
+                    <p id="uazapi-capacity-preview" class="text-xs text-emerald-300 mt-2 hidden">
+                        Capacidade diária prevista: 30 x 1 = 30 leads/dia.
+                    </p>
                 </div>
                 {% endif %}
+
+                <div id="initial-flow-summary" class="glass-panel p-4 rounded-xl border border-blue-500/20 bg-blue-500/5">
+                    <p class="text-xs uppercase tracking-wider text-blue-300 mb-2">Resumo do disparo inicial</p>
+                    <div class="text-xs text-gray-300 space-y-1">
+                        <p>• Multi-instância: selecione 1 ou mais instâncias Uazapi para escalar capacidade.</p>
+                        <p>• Capacidade total: 30 por instância, por dia (ex.: 3 instâncias = 90/dia).</p>
+                        <p>• Agendamento: "Início (opcional)" define quando a campanha começa.</p>
+                        <p>• Variações + intervalo: até 5 mensagens com delay min/max entre envios.</p>
+                    </div>
+                </div>
 
                 <!-- ============================================ -->
                 <!-- TERMS OF RESPONSIBILITY (always visible) -->
@@ -1173,20 +1202,9 @@
         // CADENCE: include cadence data if enabled
         const cadenceEnabled = document.getElementById('enable_cadence').value === 'true';
         if (cadenceEnabled) {
-
-            // Validate at least steps 2-4 have messages
-            let missingSteps = [];
-            for (let s = 2; s <= 4; s++) {
-                const ta = document.getElementById(`msg_step_${s}`);
-                if (!ta || !ta.value.trim()) missingSteps.push(s);
-            }
-            if (missingSteps.length > 0) {
-                alert(`Preencha a mensagem das etapas: ${missingSteps.join(', ')}`);
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-                return;
-            }
-
+            const cadenceSetupMode = useUazapiSender ? getCadenceSetupMode() : 'now';
+            const configureNow = (!useUazapiSender || cadenceSetupMode === 'now');
+            data.cadence_setup_mode = cadenceSetupMode;
             data.enable_cadence = true;
             data.terms_accepted = true;
             const rolloverEl = document.getElementById('rollover_time');
@@ -1197,35 +1215,50 @@
             data.rollover_test_delay_minutes = (testModeEl?.checked && delayEl) ? Math.min(60, Math.max(1, parseInt(delayEl.value, 10) || 5)) : 5;
             data.steps = [];
 
-            // Step 1: uses main message_templates, delay 0
-            const step1Media = document.getElementById('mediaData_1').value;
-            data.steps.push({
-                step_number: 1,
-                step_label: 'Mensagem Inicial',
-                message_templates: messageTemplates,
-                delay_days: 0,
-                media_base64: step1Media || null,
-                media_name: document.getElementById('mediaName_1').value || null,
-                media_type: document.getElementById('mediaType_1').value || null
-            });
+            if (configureNow) {
+                // Validate at least steps 2-4 have messages
+                let missingSteps = [];
+                for (let s = 2; s <= 4; s++) {
+                    const ta = document.getElementById(`msg_step_${s}`);
+                    if (!ta || !ta.value.trim()) missingSteps.push(s);
+                }
+                if (missingSteps.length > 0) {
+                    alert(`Preencha a mensagem das etapas: ${missingSteps.join(', ')}`);
+                    btn.disabled = false;
+                    btn.innerHTML = originalText;
+                    return;
+                }
 
-            // Steps 2-4: separate messages
-            const stepLabels = { 2: 'Follow-up 1', 3: 'Follow-up 2', 4: 'Break-up' };
-            const testMode = document.getElementById('rollover_test_mode')?.checked || false;
-            for (let s = 2; s <= 4; s++) {
-                const msg = document.getElementById(`msg_step_${s}`).value.trim();
-                const raw = parseInt(document.getElementById(`delay_step_${s}`).value, 10);
-                const delay = testMode ? 0 : (Number.isNaN(raw) ? 3 : raw);
-                const mediaB64 = document.getElementById(`mediaData_${s}`).value;
+                // Step 1: uses main message_templates, delay 0
+                const step1Media = document.getElementById('mediaData_1').value;
                 data.steps.push({
-                    step_number: s,
-                    step_label: stepLabels[s],
-                    message_templates: [msg],
-                    delay_days: delay,
-                    media_base64: mediaB64 || null,
-                    media_name: document.getElementById(`mediaName_${s}`).value || null,
-                    media_type: document.getElementById(`mediaType_${s}`).value || null
+                    step_number: 1,
+                    step_label: 'Mensagem Inicial',
+                    message_templates: messageTemplates,
+                    delay_days: 0,
+                    media_base64: step1Media || null,
+                    media_name: document.getElementById('mediaName_1').value || null,
+                    media_type: document.getElementById('mediaType_1').value || null
                 });
+
+                // Steps 2-4: separate messages
+                const stepLabels = { 2: 'Follow-up 1', 3: 'Follow-up 2', 4: 'Break-up' };
+                const testMode = document.getElementById('rollover_test_mode')?.checked || false;
+                for (let s = 2; s <= 4; s++) {
+                    const msg = document.getElementById(`msg_step_${s}`).value.trim();
+                    const raw = parseInt(document.getElementById(`delay_step_${s}`).value, 10);
+                    const delay = testMode ? 0 : (Number.isNaN(raw) ? 3 : raw);
+                    const mediaB64 = document.getElementById(`mediaData_${s}`).value;
+                    data.steps.push({
+                        step_number: s,
+                        step_label: stepLabels[s],
+                        message_templates: [msg],
+                        delay_days: delay,
+                        media_base64: mediaB64 || null,
+                        media_name: document.getElementById(`mediaName_${s}`).value || null,
+                        media_type: document.getElementById(`mediaType_${s}`).value || null
+                    });
+                }
             }
         }
 
@@ -1411,6 +1444,54 @@
         if (uazapiNoInstances) {
             uazapiNoInstances.classList.toggle('hidden', !useUazapi || hasUazapi);
         }
+        updateUazapiCapacityPreview();
+        updateCadenceSetupModeUI();
+    }
+
+    function updateUazapiCapacityPreview() {
+        const useUazapi = document.getElementById('use_uazapi_sender')?.checked;
+        const preview = document.getElementById('uazapi-capacity-preview');
+        if (!preview) return;
+
+        if (!useUazapi) {
+            preview.classList.add('hidden');
+            return;
+        }
+        const selectedUazapi = Array.from(document.querySelectorAll('input[name="instance_ids"]:checked')).filter(cb => {
+            const label = cb.closest('.instance-checkbox-label');
+            return label && label.dataset.apiProvider === 'uazapi';
+        }).length;
+        const instances = Math.max(1, selectedUazapi);
+        const capacity = instances * 30;
+        preview.textContent = `Capacidade diária prevista: 30 x ${instances} = ${capacity} leads/dia.`;
+        preview.classList.remove('hidden');
+    }
+
+    function getCadenceSetupMode() {
+        const selected = document.querySelector('input[name="cadence_setup_mode"]:checked');
+        return selected ? selected.value : 'kanban_later';
+    }
+
+    function updateCadenceSetupModeUI() {
+        const useUazapi = document.getElementById('use_uazapi_sender')?.checked;
+        const cadenceEnabled = document.getElementById('enable_cadence')?.value === 'true';
+        const modeBox = document.getElementById('cadenceSetupModeBox');
+        const stepsContainer = document.getElementById('cadenceStepsContainer');
+        if (!stepsContainer) return;
+
+        if (modeBox) {
+            modeBox.classList.toggle('hidden', !(useUazapi && cadenceEnabled));
+        }
+
+        if (!cadenceEnabled) {
+            stepsContainer.style.display = 'none';
+            return;
+        }
+        if (useUazapi && getCadenceSetupMode() === 'kanban_later') {
+            stepsContainer.style.display = 'none';
+            return;
+        }
+        stepsContainer.style.display = 'block';
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -1419,6 +1500,14 @@
             useUazapiCheckbox.addEventListener('change', toggleUazapiFields);
             toggleUazapiFields(); // Initial state
         }
+        document.querySelectorAll('input[name="instance_ids"]').forEach(cb => {
+            cb.addEventListener('change', updateUazapiCapacityPreview);
+        });
+        document.querySelectorAll('input[name="cadence_setup_mode"]').forEach(rb => {
+            rb.addEventListener('change', updateCadenceSetupModeUI);
+        });
+        updateUazapiCapacityPreview();
+        updateCadenceSetupModeUI();
     });
 
     // ============================================================
@@ -1429,10 +1518,9 @@
     function toggleCadence() {
         const track = document.getElementById('cadenceToggle');
         const hidden = document.getElementById('enable_cadence');
-        const stepsContainer = document.getElementById('cadenceStepsContainer');
         const isOn = track.classList.toggle('on');
         hidden.value = isOn ? 'true' : 'false';
-        stepsContainer.style.display = isOn ? 'block' : 'none';
+        updateCadenceSetupModeUI();
         // Terms card stays always visible — no toggle needed
     }
 

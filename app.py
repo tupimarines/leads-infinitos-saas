@@ -3691,9 +3691,18 @@ def create_campaign():
             enable_cadence = data.get('enable_cadence', False)
             terms_accepted = data.get('terms_accepted', False)
             steps = data.get('steps', [])
-            
-            if enable_cadence and steps:
-                # cadence_config: rollover_time (HH:MM), rollover_test_mode (modo teste), rollover_test_delay_minutes
+
+            # Uazapi-only: permite escolher se follow-ups serão configurados agora
+            # ou mais tarde via botão "Gerar Campanha" no Kanban.
+            cadence_setup_mode = str(data.get('cadence_setup_mode') or '').strip().lower()
+            if cadence_setup_mode not in ('now', 'kanban_later'):
+                cadence_setup_mode = 'now'
+            if not use_uazapi_sender:
+                cadence_setup_mode = 'now'
+
+            if enable_cadence:
+                # cadence_config: rollover_time (HH:MM), rollover_test_mode (modo teste),
+                # rollover_test_delay_minutes e cadence_setup_mode (Uazapi).
                 rollover_time = data.get('rollover_time', '23:00')
                 if rollover_time and not re.match(r'^\d{1,2}:\d{2}$', str(rollover_time)):
                     rollover_time = '23:00'
@@ -3704,6 +3713,7 @@ def create_campaign():
                     'rollover_time': str(rollover_time),
                     'rollover_test_mode': rollover_test_mode,
                     'rollover_test_delay_minutes': rollover_test_delay,
+                    'cadence_setup_mode': cadence_setup_mode,
                 }
                 cadence_config_json = json.dumps(cadence_config)
                 cur.execute(
@@ -3712,7 +3722,8 @@ def create_campaign():
                        WHERE id = %s""",
                     (terms_accepted, cadence_config_json, campaign_id)
                 )
-                
+
+            if enable_cadence and steps:
                 # Media storage directory
                 media_dir = os.path.join('storage', str(current_user.id), 'campaign_media')
                 os.makedirs(media_dir, exist_ok=True)
