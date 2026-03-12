@@ -4421,7 +4421,6 @@ class WhatsappService:
 @login_required
 def whatsapp_config():
     """Page to configure WhatsApp instance(s)"""
-    uazapi_for_all = is_uazapi_for_all_users_enabled()
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM instances WHERE user_id = %s ORDER BY id ASC", (current_user.id,))
@@ -4446,8 +4445,6 @@ def whatsapp_config():
     instance_limit = int(plan_policy["instance_limit"])
     current_instances_count = len(instances)
     can_add_instance = current_instances_count < instance_limit
-    default_provider = "uazapi" if (is_super_admin() or uazapi_for_all) else "megaapi"
-    
     return render_template("whatsapp_config.html", 
                            instance=instance, 
                            instances=instances,
@@ -4455,8 +4452,7 @@ def whatsapp_config():
                            active_license_type=active_license_type,
                            instance_limit=instance_limit,
                            current_instances_count=current_instances_count,
-                           can_add_instance=can_add_instance,
-                           default_provider=default_provider)
+                           can_add_instance=can_add_instance)
 
 
 @app.route("/api/whatsapp/init", methods=["POST"])
@@ -4465,7 +4461,6 @@ def init_whatsapp():
     """API to initialize a WhatsApp instance"""
     payload = request.get_json(silent=True) or {}
     instance_name = payload.get("instance_name") or ""
-    uazapi_for_all = is_uazapi_for_all_users_enabled()
 
     # Sanitize if provided
     safe_name = ""
@@ -4485,66 +4480,24 @@ def init_whatsapp():
                     conn.rollback()
                     return {"error": INSTANCE_LIMIT_REACHED_MESSAGE}, 400
 
-                use_uazapi = is_super_admin() or uazapi_for_all
-                if use_uazapi:
-                    # Superadmin e rollout habilitado usam Uazapi.
-                    uazapi = UazapiService()
-                    result = uazapi.create_instance(safe_name if safe_name else "instance")
-                    if not result:
-                        conn.rollback()
-                        return {"error": "Falha ao criar instância na Uazapi."}, 500
-                    instance_key = result.get('token') or (result.get('instance') or {}).get('token')
-                    if not instance_key:
-                        print(f"Warning: No token from Uazapi. Result: {result}")
-                        conn.rollback()
-                        return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
-
-                    cur.execute(
-                        """
-                        INSERT INTO instances (user_id, name, apikey, status, api_provider)
-                        VALUES (%s, %s, %s, 'disconnected', 'uazapi')
-                        """,
-                        (current_user.id, instance_name or safe_name or "instance", instance_key)
-                    )
-                    conn.commit()
-                    return {"status": "success", "key": instance_key, "data": result}
-
-                # Rollout desligado: usuários comuns seguem MegaAPI legado.
-                service = WhatsappService()
-                result = service.create_instance(safe_name if safe_name else None)
-
+                # Forçado: criação sempre via Uazapi para todos os usuários.
+                uazapi = UazapiService()
+                result = uazapi.create_instance(safe_name if safe_name else "instance")
                 if not result:
                     conn.rollback()
-                    return {"error": "Failed to create instance at provider"}, 500
-
-                # Check API level error
-                if result.get('error') is True:
-                    conn.rollback()
-                    return {"error": "Failed to create instance at provider"}, 500
-
-                # Save to DB
-                instance_key = result.get('data', {}).get('instance_key')
-
-                # Fallback 1: Top level (sometimes APIs vary)
+                    return {"error": "Falha ao criar instância na Uazapi."}, 500
+                instance_key = result.get('token') or (result.get('instance') or {}).get('token')
                 if not instance_key:
-                    instance_key = result.get('instance_key')
-
-                # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
-                if not instance_key and safe_name:
-                    if result.get('message') == 'Instance created' or result.get('error') is False:
-                        instance_key = safe_name
-
-                if not instance_key:
-                    print(f"Warning: No key returned from Mega API. Result: {result}")
+                    print(f"Warning: No token from Uazapi. Result: {result}")
                     conn.rollback()
-                    return {"error": "Falha ao obter ID da instância. Resposta da API inválida."}, 500
+                    return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
 
                 cur.execute(
                     """
-                    INSERT INTO instances (user_id, name, apikey, status)
-                    VALUES (%s, %s, %s, 'disconnected')
+                    INSERT INTO instances (user_id, name, apikey, status, api_provider)
+                    VALUES (%s, %s, %s, 'disconnected', %s)
                     """,
-                    (current_user.id, instance_name or safe_name or "instance", instance_key)
+                    (current_user.id, instance_name or safe_name or "instance", instance_key, 'uazapi')
                 )
 
             conn.commit()
