@@ -100,11 +100,47 @@
                     <div class="bg-black/20 p-4 rounded-lg mt-4 border border-white/5">
                         <label class="block text-xs font-medium text-gray-500 uppercase mb-2">Especificações</label>
                         <ul class="text-sm text-gray-300 space-y-1">
-                            <li>• Limite Diário: {{ license.daily_limit }} envios</li>
+                            {% if license.license_type == 'infinite' %}
+                            <li>• Limite Diário por Instância: configurável (10 a 50)</li>
+                            {% else %}
+                            <li>• Limite Diário por Instância: 30 envios</li>
+                            {% endif %}
                             <li>• Suporte Prioritário</li>
                             <li>• Acesso a todas as features</li>
                         </ul>
                     </div>
+
+                    {% if license.license_type == 'infinite' %}
+                    <div class="bg-black/20 p-4 rounded-lg mt-4 border border-cyan-500/20">
+                        <label class="block text-xs font-medium text-cyan-300 uppercase mb-2">Envios Diários por Instância (Infinite)</label>
+                        <p class="text-xs text-gray-400 mb-3">Escolha por instância: 10, 20, 30, 40 ou 50 envios/dia.</p>
+                        <div class="space-y-2">
+                            {% for inst in instances %}
+                            <div class="flex items-center gap-3">
+                                <div class="text-sm text-white flex-1">{{ inst.name or ('Instância #' ~ inst.id) }}</div>
+                                <select
+                                    class="instance-daily-limit bg-[#0c1430] border border-gray-700 rounded text-white px-2 py-1 text-sm"
+                                    data-instance-id="{{ inst.id }}"
+                                >
+                                    {% set selected_value = inst.daily_sends_per_instance if inst.daily_sends_per_instance else 30 %}
+                                    {% for opt in [10, 20, 30, 40, 50] %}
+                                    <option value="{{ opt }}" {% if selected_value == opt %}selected{% endif %}>
+                                        {{ opt }} / dia
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <button
+                                    class="save-instance-limit px-3 py-1 border border-cyan-500/30 rounded text-cyan-300 text-xs hover:bg-cyan-500/10 transition-colors"
+                                    data-instance-id="{{ inst.id }}"
+                                >
+                                    Salvar
+                                </button>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <p id="instanceLimitFeedback" class="text-xs mt-3 hidden"></p>
+                    </div>
+                    {% endif %}
                 </div>
                 {% else %}
                 <div class="text-center py-6">
@@ -210,4 +246,46 @@
         </div>
     </div>
 </div>
+
+{% if license and license.license_type == 'infinite' %}
+<script>
+    async function saveInstanceDailyLimit(instanceId) {
+        const select = document.querySelector(`select.instance-daily-limit[data-instance-id="${instanceId}"]`);
+        const feedback = document.getElementById('instanceLimitFeedback');
+        if (!select || !feedback) return;
+
+        const value = parseInt(select.value, 10);
+        try {
+            const response = await fetch(`/api/account/instances/${instanceId}/daily-limit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ daily_sends_per_instance: value }),
+            });
+            const data = await response.json();
+
+            if (!response.ok || data.error) {
+                feedback.textContent = data.error || 'Falha ao salvar configuração.';
+                feedback.className = 'text-xs mt-3 text-red-400';
+                feedback.classList.remove('hidden');
+                return;
+            }
+
+            feedback.textContent = `Configuração salva para a instância #${instanceId}.`;
+            feedback.className = 'text-xs mt-3 text-green-400';
+            feedback.classList.remove('hidden');
+        } catch (err) {
+            feedback.textContent = 'Erro de comunicação ao salvar configuração.';
+            feedback.className = 'text-xs mt-3 text-red-400';
+            feedback.classList.remove('hidden');
+        }
+    }
+
+    document.querySelectorAll('.save-instance-limit').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-instance-id');
+            if (id) saveInstanceDailyLimit(id);
+        });
+    });
+</script>
+{% endif %}
 {% endblock %}

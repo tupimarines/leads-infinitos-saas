@@ -33,6 +33,13 @@ import csv
 from openai import OpenAI
 from functools import wraps
 import pytz
+from utils.limits import (
+    PLAN_POLICY,
+    INFINITE_DAILY_SEND_OPTIONS,
+    get_plan_policy,
+    get_user_daily_limit,
+    resolve_license_type,
+)
 
 
 load_dotenv()
@@ -60,6 +67,60 @@ def get_db_connection():
         port=os.environ.get('DB_PORT', '5432')
     )
     return conn
+
+
+ACTIVE_LICENSE_TYPES = tuple(PLAN_POLICY.keys())
+INSTANCE_LIMIT_REACHED_MESSAGE = "Limite de instâncias atingido. Contate o suporte para contratar instâncias adicionais"
+
+
+def license_type_from_price(price_value) -> str:
+    try:
+        price = float(price_value or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+
+    if price >= 390.00:
+        return "scale"
+    if price >= 290.00:
+        return "pro"
+    return "starter"
+
+
+def is_uazapi_for_all_users_enabled() -> bool:
+    return str(os.environ.get("UAZAPI_FOR_ALL_USERS_ENABLED", "false")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_user_plan_snapshot_for_limit(cur, user_id: int):
+    cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (user_id,))
+    user_row = cur.fetchone()
+    if not user_row:
+        return None
+
+    cur.execute(
+        """
+        SELECT license_type
+        FROM licenses
+        WHERE user_id = %s
+          AND status = 'active'
+          AND expires_at > NOW()
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    license_row = cur.fetchone() or {}
+    normalized_type = resolve_license_type(license_row.get("license_type")) or "starter"
+    policy = get_plan_policy(normalized_type)
+
+    cur.execute("SELECT COUNT(*) AS total FROM instances WHERE user_id = %s", (user_id,))
+    row = cur.fetchone() or {}
+    current_instances = int(row.get("total") or 0)
+
+    return {
+        "plan_type": normalized_type,
+        "instance_limit": int(policy["instance_limit"]),
+        "current_instances": current_instances,
+    }
 
 
 def init_db() -> None:
@@ -97,7 +158,7 @@ def init_db() -> None:
             user_id INTEGER NOT NULL REFERENCES users(id),
             hotmart_purchase_id TEXT UNIQUE NOT NULL,
             hotmart_product_id TEXT NOT NULL,
-            license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'semestral', 'anual', 'infinite')),
+            license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'infinite')),
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
             purchase_date TIMESTAMP NOT NULL,
             expires_at TIMESTAMP NOT NULL,
@@ -268,6 +329,27 @@ def init_db() -> None:
         """
     )
 
+    # Configuração de limite diário por instância (somente plano Infinite)
+    cur.execute(
+        """
+        ALTER TABLE instances ADD COLUMN IF NOT EXISTS daily_sends_per_instance INTEGER;
+        """
+    )
+    cur.execute(
+        """
+        ALTER TABLE instances DROP CONSTRAINT IF EXISTS instances_daily_sends_per_instance_check;
+        """
+    )
+    cur.execute(
+        """
+        ALTER TABLE instances ADD CONSTRAINT instances_daily_sends_per_instance_check
+        CHECK (
+            daily_sends_per_instance IS NULL
+            OR daily_sends_per_instance IN (10, 20, 30, 40, 50)
+        );
+        """
+    )
+
     # Migração: remover instâncias MegaAPI do superadmin (manter apenas Uazapi)
     print("➡️ Removendo instâncias MegaAPI do superadmin...")
     cur.execute(
@@ -278,8 +360,8 @@ def init_db() -> None:
         """
     )
 
-    # Migração: adicionar 'infinite' ao CHECK de license_type (planos existentes)
-    print("➡️ Atualizando constraint license_type para incluir 'infinite'...")
+    # Migração: manter apenas planos ativos no CHECK de license_type
+    print("➡️ Atualizando constraint license_type para planos ativos...")
     cur.execute("""
         DO $$
         DECLARE r RECORD;
@@ -296,7 +378,7 @@ def init_db() -> None:
     """)
     cur.execute("""
         ALTER TABLE licenses ADD CONSTRAINT licenses_license_type_check
-        CHECK (license_type IN ('starter', 'pro', 'scale', 'semestral', 'anual', 'infinite'));
+        CHECK (license_type IN ('starter', 'pro', 'scale', 'infinite'));
     """)
 
     # Tabela de modelos de mensagem
@@ -636,22 +718,13 @@ class License:
 
     @property
     def daily_limit(self) -> int:
-        if self.license_type == 'infinite':
-            return 50
-        if self.license_type == 'scale':
-            return 30
-        elif self.license_type == 'pro':
-            return 20
-        elif self.license_type == 'starter':
-            return 10
-        return 10  # Fallback
+        return get_user_daily_limit(self.user_id)
 
     @property
     def monthly_extraction_limit(self) -> int:
         """Limite mensal de extração de leads (scraping)."""
-        if self.license_type == 'infinite':
-            return 10000
-        return 2000  # starter, pro, scale, semestral, anual
+        policy = get_plan_policy(self.license_type)
+        return int(policy["monthly_extraction_limit"])
 
     @staticmethod
     def create(user_id: int, hotmart_purchase_id: str, hotmart_product_id: str, 
@@ -659,14 +732,14 @@ class License:
         # Calcular data de expiração baseada no tipo de licença
         from datetime import datetime, timedelta
         
-        # Garantir formato correto do license_type
-        license_type = license_type.strip().lower()
+        # Garantir formato correto e impedir planos legados no fluxo ativo.
+        license_type = (license_type or "").strip().lower()
+        if license_type not in ACTIVE_LICENSE_TYPES:
+            raise ValueError("license_type inválido. Use starter, pro, scale ou infinite.")
         
         purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
         
-        # Validity usually 1 year for all these plans as per Screenshot in conversation history context (assuming)
-        # Or if "semestral" logic was different, we assume standard 1 year for the new plans unless specified otherwise.
-        # Defaulting to 1 year for standard SaaS plans.
+        # Padronizado: validade anual para todos os planos ativos.
         expires_at = purchase_dt + timedelta(days=365)
         
         conn = get_db_connection()
@@ -1029,24 +1102,9 @@ class HotmartService:
                 send_welcome_email(email, temp_password)
 
             
-            # 2. Determinar Tipo de Licença (Preço)
+            # 2. Determinar tipo de licença pelos planos ativos.
             price_value = purchase.get('price', {}).get('value', 0)
-            
-            # Lógica de preços baseada nos planos (Starter=197, Pro=297, Scale=397)
-            # Usando faixas seguras considerando possíveis descontos pequenos, 
-            # mas para cupons de 99% precisariamos de outra validação (TODO: Validar oferta/produto)
-            # Por enquanto, assumindo faixas de preço padrão ou fallback para Starter
-            
-            if price_value >= 390.00:
-                license_type = 'scale'
-            elif price_value >= 290.00:
-                license_type = 'pro'
-            elif price_value > 50.00: # Se pagou mais de 50, provavelmente é Starter/Pro c/ desconto ou Starter
-                 license_type = 'starter'
-            else:
-                 # Fallback para compras com muito desconto (ex: 99% off) ou testes
-                 # O usuário mencionou ter comprado "Starter" com cupom de 99%
-                 license_type = 'starter'
+            license_type = license_type_from_price(price_value)
                 
             # 3. Verificar se licença já existe (Idempotência)
             existing_licenses = License.get_by_user_id(user.id)
@@ -1204,12 +1262,9 @@ class HublaService:
             if existing:
                 return True  # Licença já existe
             
-            # Determinar tipo de licença baseado no preço
+            # Determinar tipo de licença baseado no preço (sem planos legados).
             price = float(sale_data.get('purchase', {}).get('price', {}).get('value', 0))
-            if price >= 287.00:  # Licença anual
-                license_type = 'anual'
-            else:  # Licença semestral
-                license_type = 'semestral'
+            license_type = license_type_from_price(price)
             
             # Buscar usuário pelo email
             user = User.get_by_email(buyer_email)
@@ -1329,14 +1384,14 @@ class HublaService:
                     price = None
 
             if price is None:
-                price = 297.00  # fallback seguro para anual
+                price = 297.00  # fallback seguro para plano Pro
 
             if not all([buyer_email, purchase_id, product_id]):
                 print(f"Dados insuficientes v2: email={buyer_email}, purchase_id={purchase_id}, product_id={product_id}, date={purchase_date}")
                 return False
 
-            # Definir tipo de licença
-            license_type = 'anual' if float(price) >= 287.00 else 'semestral'
+            # Definir tipo de licença apenas para planos ativos.
+            license_type = license_type_from_price(price)
 
             # Verificar se já existe licença para esta compra
             conn = get_db_connection()
@@ -1675,12 +1730,9 @@ def register():
             # Criar usuário
             user = User.create(email, password)
             
-            # Criar licença baseada na compra
+            # Criar licença baseada na compra (somente planos ativos).
             price = float(purchase_data.get('price', 0))
-            if price >= 287.00:  # Licença anual
-                license_type = 'anual'
-            else:  # Licença semestral
-                license_type = 'semestral'
+            license_type = license_type_from_price(price)
             
             License.create(
                 user.id, 
@@ -1792,7 +1844,7 @@ def scrape():
     
     localizacoes = cleaned_locs[:15]
     
-    # VALIDAÇÃO: Limite mensal de 1500 leads
+    # VALIDAÇÃO: Limite mensal por plano (Starter/Pro/Scale/Infinite)
     # Buscar licença ativa do usuário
     licenses = License.get_by_user_id(current_user.id)
     active_license = next((l for l in licenses if l.status == 'active'), None)
@@ -1816,16 +1868,19 @@ def scrape():
     # Calcular uso mensal
     cycle_info = ScrapingJob.get_monthly_lead_count(current_user.id, subscription_date)
     
-    # Limite mensal conforme plano (infinite=10000, demais=2000)
-    MONTHLY_LIMIT = active_license.monthly_extraction_limit
+    active_plan_type = resolve_license_type(active_license.license_type, allow_legacy_fallback=False) or "starter"
+    plan_policy = get_plan_policy(active_plan_type, allow_legacy_fallback=False)
+    monthly_limit = int(plan_policy["monthly_extraction_limit"])
     requested_leads = total
     
-    if cycle_info['used'] + requested_leads > MONTHLY_LIMIT:
-        available = MONTHLY_LIMIT - cycle_info['used']
+    if cycle_info['used'] + requested_leads > monthly_limit:
+        available = max(monthly_limit - cycle_info['used'], 0)
         renewal_date = cycle_info['cycle_end'].date().isoformat()
+        plan_label = active_plan_type.upper()
         
         flash(
-            f"Limite mensal atingido! Você já usou {cycle_info['used']} de {MONTHLY_LIMIT} leads neste ciclo. "
+            f"Limite mensal de extrações do plano {plan_label} atingido. "
+            f"Você já usou {cycle_info['used']} de {monthly_limit} leads neste ciclo. "
             f"Disponível: {available} leads. Renovação em {renewal_date}.",
             "error"
         )
@@ -2213,9 +2268,66 @@ def account():
         user=current_user,
         license=active_license,
         instance=instance,
+        instances=instances,
         instances_with_status=instances_with_status,
         is_super_admin=is_super_admin(),
     )
+
+
+@app.route('/api/account/instances/<int:instance_id>/daily-limit', methods=['POST'])
+@login_required
+def update_instance_daily_limit(instance_id):
+    """Atualiza limite diário por instância para usuários com plano Infinite."""
+    payload = request.get_json(silent=True) or {}
+    if not payload:
+        payload = request.form
+
+    try:
+        daily_value = int(payload.get('daily_sends_per_instance'))
+    except (TypeError, ValueError):
+        return json.dumps({"error": "Valor inválido para daily_sends_per_instance."}), 400
+
+    if daily_value not in INFINITE_DAILY_SEND_OPTIONS:
+        return json.dumps({"error": "Valor permitido: 10, 20, 30, 40 ou 50."}), 400
+
+    licenses = License.get_by_user_id(current_user.id)
+    active_license = next((lic for lic in licenses if lic.status == 'active'), None)
+    if not active_license or active_license.license_type != 'infinite':
+        return json.dumps({"error": "Configuração disponível apenas para plano Infinite."}), 403
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE instances
+                SET daily_sends_per_instance = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND user_id = %s
+                RETURNING id
+                """,
+                (daily_value, instance_id, current_user.id),
+            )
+            updated = cur.fetchone()
+
+        if not updated:
+            conn.rollback()
+            return json.dumps({"error": "Instância não encontrada."}), 404
+
+        conn.commit()
+        return json.dumps(
+            {
+                "success": True,
+                "instance_id": instance_id,
+                "daily_sends_per_instance": daily_value,
+            }
+        )
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao atualizar daily_sends_per_instance: {e}")
+        return json.dumps({"error": "Falha ao salvar configuração da instância."}), 500
+    finally:
+        conn.close()
+
 
 @app.route('/campaigns')
 @login_required
@@ -2620,10 +2732,16 @@ def admin_toggle_admin(user_id):
 @admin_required
 def admin_create_license():
     user_id = request.form.get('user_id')
-    license_type = request.form.get('license_type')
+    license_type_input = (request.form.get('license_type') or '').strip().lower()
+    license_type = resolve_license_type(license_type_input, allow_legacy_fallback=False)
     
-    if not user_id or not license_type:
+    if not user_id or not license_type_input:
         flash("Dados inválidos.", "error")
+        return redirect(url_for('admin_users'))
+
+    if not license_type or license_type not in ACTIVE_LICENSE_TYPES:
+        allowed_plans = ", ".join(ACTIVE_LICENSE_TYPES)
+        flash(f"Plano inválido: '{license_type_input}'. Use apenas: {allowed_plans}.", "error")
         return redirect(url_for('admin_users'))
         
     # Validar user_id
@@ -2754,16 +2872,10 @@ def admin_delete_user(user_id):
 def admin_user_details(user_id):
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        # Info básica e WhatsApp (mais recente)
+        # Info básica do usuário.
         cur.execute("""
-            SELECT u.id, u.email, u.created_at, u.is_admin,
-                   i.name as instance_name, i.status as instance_status, i.apikey as instance_apikey
+            SELECT u.id, u.email, u.created_at, u.is_admin
             FROM users u
-            LEFT JOIN (
-                 SELECT DISTINCT ON (user_id) *
-                 FROM instances
-                 ORDER BY user_id, updated_at DESC
-            ) i ON u.id = i.user_id
             WHERE u.id = %s
         """, (user_id,))
         user = cur.fetchone()
@@ -2779,6 +2891,19 @@ def admin_user_details(user_id):
             ORDER BY created_at DESC LIMIT 1
         """, (user_id,))
         license = cur.fetchone()
+
+        # Lista completa de instâncias (Task 9)
+        cur.execute(
+            """
+            SELECT id, name, status, apikey, COALESCE(api_provider, 'megaapi') AS api_provider,
+                   daily_sends_per_instance, updated_at
+            FROM instances
+            WHERE user_id = %s
+            ORDER BY id ASC
+            """,
+            (user_id,),
+        )
+        instances = cur.fetchall() or []
         
     conn.close()
     
@@ -2788,17 +2913,86 @@ def admin_user_details(user_id):
             "email": user['email'],
             "created_at": user['created_at'].isoformat() if user['created_at'] else None,
             "is_admin": user['is_admin'],
-            "instance_name": user['instance_name'],
-            "instance_status": user['instance_status'],
-            "instance_apikey": user['instance_apikey'],
-            "remote_jid": None  # Will be populated via JS check or separate call, but let's try to fetch if status is connected? 
-                                # Actually, better to fetch it in the check_status endpoint called by frontend.
         },
         "license": {
             "type": license['license_type'] if license else None,
             "expires_at": license['expires_at'].isoformat() if license and license['expires_at'] else None
-        } if license else None
+        } if license else None,
+        "instances": [
+            {
+                "id": inst["id"],
+                "name": inst["name"],
+                "status": inst["status"],
+                "apikey": inst["apikey"],
+                "api_provider": inst["api_provider"],
+                "daily_sends_per_instance": inst["daily_sends_per_instance"],
+                "updated_at": inst["updated_at"].isoformat() if inst.get("updated_at") else None,
+            }
+            for inst in instances
+        ],
     }
+
+
+@app.route('/admin/users/<int:user_id>/instances', methods=['POST'])
+@login_required
+@admin_required
+def admin_add_user_instance(user_id):
+    data = request.get_json(silent=True) or request.form or {}
+    raw_name = (data.get("instance_name") or "").strip()
+    safe_name = "".join(c for c in raw_name if c.isalnum() or c in ('-', '_'))
+    if not safe_name:
+        safe_name = f"instance_{user_id}_{int(time.time())}"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            snapshot = _get_user_plan_snapshot_for_limit(cur, user_id)
+            if not snapshot:
+                conn.rollback()
+                return {"error": "Usuário não encontrado."}, 404
+
+            if snapshot["current_instances"] >= snapshot["instance_limit"]:
+                conn.rollback()
+                return {"error": INSTANCE_LIMIT_REACHED_MESSAGE}, 400
+
+            uazapi = UazapiService()
+            result = uazapi.create_instance(safe_name)
+            if not result:
+                conn.rollback()
+                return {"error": "Falha ao criar instância na Uazapi."}, 500
+
+            instance_key = result.get('token') or (result.get('instance') or {}).get('token')
+            if not instance_key:
+                conn.rollback()
+                return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
+
+            cur.execute(
+                """
+                INSERT INTO instances (user_id, name, apikey, status, api_provider)
+                VALUES (%s, %s, %s, 'disconnected', 'uazapi')
+                RETURNING id, name, status, apikey, api_provider
+                """,
+                (user_id, safe_name, instance_key),
+            )
+            created = cur.fetchone()
+
+        conn.commit()
+        return {
+            "success": True,
+            "instance": {
+                "id": created["id"],
+                "name": created["name"],
+                "status": created["status"],
+                "apikey": created["apikey"],
+                "api_provider": created["api_provider"],
+            }
+        }
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao adicionar instância para usuário {user_id}: {e}")
+        return {"error": "Erro ao adicionar instância via Uazapi."}, 500
+    finally:
+        conn.close()
     
 @app.route('/admin/whatsapp/check_status/<instance_apikey>', methods=['POST'])
 @login_required
@@ -2911,55 +3105,41 @@ def admin_create_user():
         
         # 2. Create Instance (Optional)
         if instance_name:
-            service = WhatsappService()
-            # Precisamos do contexto do usuário recém criado, mas o WhatsappService usa current_user.
-            # WORKAROUND: Inserir manualmente no DB ou impersonate.
-            # Como WhatsappService.create_instance usa create_instance -> usa get_db_connection
-            # E usa current_user.id para salvar no banco.
-            # AQUI TEMOS UM PROBLEMA: WhatsappService assume current_user.
-            
-            # Vamos inserir direto no banco para ser mais seguro e não depender do current_user ser o admin
-            
-            # Sanitize
             safe_name = "".join(c for c in instance_name if c.isalnum() or c in ('-', '_'))
             if safe_name:
-                # Call Mega API directly or via Service but strictly for the API part?
-                # Service.create_instance calls API and then saves DB using current_user.
-                # Let's call API manually to get key, then save to DB for the NEW USER.
-                
-                # Using service just for the API call part would be nice if decoupled.
-                # create_instance method mixes both.
-                # Let's split or just copy logic here for Admin context.
-                
-                # API Call
-                url = f"{service.base_url}/rest/instance/init"
-                params = {'instance_key': safe_name}
-                payload = {"messageData": {"webhookUrl": "", "webhookEnabled": True}}
-                
+                conn = get_db_connection()
                 try:
-                    resp = requests.post(url, params=params, json=payload, headers=service.headers, timeout=15)
-                    if resp.status_code == 200:
-                        # Success
-                        instance_key = safe_name # Usually matches
-                        # Check response
-                         # ... (skipped detailed json check for brevity, assuming success if 200)
-                        
-                        # Save to DB for the NEW USER
-                        conn = get_db_connection()
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "INSERT INTO instances (user_id, name, apikey, status) VALUES (%s, %s, %s, 'disconnected')",
-                                (user.id, safe_name, instance_key)
-                            )
-                        conn.commit()
-                        conn.close()
-                        print(f"✅ Instância {safe_name} criada para usuário {user.id}")
-                        
-                    else:
-                        print(f"⚠️ Erro ao criar instância na MegaAPI: {resp.text}")
-                        # Don't fail the user creation, just warn
-                except Exception as e:
-                    print(f"⚠️ Erro ao conectar MegaAPI: {e}")
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        snapshot = _get_user_plan_snapshot_for_limit(cur, user.id)
+                        if not snapshot:
+                            conn.rollback()
+                            return {"error": "Usuário não encontrado após criação."}, 404
+                        if snapshot["current_instances"] >= snapshot["instance_limit"]:
+                            conn.rollback()
+                            return {"error": INSTANCE_LIMIT_REACHED_MESSAGE}, 400
+
+                        uazapi = UazapiService()
+                        result = uazapi.create_instance(safe_name)
+                        if not result:
+                            conn.rollback()
+                            return {"error": "Falha ao criar instância na Uazapi."}, 500
+
+                        instance_key = result.get('token') or (result.get('instance') or {}).get('token')
+                        if not instance_key:
+                            conn.rollback()
+                            return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
+
+                        cur.execute(
+                            """
+                            INSERT INTO instances (user_id, name, apikey, status, api_provider)
+                            VALUES (%s, %s, %s, 'disconnected', 'uazapi')
+                            """,
+                            (user.id, safe_name, instance_key)
+                        )
+                    conn.commit()
+                    print(f"✅ Instância Uazapi {safe_name} criada para usuário {user.id}")
+                finally:
+                    conn.close()
 
         return {"success": True}
     except Exception as e:
@@ -4241,115 +4421,136 @@ class WhatsappService:
 @login_required
 def whatsapp_config():
     """Page to configure WhatsApp instance(s)"""
+    uazapi_for_all = is_uazapi_for_all_users_enabled()
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM instances WHERE user_id = %s ORDER BY id ASC", (current_user.id,))
         instances = cur.fetchall()
+        cur.execute(
+            """
+            SELECT license_type
+            FROM licenses
+            WHERE user_id = %s AND status = 'active' AND expires_at > NOW()
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (current_user.id,),
+        )
+        license_row = cur.fetchone() or {}
     conn.close()
     
     # Backward compatibility: pass first instance as 'instance' for non-super-admin template
     instance = instances[0] if instances else None
+    active_license_type = resolve_license_type(license_row.get("license_type")) or "starter"
+    plan_policy = get_plan_policy(active_license_type)
+    instance_limit = int(plan_policy["instance_limit"])
+    current_instances_count = len(instances)
+    can_add_instance = current_instances_count < instance_limit
+    default_provider = "uazapi" if (is_super_admin() or uazapi_for_all) else "megaapi"
     
     return render_template("whatsapp_config.html", 
                            instance=instance, 
                            instances=instances,
-                           is_super_admin=is_super_admin())
+                           is_super_admin=is_super_admin(),
+                           active_license_type=active_license_type,
+                           instance_limit=instance_limit,
+                           current_instances_count=current_instances_count,
+                           can_add_instance=can_add_instance,
+                           default_provider=default_provider)
 
 
 @app.route("/api/whatsapp/init", methods=["POST"])
 @login_required
 def init_whatsapp():
     """API to initialize a WhatsApp instance"""
-    instance_name = request.json.get("instance_name") or ""
-    
-    # Check if user already has an instance (skip for super admin)
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT name, apikey FROM instances WHERE user_id = %s", (current_user.id,))
-        existing_instances = cur.fetchall()
-    conn.close()
+    payload = request.get_json(silent=True) or {}
+    instance_name = payload.get("instance_name") or ""
+    uazapi_for_all = is_uazapi_for_all_users_enabled()
 
-    if existing_instances and not is_super_admin():
-        # Prevent duplicates for normal users
-        return {
-            "error": f"Você já possui uma instância criada. Nome: {existing_instances[0][0]}"
-        }, 400
-
-    
     # Sanitize if provided
     safe_name = ""
     if instance_name:
         safe_name = "".join(c for c in instance_name if c.isalnum() or c in ('-', '_'))
     
     try:
-        if is_super_admin():
-            # Superadmin usa Uazapi
-            uazapi = UazapiService()
-            result = uazapi.create_instance(safe_name if safe_name else "instance")
-            if not result:
-                return {"error": "Falha ao criar instância na Uazapi."}, 500
-            instance_key = result.get('token') or (result.get('instance') or {}).get('token')
-            if not instance_key:
-                print(f"Warning: No token from Uazapi. Result: {result}")
-                return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cur:
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                snapshot = _get_user_plan_snapshot_for_limit(cur, current_user.id)
+                if not snapshot:
+                    conn.rollback()
+                    return {"error": "Usuário não encontrado."}, 404
+
+                if snapshot["current_instances"] >= snapshot["instance_limit"]:
+                    conn.rollback()
+                    return {"error": INSTANCE_LIMIT_REACHED_MESSAGE}, 400
+
+                use_uazapi = is_super_admin() or uazapi_for_all
+                if use_uazapi:
+                    # Superadmin e rollout habilitado usam Uazapi.
+                    uazapi = UazapiService()
+                    result = uazapi.create_instance(safe_name if safe_name else "instance")
+                    if not result:
+                        conn.rollback()
+                        return {"error": "Falha ao criar instância na Uazapi."}, 500
+                    instance_key = result.get('token') or (result.get('instance') or {}).get('token')
+                    if not instance_key:
+                        print(f"Warning: No token from Uazapi. Result: {result}")
+                        conn.rollback()
+                        return {"error": "Falha ao obter token da instância. Resposta da API inválida."}, 500
+
                     cur.execute(
                         """
                         INSERT INTO instances (user_id, name, apikey, status, api_provider)
                         VALUES (%s, %s, %s, 'disconnected', 'uazapi')
                         """,
-                        (current_user.id, instance_name or safe_name, instance_key)
+                        (current_user.id, instance_name or safe_name or "instance", instance_key)
                     )
-                conn.commit()
-            finally:
-                conn.close()
+                    conn.commit()
+                    return {"status": "success", "key": instance_key, "data": result}
+
+                # Rollout desligado: usuários comuns seguem MegaAPI legado.
+                service = WhatsappService()
+                result = service.create_instance(safe_name if safe_name else None)
+
+                if not result:
+                    conn.rollback()
+                    return {"error": "Failed to create instance at provider"}, 500
+
+                # Check API level error
+                if result.get('error') is True:
+                    conn.rollback()
+                    return {"error": "Failed to create instance at provider"}, 500
+
+                # Save to DB
+                instance_key = result.get('data', {}).get('instance_key')
+
+                # Fallback 1: Top level (sometimes APIs vary)
+                if not instance_key:
+                    instance_key = result.get('instance_key')
+
+                # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
+                if not instance_key and safe_name:
+                    if result.get('message') == 'Instance created' or result.get('error') is False:
+                        instance_key = safe_name
+
+                if not instance_key:
+                    print(f"Warning: No key returned from Mega API. Result: {result}")
+                    conn.rollback()
+                    return {"error": "Falha ao obter ID da instância. Resposta da API inválida."}, 500
+
+                cur.execute(
+                    """
+                    INSERT INTO instances (user_id, name, apikey, status)
+                    VALUES (%s, %s, %s, 'disconnected')
+                    """,
+                    (current_user.id, instance_name or safe_name or "instance", instance_key)
+                )
+
+            conn.commit()
             return {"status": "success", "key": instance_key, "data": result}
-        
-        # Usuários normais: MegaAPI
-        service = WhatsappService()
-        result = service.create_instance(safe_name if safe_name else None)
-        
-        if result:
-            # Check API level error
-            if result.get('error') is True:
-                 pass
-
-            # Save to DB
-            instance_key = result.get('data', {}).get('instance_key')
-            
-            # Fallback 1: Top level (sometimes APIs vary)
-            if not instance_key:
-                instance_key = result.get('instance_key')
-                
-            # Fallback 2: safe_name if we sent it and API didn't return it but succeeded
-            if not instance_key and safe_name:
-                 if result.get('message') == 'Instance created' or result.get('error') is False:
-                     instance_key = safe_name
-
-            if not instance_key:
-                 print(f"Warning: No key returned from Mega API. Result: {result}")
-                 return {"error": "Falha ao obter ID da instância. Resposta da API inválida."}, 500
-
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cur:
-                    # Simple INSERT - we already checked for existence
-                    cur.execute(
-                        """
-                        INSERT INTO instances (user_id, name, apikey, status)
-                        VALUES (%s, %s, %s, 'disconnected')
-                        """,
-                        (current_user.id, instance_name, instance_key)
-                    )
-                conn.commit()
-            finally:
-                conn.close()
-            
-            return {"status": "success", "key": instance_key, "data": result}
-        
-        return {"error": "Failed to create instance at provider"}, 500
+        finally:
+            conn.close()
     except Exception as e:
         print(f"Error in init_whatsapp: {e}")
         return {"error": f"Erro interno: {str(e)}"}, 500

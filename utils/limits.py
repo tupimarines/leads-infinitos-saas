@@ -8,6 +8,43 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
+
+# Fonte única de regras de plano.
+PLAN_POLICY = {
+    "starter": {
+        "instance_limit": 1,
+        "monthly_extraction_limit": 1000,
+        "daily_sends_per_instance_default": 30,
+        "infinite_daily_options": (),
+    },
+    "pro": {
+        "instance_limit": 2,
+        "monthly_extraction_limit": 2000,
+        "daily_sends_per_instance_default": 30,
+        "infinite_daily_options": (),
+    },
+    "scale": {
+        "instance_limit": 4,
+        "monthly_extraction_limit": 4000,
+        "daily_sends_per_instance_default": 30,
+        "infinite_daily_options": (),
+    },
+    "infinite": {
+        "instance_limit": 20,
+        "monthly_extraction_limit": 10000,
+        "daily_sends_per_instance_default": 30,
+        "infinite_daily_options": INFINITE_DAILY_SEND_OPTIONS,
+    },
+}
+
+# Compatibilidade temporária para dados legados no banco.
+LEGACY_LICENSE_TYPE_FALLBACK = {
+    "semestral": "pro",
+    "anual": "pro",
+}
+
+PLAN_PRIORITY = {"starter": 1, "pro": 2, "scale": 3, "infinite": 4}
 
 
 def get_db_connection():
@@ -21,10 +58,42 @@ def get_db_connection():
     )
 
 
-def get_user_daily_limit(user_id: int) -> int:
+def resolve_license_type(license_type: str, allow_legacy_fallback: bool = True):
+    normalized = (license_type or "").strip().lower()
+    if normalized in PLAN_POLICY:
+        return normalized
+    if allow_legacy_fallback:
+        return LEGACY_LICENSE_TYPE_FALLBACK.get(normalized)
+    return None
+
+
+def get_plan_policy(license_type: str, allow_legacy_fallback: bool = True):
+    resolved = resolve_license_type(license_type, allow_legacy_fallback=allow_legacy_fallback)
+    if not resolved:
+        return PLAN_POLICY["starter"]
+    return PLAN_POLICY[resolved]
+
+
+def _pick_highest_plan(license_rows):
+    resolved = []
+    for row in license_rows or []:
+        r = resolve_license_type(row.get("license_type"))
+        if r:
+            resolved.append(r)
+    if not resolved:
+        return "starter"
+    return max(resolved, key=lambda plan: PLAN_PRIORITY.get(plan, 0))
+
+
+def get_instance_daily_limit(user_id: int, instance_id: int = None) -> int:
+    return get_user_daily_limit(user_id, instance_id=instance_id)
+
+
+def get_user_daily_limit(user_id: int, instance_id: int = None) -> int:
     """
-    Obtém o limite diário do plano do usuário (License).
-    Retorna 10 (starter), 20 (pro) ou 30 (scale). Default 10.
+    Obtém a cota diária por instância para o usuário.
+    Regra padrão: 30 para todos os planos.
+    Infinite pode sobrescrever por instância: 10/20/30/40/50.
     """
     conn = get_db_connection()
     try:
@@ -34,25 +103,46 @@ def get_user_daily_limit(user_id: int) -> int:
                 (user_id,),
             )
             rows = cur.fetchall()
-        limit = 10
-        for row in rows:
-            lt = (row.get('license_type') or '').lower()
-            if lt == 'infinite':
-                limit = max(limit, 50)
-            elif lt == 'scale':
-                limit = max(limit, 30)
-            elif lt == 'pro':
-                limit = max(limit, 20)
-            elif lt == 'starter':
-                limit = max(limit, 10)
-        return limit
+            license_type = _pick_highest_plan(rows)
+            plan = PLAN_POLICY[license_type]
+            default_limit = int(plan["daily_sends_per_instance_default"])
+
+            if license_type != "infinite":
+                return default_limit
+
+            if instance_id is not None:
+                cur.execute(
+                    """
+                    SELECT daily_sends_per_instance
+                    FROM instances
+                    WHERE id = %s AND user_id = %s
+                    LIMIT 1
+                    """,
+                    (instance_id, user_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT daily_sends_per_instance
+                    FROM instances
+                    WHERE user_id = %s
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                )
+            instance_row = cur.fetchone() or {}
+            configured = instance_row.get("daily_sends_per_instance")
+            if configured in INFINITE_DAILY_SEND_OPTIONS:
+                return int(configured)
+            return default_limit
     finally:
         conn.close()
 
 
 def get_sent_today_count(user_id: int) -> int:
     """
-    Conta mensagens enviadas hoje (BRT) pelo usuário.
+    Conta apenas disparos iniciais enviados hoje (BRT) pelo usuário.
     """
     query = """
     SELECT COUNT(cl.id) as count
@@ -60,6 +150,10 @@ def get_sent_today_count(user_id: int) -> int:
     JOIN campaigns c ON cl.campaign_id = c.id
     WHERE c.user_id = %s
       AND cl.status = 'sent'
+      AND (
+          COALESCE(cl.current_step, 1) = 1
+          OR COALESCE(cl.last_sent_stage, '') = 'initial'
+      )
       AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
           = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
     """
@@ -128,7 +222,7 @@ def check_daily_limit(user_id: int, plan_limit: int) -> bool:
     """
     Verifica se o usuário já atingiu o limite diário de disparos.
     Retorna True se PODE enviar, False se atingiu o limite.
-    Conta mensagens enviadas hoje (BRT).
+    Conta apenas disparos iniciais enviados hoje (BRT).
     """
     query = """
     SELECT COUNT(cl.id) as count
@@ -136,6 +230,10 @@ def check_daily_limit(user_id: int, plan_limit: int) -> bool:
     JOIN campaigns c ON cl.campaign_id = c.id
     WHERE c.user_id = %s
       AND cl.status = 'sent'
+      AND (
+          COALESCE(cl.current_step, 1) = 1
+          OR COALESCE(cl.last_sent_stage, '') = 'initial'
+      )
       AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
           = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
     """

@@ -28,13 +28,18 @@ try:
 except ImportError:
     uazapi_service = None
 
+try:
+    from utils.sync_uazapi import sync_campaign_leads_from_uazapi
+except ImportError:
+    sync_campaign_leads_from_uazapi = None
+
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
 CHATWOOT_ACCESS_TOKEN = os.environ.get('CHATWOOT_ACCESS_TOKEN')
 CHATWOOT_ACCOUNT_ID = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
 
-# Super Admin email (multi-instance per-instance daily limit)
-SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+UAZAPI_FOR_ALL_USERS_ENABLED = str(os.environ.get('UAZAPI_FOR_ALL_USERS_ENABLED', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+UAZAPI_USAGE_SYNC_INTERVAL_MINUTES = 10
 
 # In-memory delay tracking PER INSTANCE for non-blocking concurrency (multi-instance rotation)
 # struct: { instance_name: datetime_when_instance_can_send_next }
@@ -293,15 +298,16 @@ def _is_media_path_safe(media_path, user_id):
         return False
 
 
-# check_daily_limit extraído para utils.limits (reuso em worker_cadence)
-from utils.limits import check_daily_limit
+# Limites centralizados de plano/instância
+from utils.limits import get_user_daily_limit
 
-def check_instance_daily_limit(user_id, instance_name, plan_limit):
+def check_instance_daily_limit(user_id, instance_name, instance_id=None):
     """
     Verifica se uma instância específica já atingiu o limite diário de disparos.
-    Conta apenas mensagens enviadas por esta instância hoje.
+    Conta apenas disparos iniciais enviados por esta instância hoje.
     Retorna True se PODE enviar, False se atingiu o limite.
     """
+    instance_limit = get_user_daily_limit(user_id, instance_id=instance_id)
     query = """
     SELECT COUNT(cl.id) as count 
     FROM campaign_leads cl
@@ -309,6 +315,10 @@ def check_instance_daily_limit(user_id, instance_name, plan_limit):
     WHERE c.user_id = %s 
     AND cl.status = 'sent' 
     AND cl.sent_by_instance = %s
+    AND (
+        COALESCE(cl.current_step, 1) = 1
+        OR COALESCE(cl.last_sent_stage, '') = 'initial'
+    )
     AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
     """
     
@@ -319,7 +329,7 @@ def check_instance_daily_limit(user_id, instance_name, plan_limit):
             row = cur.fetchone()
         
         current_sent = row['count']
-        return current_sent < plan_limit
+        return current_sent < instance_limit
     finally:
         conn.close()
 
@@ -687,15 +697,67 @@ def is_campaign_in_send_window(campaign):
     return True
 
 
+def _sync_uazapi_usage(conn):
+    """
+    Reconcilia campanhas Uazapi ativas para manter consumo diário consistente
+    entre estado local e API (Task 18).
+    """
+    if not uazapi_service or not sync_campaign_leads_from_uazapi:
+        return
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT c.id AS campaign_id, c.uazapi_folder_id, i.apikey
+            FROM campaigns c
+            JOIN campaign_instances ci ON ci.campaign_id = c.id
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE c.status IN ('pending', 'running', 'completed')
+              AND c.use_uazapi_sender = TRUE
+              AND c.uazapi_folder_id IS NOT NULL
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+            ORDER BY c.id ASC
+            """
+        )
+        rows = cur.fetchall() or []
+
+    seen = set()
+    for row in rows:
+        campaign_id = row["campaign_id"]
+        if campaign_id in seen:
+            continue
+        seen.add(campaign_id)
+        try:
+            sync_campaign_leads_from_uazapi(
+                conn,
+                campaign_id,
+                row["apikey"],
+                row.get("uazapi_folder_id"),
+                uazapi_service,
+            )
+        except Exception as e:
+            print(f"⚠️ [Sender Sync] Campaign {campaign_id}: falha no sync de uso Uazapi: {e}")
+
+
 def process_campaigns():
     """
     Loop principal do Worker de Disparo.
     """
-    print("Starting Sender Worker Loop (Mega API)...")
+    print("Starting Sender Worker Loop...")
+    last_uazapi_usage_sync_at = None
     
     while True:
         try:
             conn = get_db_connection()
+            now_sync = datetime.now(BRAZIL_TZ)
+            should_sync_uazapi_usage = (
+                last_uazapi_usage_sync_at is None
+                or (now_sync - last_uazapi_usage_sync_at).total_seconds() >= UAZAPI_USAGE_SYNC_INTERVAL_MINUTES * 60
+            )
+            if should_sync_uazapi_usage:
+                _sync_uazapi_usage(conn)
+                last_uazapi_usage_sync_at = now_sync
             
             # 1. Buscar campanhas 'running' OU 'pending' que atingiram horário agendado
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -750,47 +812,21 @@ def process_campaigns():
                 
                 conn = get_db_connection()
                 try:
-                    # 2. Verificar Daily Limit
-                    user_limit = 10  # Default (Starter)
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        cur.execute(
-                            "SELECT license_type FROM licenses WHERE user_id = %s AND status = 'active' AND expires_at > NOW()", 
-                            (user_id,)
-                        )
-                        licenses = cur.fetchall()
-                        for lic in licenses:
-                            l_type = lic['license_type']
-                            if l_type == 'scale': user_limit = max(user_limit, 30)
-                            elif l_type == 'pro': user_limit = max(user_limit, 20)
-                    
-                    # Check if super admin (per-instance limit check happens AFTER instance selection)
-                    is_sa = False
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
-                        user_row = cur.fetchone()
-                    if user_row and user_row['email'] == SUPER_ADMIN_EMAIL:
-                        is_sa = True
-                    
-                    # For regular users: check global daily limit
-                    if not is_sa:
-                        if not check_daily_limit(user_id, user_limit):
-                            continue
-                    
                     active_users_processed += 1
                     
                     # --- FETCH CAMPAIGN INSTANCES (multi-instance support) ---
-                    # Superadmin: apenas instâncias Uazapi (api_provider='uazapi')
-                    # Outros usuários: MegaAPI (api_provider IS NULL ou 'megaapi')
+                    # MegaAPI permanece padrão; Uazapi só entra quando a campanha explicitamente usa Uazapi.
                     campaign_insts = []
-                    instance_filter = "AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'" if is_sa else "AND COALESCE(i.api_provider, 'megaapi') = 'megaapi'"
+                    use_uazapi_campaign = bool(campaign.get('use_uazapi_sender')) and UAZAPI_FOR_ALL_USERS_ENABLED
+                    provider_order = "CASE WHEN COALESCE(i.api_provider, 'megaapi') = 'uazapi' THEN 0 ELSE 1 END" if use_uazapi_campaign else "CASE WHEN COALESCE(i.api_provider, 'megaapi') = 'megaapi' THEN 0 ELSE 1 END"
                     try:
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(f"""
                                 SELECT i.name, i.id, i.apikey, COALESCE(i.api_provider, 'megaapi') as api_provider
                                 FROM campaign_instances ci
                                 JOIN instances i ON ci.instance_id = i.id
-                                WHERE ci.campaign_id = %s AND i.status = 'connected' {instance_filter}
-                                ORDER BY i.id
+                                WHERE ci.campaign_id = %s AND i.status = 'connected'
+                                ORDER BY {provider_order}, i.id
                             """, (campaign['id'],))
                             campaign_insts = cur.fetchall()
                     except Exception as e_ci:
@@ -798,11 +834,19 @@ def process_campaigns():
 
                     # Fallback: no campaign_instances records or table doesn't exist
                     if not campaign_insts:
-                        fallback_filter = "AND COALESCE(api_provider, 'megaapi') = 'uazapi'" if is_sa else "AND COALESCE(api_provider, 'megaapi') = 'megaapi'"
+                        fallback_provider = 'uazapi' if use_uazapi_campaign else 'megaapi'
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(
-                                f"SELECT name, id, apikey, COALESCE(api_provider, 'megaapi') as api_provider FROM instances WHERE user_id = %s AND status = 'connected' {fallback_filter} ORDER BY updated_at DESC LIMIT 1",
-                                (user_id,)
+                                """
+                                SELECT name, id, apikey, COALESCE(api_provider, 'megaapi') as api_provider
+                                FROM instances
+                                WHERE user_id = %s
+                                  AND status = 'connected'
+                                  AND COALESCE(api_provider, 'megaapi') = %s
+                                ORDER BY updated_at DESC
+                                LIMIT 1
+                                """,
+                                (user_id, fallback_provider),
                             )
                             fallback = cur.fetchone()
                         if fallback:
@@ -843,21 +887,27 @@ def process_campaigns():
                     
                     instance_name = selected_instance['name']
                     
-                    # Super Admin: per-instance daily limit check
-                    if is_sa:
-                        if not check_instance_daily_limit(user_id, instance_name, user_limit):
-                            # This instance hit its daily limit, try to find another
-                            found_available = False
-                            for alt_inst in campaign_insts:
-                                if alt_inst['name'] != instance_name:
-                                    if check_instance_daily_limit(user_id, alt_inst['name'], user_limit):
-                                        selected_instance = alt_inst
-                                        instance_name = alt_inst['name']
-                                        found_available = True
-                                        break
-                            if not found_available:
-                                # All instances hit their daily limit
-                                continue
+                    # Limite por instância (desacoplado de superadmin)
+                    if not check_instance_daily_limit(
+                        user_id,
+                        instance_name,
+                        instance_id=selected_instance.get('id'),
+                    ):
+                        # Esta instância bateu limite; tenta outra da campanha.
+                        found_available = False
+                        for alt_inst in campaign_insts:
+                            if alt_inst['name'] != instance_name:
+                                if check_instance_daily_limit(
+                                    user_id,
+                                    alt_inst['name'],
+                                    instance_id=alt_inst.get('id'),
+                                ):
+                                    selected_instance = alt_inst
+                                    instance_name = alt_inst['name']
+                                    found_available = True
+                                    break
+                        if not found_available:
+                            continue
 
                     # 4. Pegar 1 lead pendente (FIFO)
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -969,8 +1019,8 @@ def process_campaigns():
                     success = False
                     log = ""
                     attempted_media = False
-                    # Superadmin + Uazapi + cadência: enviar mídia do step 1 se houver (apenas mídia com caption, sem fallback texto)
-                    if is_sa and inst_provider == 'uazapi' and campaign.get('enable_cadence') and uazapi_service and inst_apikey:
+                    # Uazapi + cadência: enviar mídia do step 1 se houver (sem depender de superadmin)
+                    if inst_provider == 'uazapi' and campaign.get('enable_cadence') and uazapi_service and inst_apikey:
                         with conn.cursor(cursor_factory=RealDictCursor) as cur:
                             cur.execute(
                                 "SELECT media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",

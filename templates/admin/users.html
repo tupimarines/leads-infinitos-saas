@@ -27,6 +27,7 @@
             <option value="starter">Starter</option>
             <option value="pro">Pro</option>
             <option value="scale">Scale</option>
+            <option value="infinite">Infinite</option>
             <option value="no-plan">Sem Plano</option>
         </select>
     </div>
@@ -74,10 +75,6 @@
                             {% set plan_color = 'text-blue-400' %}
                             {% elif user.license_type == 'scale' %}
                             {% set plan_color = 'text-purple-400' %}
-                            {% elif user.license_type == 'anual' %}
-                            {% set plan_color = 'text-orange-400' %}
-                            {% elif user.license_type == 'semestral' %}
-                            {% set plan_color = 'text-yellow-400' %}
                             {% elif user.license_type == 'infinite' %}
                             {% set plan_color = 'text-cyan-400' %}
                             {% endif %}
@@ -155,8 +152,19 @@
 
                 <div class="col-span-2 mt-2 pt-2 border-t border-gray-700">
                     <label class="text-xs text-gray-500 uppercase mb-1 block">Conexão WhatsApp</label>
-                    <div id="detailWhatsapp"
-                        class="text-sm flex items-center gap-2 bg-[#0c1430] p-2 rounded border border-gray-700/50">
+                    <div class="space-y-2">
+                        <div class="flex gap-2">
+                            <input type="text" id="newInstanceName" placeholder="Nome da nova instância"
+                                class="flex-1 bg-[#0c1430] border border-gray-700 rounded text-white px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
+                            <button onclick="addInstance()"
+                                class="px-3 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded hover:bg-blue-500/30 transition-colors text-sm">
+                                Adicionar instância
+                            </button>
+                        </div>
+                        <div id="instanceLimitError" class="hidden text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1"></div>
+                        <div id="detailWhatsapp"
+                            class="text-sm space-y-2 bg-[#0c1430] p-2 rounded border border-gray-700/50">
+                        </div>
                     </div>
                 </div>
             </div>
@@ -172,10 +180,10 @@
                         <input type="hidden" name="user_id" id="formPlanUserId">
                         <select name="license_type"
                             class="flex-1 bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 text-sm focus:outline-none focus:border-blue-500">
-                            <option value="starter">Starter (10 msg/dia)</option>
-                            <option value="pro">Pro (20 msg/dia)</option>
-                            <option value="scale">Scale (30 msg/dia)</option>
-                            <option value="infinite">Infinite (50 msg/dia, 10k extração/mês)</option>
+                            <option value="starter">Starter (1 instância, 1k extrações/mês, 30 disparos iniciais/dia por instância)</option>
+                            <option value="pro">Pro (2 instâncias, 2k extrações/mês, 30 disparos iniciais/dia por instância)</option>
+                            <option value="scale">Scale (4 instâncias, 4k extrações/mês, 30 disparos iniciais/dia por instância)</option>
+                            <option value="infinite">Infinite (20 instâncias, 10k extrações/mês, 10-50 disparos iniciais/dia por instância)</option>
                         </select>
                         <button type="submit" class="btn btn-primary text-sm whitespace-nowrap">Aplicar</button>
                     </form>
@@ -228,7 +236,7 @@
 
 <script>
     let currentUserId = null;
-    let currentInstanceKey = null;
+    let currentUserInstances = [];
 
     function filterTable() {
         const query = document.getElementById('searchInput').value.toLowerCase();
@@ -305,34 +313,12 @@
             document.getElementById('editPassword').value = ''; // Reset password field
 
             document.getElementById('detailSince').textContent = new Date(data.user.created_at).toLocaleDateString('pt-BR');
+            document.getElementById('newInstanceName').value = '';
+            document.getElementById('instanceLimitError').classList.add('hidden');
 
-            // WhatsApp Status
-            const waDiv = document.getElementById('detailWhatsapp');
-            if (data.user.instance_name) {
-                currentInstanceKey = data.user.instance_apikey;
-                const statusColor = data.user.instance_status === 'connected' ? 'text-green-400' : 'text-yellow-400';
-
-                let jidDisplay = '';
-                if (data.user.remote_jid) {
-                    jidDisplay = `<span class="text-xs text-gray-400 block">${data.user.remote_jid}</span>`;
-                }
-
-                waDiv.innerHTML = `
-                    <div class="flex-1">
-                        <div class="flex items-center gap-2">
-                            <span class="${statusColor} font-medium">${data.user.instance_name}</span> 
-                            <span class="text-xs text-gray-500">(${data.user.instance_status})</span>
-                        </div>
-                        <div id="waJidContainer">${jidDisplay}</div>
-                    </div>
-                    <button onclick="verifyWhatsappStatus('${data.user.instance_apikey}')" class="ml-auto text-xs bg-blue-500/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors" title="Verificar Status">
-                        ⟳
-                    </button>
-                `;
-            } else {
-                currentInstanceKey = null;
-                waDiv.innerHTML = '<span class="text-gray-500">Não conectado</span>';
-            }
+            // WhatsApp Instances
+            currentUserInstances = Array.isArray(data.instances) ? data.instances : [];
+            renderInstances();
 
             // Plan Status
             const planDiv = document.getElementById('detailPlan');
@@ -351,6 +337,37 @@
             alert('Erro ao carregar detalhes: ' + error.message);
             closeDetailsModal();
         }
+    }
+
+    function renderInstances() {
+        const waDiv = document.getElementById('detailWhatsapp');
+        if (!currentUserInstances.length) {
+            waDiv.innerHTML = '<span class="text-gray-500">Nenhuma instância cadastrada.</span>';
+            return;
+        }
+
+        waDiv.innerHTML = currentUserInstances.map((inst) => {
+            const status = (inst.status || 'disconnected').toLowerCase();
+            const statusColor = status === 'connected' ? 'text-green-400' : (status === 'connecting' ? 'text-yellow-400' : 'text-gray-400');
+            const provider = (inst.api_provider || 'megaapi').toUpperCase();
+            return `
+                <div class="flex items-center gap-2 border border-gray-700/60 rounded p-2">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span class="font-medium ${statusColor}">${inst.name}</span>
+                            <span class="text-xs text-gray-500">(${status})</span>
+                            <span class="text-[10px] px-1 py-0.5 rounded bg-gray-700 text-gray-300">${provider}</span>
+                        </div>
+                        <div id="waJidContainer-${inst.id}" class="text-xs text-gray-500 truncate"></div>
+                    </div>
+                    <button onclick="verifyWhatsappStatus('${inst.apikey}', ${inst.id})"
+                        class="text-xs bg-blue-500/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors"
+                        title="Verificar Status">
+                        ⟳
+                    </button>
+                </div>
+            `;
+        }).join('');
     }
 
     async function saveUserChanges() {
@@ -378,10 +395,11 @@
         }
     }
 
-    async function verifyWhatsappStatus(apiKey) {
+    async function verifyWhatsappStatus(apiKey, instanceId) {
         if (!apiKey) return;
 
-        const btn = document.querySelector(`button[onclick="verifyWhatsappStatus('${apiKey}')"]`);
+        const btn = document.querySelector(`button[onclick="verifyWhatsappStatus('${apiKey}', ${instanceId})"]`);
+        if (!btn) return;
         const originalContent = btn.innerHTML;
         btn.innerHTML = '...';
         btn.disabled = true;
@@ -395,7 +413,7 @@
                 const jid = data.remote_jid || (data.result && data.result.me);
 
                 // Update JID display directly
-                const jidContainer = document.getElementById('waJidContainer');
+                const jidContainer = document.getElementById(`waJidContainer-${instanceId}`);
                 if (jid) {
                     jidContainer.innerHTML = `<span class="text-xs text-green-400 block">${jid} (Validado)</span>`;
                 } else {
@@ -416,13 +434,47 @@
         }
     }
 
+    async function addInstance() {
+        if (!currentUserId) return;
+        const errorBox = document.getElementById('instanceLimitError');
+        errorBox.classList.add('hidden');
+        errorBox.textContent = '';
+
+        const instanceName = (document.getElementById('newInstanceName').value || '').trim();
+        const payload = instanceName ? { instance_name: instanceName } : {};
+
+        try {
+            const response = await fetch(`/admin/users/${currentUserId}/instances`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const result = await response.json();
+
+            if (!response.ok || result.error) {
+                const msg = result.error || 'Erro ao adicionar instância.';
+                errorBox.textContent = msg;
+                errorBox.classList.remove('hidden');
+                return;
+            }
+
+            if (result.instance) {
+                currentUserInstances.push(result.instance);
+                renderInstances();
+                document.getElementById('newInstanceName').value = '';
+            }
+        } catch (e) {
+            errorBox.textContent = 'Erro ao adicionar instância.';
+            errorBox.classList.remove('hidden');
+        }
+    }
+
     function getDataPlanColor(type) {
         switch (type) {
             case 'starter': return 'text-green-400 font-bold';
             case 'pro': return 'text-blue-400 font-bold';
             case 'scale': return 'text-purple-400 font-bold';
-            case 'anual': return 'text-orange-400 font-bold'; /* Legacy */
-            case 'semestral': return 'text-yellow-400 font-bold'; /* Legacy */
+            case 'infinite': return 'text-cyan-400 font-bold';
             default: return 'text-gray-300 font-bold';
         }
     }

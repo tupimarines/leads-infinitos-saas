@@ -41,7 +41,7 @@ except ImportError:
     uazapi_service = None
 
 # Limites compartilhados
-from utils.limits import check_daily_limit, get_user_daily_limit, can_create_campaign_today
+from utils.limits import can_create_campaign_today
 from utils.sync_uazapi import (
     sync_campaign_leads_from_uazapi,
     get_uazapi_campaign_counts,
@@ -555,7 +555,7 @@ def _materialize_scheduled_stage_sends(conn):
 
 def _sync_active_stage_folders(conn):
     """
-    Sync explícito de folders ativos a cada 15 min.
+    Sync explícito de folders ativos a cada 10 min.
     Atualiza progresso por stage/instância com base em listfolders.
     """
     if not uazapi_service:
@@ -575,7 +575,7 @@ def _sync_active_stage_folders(conn):
               AND i.apikey IS NOT NULL
               AND (
                     css.last_sync_at IS NULL
-                    OR css.last_sync_at <= (NOW() - INTERVAL '15 minutes')
+                    OR css.last_sync_at <= (NOW() - INTERVAL '10 minutes')
                   )
             ORDER BY css.campaign_id ASC
             """
@@ -1065,8 +1065,25 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
     if not instance or instance.get('api_provider') != 'uazapi' or not uazapi_service:
         return
 
+    # Antes de decidir próximo estágio, sincroniza com source-of-truth da API.
+    if campaign.get('use_uazapi_sender') and instance.get('apikey'):
+        try:
+            sync_campaign_leads_from_uazapi(
+                conn, cid, instance['apikey'], campaign.get('uazapi_folder_id'), uazapi_service
+            )
+        except Exception as e:
+            print(f"  ⚠️ [Rollover {step_label}] Sync pré-decisão falhou: {e}")
+
+    required_last_stage = {2: 'follow1', 3: 'follow2'}.get(from_step)
+
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
+        extra_stage_clause = ""
+        params = [cid, from_step]
+        if required_last_stage:
+            extra_stage_clause = "AND COALESCE(cl.last_sent_stage, '') = %s"
+            params.append(required_last_stage)
+
+        cur.execute(f"""
             SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
             FROM campaign_leads cl
             WHERE cl.campaign_id = %s
@@ -1075,8 +1092,9 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
               AND cl.cadence_status = 'snoozed'
               AND cl.snooze_until <= NOW()
               AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+              {extra_stage_clause}
             LIMIT 100
-        """, (cid, from_step))
+        """, tuple(params))
         rollover_leads = cur.fetchall()
 
     if not rollover_leads:
@@ -1127,7 +1145,13 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
 
     # Re-query imediatamente antes de criar campanha (excluir leads movidos para Convertido/Perdido)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
+        extra_stage_clause = ""
+        params = [cid, from_step]
+        if required_last_stage:
+            extra_stage_clause = "AND COALESCE(cl.last_sent_stage, '') = %s"
+            params.append(required_last_stage)
+
+        cur.execute(f"""
             SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
             FROM campaign_leads cl
             WHERE cl.campaign_id = %s
@@ -1136,8 +1160,9 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
               AND cl.cadence_status = 'snoozed'
               AND cl.snooze_until <= NOW()
               AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+              {extra_stage_clause}
             LIMIT 100
-        """, (cid, from_step))
+        """, tuple(params))
         rollover_leads = cur.fetchall()
 
     if not rollover_leads:
@@ -1321,11 +1346,6 @@ def process_campaign_sends(campaign, conn):
         row = cur.fetchone()
     if row and row.get('email') == SUPER_ADMIN_EMAIL:
         is_sa = True
-
-    # Respeitar limite diário antes de enviar follow-ups
-    plan_limit = get_user_daily_limit(user_id)
-    if not check_daily_limit(user_id, plan_limit):
-        return
 
     instance_name = instance['name']
     api_provider = instance.get('api_provider') or 'megaapi'
