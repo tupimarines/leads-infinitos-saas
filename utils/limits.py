@@ -7,7 +7,7 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-SUPER_ADMIN_EMAILS = ('augustogumi@gmail.com', 'ricardo.ost@gmail.com')
+from utils.config import SUPER_ADMIN_EMAILS
 INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
 
 # Fonte única de regras de plano.

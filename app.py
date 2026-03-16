@@ -44,8 +44,7 @@ from utils.limits import (
 
 load_dotenv()
 
-# Super Admin emails (multi-instance feature)
-SUPER_ADMIN_EMAILS = ('augustogumi@gmail.com', 'ricardo.ost@gmail.com')
+from utils.config import SUPER_ADMIN_EMAILS
 
 # Throttling para warning de stats Uazapi (evitar spam a cada polling)
 _stats_uazapi_warning_last = {}  # campaign_id -> timestamp

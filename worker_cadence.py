@@ -50,8 +50,7 @@ from utils.sync_uazapi import (
     normalize_phone_for_match,
 )
 
-# Super Admin (gate para mídia Uazapi)
-SUPER_ADMIN_EMAILS = ('augustogumi@gmail.com', 'ricardo.ost@gmail.com')
+from utils.config import SUPER_ADMIN_EMAILS
 
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
