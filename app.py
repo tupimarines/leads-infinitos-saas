@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash, abort
+from flask import Flask, render_template, request, redirect, url_for, send_file, flash, abort, jsonify
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -378,7 +378,7 @@ def init_db() -> None:
     """)
     cur.execute("""
         ALTER TABLE licenses ADD CONSTRAINT licenses_license_type_check
-        CHECK (license_type IN ('starter', 'pro', 'scale', 'infinite'));
+        CHECK (license_type IN ('starter', 'starter_trial', 'pro', 'scale', 'infinite'));
     """)
 
     # Tabela de modelos de mensagem
@@ -739,8 +739,10 @@ class License:
         
         purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
         
-        # Padronizado: validade anual para todos os planos ativos.
-        expires_at = purchase_dt + timedelta(days=365)
+        # Validade por plano: starter_trial = 7 dias; demais = 365 dias.
+        policy = get_plan_policy(license_type)
+        validity_days = int(policy.get("validity_days", 365))
+        expires_at = purchase_dt + timedelta(days=validity_days)
         
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -1979,6 +1981,26 @@ def hubla_webhook():
     except Exception as e:
         print(f"Erro no webhook da Hubla: {e}")
         return {"status": "error", "message": str(e)}, 500
+
+
+@app.route("/cron/expire-starter-trial", methods=["GET", "POST"])
+def cron_expire_starter_trial():
+    """
+    Expira licenças starter_trial vencidas e deleta instâncias Uazapi.
+    Protegido por token: ?token=<CRON_SECRET>
+    Uso: cron diário (ex: 0 2 * * * curl -s "https://app.../cron/expire-starter-trial?token=...")
+    """
+    token = request.args.get("token") or (request.get_json(silent=True) or {}).get("token")
+    expected = os.environ.get("CRON_SECRET", "")
+    if not expected or token != expected:
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        from utils.expire_starter_trial import expire_starter_trial_licenses
+        count = expire_starter_trial_licenses()
+        return jsonify({"ok": True, "processed": count})
+    except Exception as e:
+        print(f"❌ cron_expire_starter_trial: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/licenses")

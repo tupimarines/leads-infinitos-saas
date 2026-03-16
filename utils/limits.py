@@ -11,30 +11,43 @@ from utils.config import SUPER_ADMIN_EMAILS
 INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
 
 # Fonte única de regras de plano.
+# validity_days: dias até expiração (a partir da data de aplicação ao usuário).
+# starter_trial: 7 dias; demais planos: 365 dias.
 PLAN_POLICY = {
     "starter": {
         "instance_limit": 1,
         "monthly_extraction_limit": 1000,
         "daily_sends_per_instance_default": 30,
         "infinite_daily_options": (),
+        "validity_days": 365,
+    },
+    "starter_trial": {
+        "instance_limit": 1,
+        "monthly_extraction_limit": 210,
+        "daily_sends_per_instance_default": 30,
+        "infinite_daily_options": (),
+        "validity_days": 7,
     },
     "pro": {
         "instance_limit": 2,
         "monthly_extraction_limit": 2000,
         "daily_sends_per_instance_default": 30,
         "infinite_daily_options": (),
+        "validity_days": 365,
     },
     "scale": {
         "instance_limit": 4,
         "monthly_extraction_limit": 4000,
         "daily_sends_per_instance_default": 30,
         "infinite_daily_options": (),
+        "validity_days": 365,
     },
     "infinite": {
         "instance_limit": 20,
         "monthly_extraction_limit": 10000,
         "daily_sends_per_instance_default": 30,
         "infinite_daily_options": INFINITE_DAILY_SEND_OPTIONS,
+        "validity_days": 365,
     },
 }
 
@@ -44,7 +57,7 @@ LEGACY_LICENSE_TYPE_FALLBACK = {
     "anual": "pro",
 }
 
-PLAN_PRIORITY = {"starter": 1, "pro": 2, "scale": 3, "infinite": 4}
+PLAN_PRIORITY = {"starter": 1, "starter_trial": 1, "pro": 2, "scale": 3, "infinite": 4}
 
 
 def get_db_connection():
