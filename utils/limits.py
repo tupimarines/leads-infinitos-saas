@@ -7,7 +7,7 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+SUPER_ADMIN_EMAILS = ('augustogumi@gmail.com', 'ricardo.ost@gmail.com')
 INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
 
 # Fonte única de regras de plano.
@@ -210,7 +210,7 @@ def can_create_campaign_today(instance_id: int) -> bool:
             )
             row = cur.fetchone() or {}
         # Superadmin não fica limitado a 1 campanha/instância/dia.
-        if (row.get('email') or '').strip().lower() == SUPER_ADMIN_EMAIL:
+        if (row.get('email') or '').strip().lower() in [e.lower() for e in SUPER_ADMIN_EMAILS]:
             return True
     finally:
         conn.close()

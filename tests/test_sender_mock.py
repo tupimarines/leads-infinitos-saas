@@ -102,7 +102,7 @@ class TestLimitsPolicy(unittest.TestCase):
     ):
         mock_cursor = MagicMock()
         mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = {'email': limits_module.SUPER_ADMIN_EMAIL}
+        mock_cursor.fetchone.return_value = {'email': limits_module.SUPER_ADMIN_EMAILS[0]}
 
         self.assertTrue(limits_module.can_create_campaign_today(instance_id=55))
 

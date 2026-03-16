@@ -44,8 +44,8 @@ from utils.limits import (
 
 load_dotenv()
 
-# Super Admin email (multi-instance feature)
-SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+# Super Admin emails (multi-instance feature)
+SUPER_ADMIN_EMAILS = ('augustogumi@gmail.com', 'ricardo.ost@gmail.com')
 
 # Throttling para warning de stats Uazapi (evitar spam a cada polling)
 _stats_uazapi_warning_last = {}  # campaign_id -> timestamp
@@ -355,9 +355,10 @@ def init_db() -> None:
     cur.execute(
         """
         DELETE FROM instances
-        WHERE user_id = (SELECT id FROM users WHERE email = 'augustogumi@gmail.com')
+        WHERE user_id IN (SELECT id FROM users WHERE email = ANY(%s))
         AND (api_provider IS NULL OR api_provider != 'uazapi');
-        """
+        """,
+        (list(SUPER_ADMIN_EMAILS),),
     )
 
     # Migração: manter apenas planos ativos no CHECK de license_type
@@ -787,9 +788,9 @@ def admin_required(f):
     return decorated_function
 
 def is_super_admin(user=None):
-    """Verifica se o usuário é o super admin (multi-instance feature)"""
+    """Verifica se o usuário é super admin (multi-instance feature)"""
     u = user or current_user
-    return u.is_authenticated and u.email == SUPER_ADMIN_EMAIL
+    return u.is_authenticated and u.email in SUPER_ADMIN_EMAILS
 
 class Campaign:
     def __init__(self, id, user_id, name, status, message_template, daily_limit, created_at, closed_deals=0, scheduled_start=None, sent_today=0, rotation_mode='single', enable_cadence=False, terms_accepted=False, cadence_config=None, use_uazapi_sender=False, uazapi_folder_id=None, **kwargs):
@@ -6440,21 +6441,15 @@ def replace_leads(campaign_id):
 @login_required
 def migrate_cadence_route():
     # Security check: only super admin
-    if current_user.email != SUPER_ADMIN_EMAIL:
+    if current_user.email not in SUPER_ADMIN_EMAILS:
         return "Unauthorized", 403
     
     conn = get_db_connection()
     log = ["<h1>Relatório de Migração de Cadência</h1>"]
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Get Super Admin ID
-            cur.execute("SELECT id FROM users WHERE email = %s", (SUPER_ADMIN_EMAIL,))
-            user = cur.fetchone()
-            if not user:
-                return "Super admin ({}) not found".format(SUPER_ADMIN_EMAIL), 404
-            
-            user_id = user['id']
-            log.append(f"<p><strong>Super Admin ID:</strong> {user_id}</p>")
+            user_id = current_user.id
+            log.append(f"<p><strong>Super Admin ID:</strong> {user_id} ({current_user.email})</p>")
             
             # 2. Get all campaigns
             cur.execute("SELECT id, name FROM campaigns WHERE user_id = %s", (user_id,))
@@ -6522,7 +6517,7 @@ def migrate_cadence_route():
 @login_required
 def migrate_notes_route():
     # Security check: only super admin
-    if current_user.email != SUPER_ADMIN_EMAIL:
+    if current_user.email not in SUPER_ADMIN_EMAILS:
         return "Unauthorized", 403
     
     conn = get_db_connection()
@@ -6542,7 +6537,7 @@ def migrate_notes_route():
 @login_required
 def migrate_enrichment_route():
     # Security check: only super admin
-    if current_user.email != SUPER_ADMIN_EMAIL:
+    if current_user.email not in SUPER_ADMIN_EMAILS:
         return "Unauthorized", 403
     
     conn = get_db_connection()
@@ -6570,8 +6565,8 @@ def migrate_enrichment_route():
 @app.route('/sync_chatwoot_snooze')
 @login_required
 def sync_chatwoot_snooze_route():
-    # Security check: only super admin (Augusto)
-    if current_user.email != SUPER_ADMIN_EMAIL:
+    # Security check: only super admin
+    if current_user.email not in SUPER_ADMIN_EMAILS:
         return "Unauthorized: Only Super Admin can run this sync", 403
         
     chatwoot_url = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
@@ -6590,12 +6585,7 @@ def sync_chatwoot_snooze_route():
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Get User ID
-            cur.execute("SELECT id FROM users WHERE email = %s", (SUPER_ADMIN_EMAIL,))
-            user = cur.fetchone()
-            if not user:
-                return f"Super admin ({SUPER_ADMIN_EMAIL}) not found", 404
-            user_id = user['id']
+            user_id = current_user.id
             
             # 2. Find Snoozed Leads (Check ALL snoozed leads, even without conversation_id)
             query = """

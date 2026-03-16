@@ -51,7 +51,7 @@ from utils.sync_uazapi import (
 )
 
 # Super Admin (gate para mídia Uazapi)
-SUPER_ADMIN_EMAIL = 'augustogumi@gmail.com'
+SUPER_ADMIN_EMAILS = ('augustogumi@gmail.com', 'ricardo.ost@gmail.com')
 
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
@@ -948,7 +948,7 @@ def process_rollover(campaign, conn):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
-    is_sa = row and row.get('email') == SUPER_ADMIN_EMAIL
+    is_sa = row and row.get('email') in SUPER_ADMIN_EMAILS
 
     # Mídia step 2 (superadmin only)
     media_file_data = None
@@ -1124,7 +1124,7 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
-    is_sa = row and row.get('email') == SUPER_ADMIN_EMAIL
+    is_sa = row and row.get('email') in SUPER_ADMIN_EMAILS
 
     # Mídia do step (superadmin only)
     media_file_data = None
@@ -1344,7 +1344,7 @@ def process_campaign_sends(campaign, conn):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
-    if row and row.get('email') == SUPER_ADMIN_EMAIL:
+    if row and row.get('email') in SUPER_ADMIN_EMAILS:
         is_sa = True
 
     instance_name = instance['name']
