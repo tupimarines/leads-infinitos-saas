@@ -150,7 +150,7 @@ def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, ti
 
 def validate_job_csv(job_id, user_id, file_path=None):
     """
-    Valida lista CSV via check_phone (batch 10).
+    Valida lista CSV via check_phone (batch 5).
     Lê CSV, extrai telefones, chama Uazapi, remove inválidos, sobrescreve CSV.
     Retorna {valid, invalid, batches_skipped, partial} ou None em skip/falha.
 
@@ -218,8 +218,8 @@ def validate_job_csv(job_id, user_id, file_path=None):
 
         from services.uazapi import UazapiService
         uazapi = UazapiService()
-        # Batch 10: Uazapi dá 504 com batches maiores; 2-10 funciona (testado 2026-03)
-        BATCH_SIZE = 10
+        # Batch 5: Uazapi dá 504 com batches maiores; 2-5 funciona (testado 2026-03)
+        BATCH_SIZE = 5
         indices_drop = set()
         batches_skipped = 0
 
@@ -229,13 +229,14 @@ def validate_job_csv(job_id, user_id, file_path=None):
             result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)
             if result is None:
                 batches_skipped += 1
+                time.sleep(5)  # Backoff extra após falha (504) antes do próximo batch
                 continue
             for j, item in enumerate(result):
                 if j < len(batch) and not item.get('isInWhatsapp', True):
                     df_idx = batch[j][0]
                     indices_drop.add(df_idx)
             if i + BATCH_SIZE < len(rows):
-                time.sleep(1)  # Pausa entre batches para evitar 504 da Uazapi
+                time.sleep(2)  # Pausa maior entre batches para evitar 504 da Uazapi
 
         df_valid = df_filtered[~df_filtered.index.isin(indices_drop)]
         valid = len(df_valid)
