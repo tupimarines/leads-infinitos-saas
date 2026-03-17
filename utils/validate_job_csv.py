@@ -224,6 +224,13 @@ def validate_job_csv(job_id, user_id, file_path=None):
         batches_skipped = 0
 
         for i in range(0, len(rows), BATCH_SIZE):
+            # Verificar se job foi cancelado
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM scraping_jobs WHERE id = %s", (job_id,))
+                row = cur.fetchone()
+            if row and row[0] == 'cancelled':
+                print(f"[validate_job_csv] job_id={job_id} cancelado pelo usuário, interrompendo")
+                break
             batch = rows[i : i + BATCH_SIZE]
             numbers = [p for _, _, p in batch]
             result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)

@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import json
 from datetime import datetime
 from main import run_scraper_with_progress
+from utils.job_utils import JobCancelledError
 
 load_dotenv()
 
@@ -53,7 +54,7 @@ def update_job_status(job_id, status, progress=None, current_location=None, resu
         if status == 'running':
              pass 
         
-        if status in ['completed', 'failed']:
+        if status in ['completed', 'failed', 'cancelled']:
             update_fields.append("completed_at = %s")
             params.append(datetime.now().isoformat())
 
@@ -109,9 +110,19 @@ def run_scraper_task(job_id: int):
         user_base_dir = os.path.join(STORAGE_ROOT, str(user_id), "GMaps Data")
         
         # 4. Run Scraper
-        # Definindo callback para atualizar progresso no BD
+        def _is_job_cancelled():
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT status FROM scraping_jobs WHERE id = %s", (job_id,))
+                    row = cur.fetchone()
+                return row and row[0] == 'cancelled'
+            finally:
+                conn.close()
+
         def progress_callback(prog, loc):
-            # loc will be the formatted string from main.py
+            if _is_job_cancelled():
+                raise JobCancelledError("Job cancelado pelo usuário")
             update_job_status(job_id, 'running', progress=prog, current_location=loc)
 
         results = run_scraper_with_progress(
@@ -203,6 +214,10 @@ def run_scraper_task(job_id: int):
                 print(f"✅ Merged {len(results)} files into {final_path}. Total uniques: {len(final_df)}")
 
                 if final_path and os.path.exists(final_path):
+                    if _is_job_cancelled():
+                        lead_count = len(final_df)
+                        update_job_status(job_id, 'cancelled', progress=100, results_path=final_path, lead_count=lead_count)
+                        return
                     try:
                         from utils.validate_job_csv import validate_job_csv
                         val = validate_job_csv(job_id, user_id, file_path=final_path)
@@ -274,6 +289,9 @@ def run_scraper_task(job_id: int):
         else:
             update_job_status(job_id, 'failed', error_message="Nenhum resultado encontrado.")
 
+    except JobCancelledError:
+        print(f"Job {job_id} cancelado pelo usuário")
+        # Status já está 'cancelled' no DB (setado pela API)
     except Exception as e:
         print(f"Job {job_id} failed: {e}")
         update_job_status(job_id, 'failed', error_message=str(e))

@@ -4264,19 +4264,14 @@ def get_job_status(job_id):
 @app.route("/api/job/<int:job_id>/cancel", methods=["POST"])
 @login_required
 def cancel_job(job_id):
-    """API para cancelar um job"""
+    """API para cancelar um job (extração ou validação). Worker verifica status e interrompe."""
     job = ScrapingJob.get_by_id(job_id)
     if not job or job['user_id'] != current_user.id:
-        return {"error": "Job not found"}, 404
-        
-    if job['status'] in ['completed', 'failed']:
-        return {"error": "Job already finished"}, 400
-
-    # Sinalizar cancelamento no Redis (se estiver usando RQ, podemos tentar cancelar o job)
-    # Como o worker roda jobs do RQ, precisamos saber o Job ID do RQ.
-    # Por simplificação, vamos setar status 'cancelled' no DB e o worker deve checar.
+        return json.dumps({"error": "Job não encontrado"}), 404, {"Content-Type": "application/json"}
+    if job['status'] in ['completed', 'failed', 'cancelled']:
+        return json.dumps({"error": "Job já finalizado"}), 400, {"Content-Type": "application/json"}
     ScrapingJob.update_status(job_id, 'cancelled', error_message='Cancelado pelo usuário')
-    return {"status": "cancelled"}
+    return json.dumps({"status": "cancelled"})
 
 @app.route("/api/job/<int:job_id>", methods=["DELETE"])
 @login_required

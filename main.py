@@ -218,8 +218,11 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
             try:
                 progress = int((i / len(search_list)) * 100)
                 progress_callback(progress, search_term_display)
-            except:
-                pass
+            except Exception as e:
+                from utils.job_utils import JobCancelledError
+                if isinstance(e, JobCancelledError):
+                    raise
+                # Ignore other callback errors (e.g. DB)
 
         # Prepare input for Apify
         run_input = {

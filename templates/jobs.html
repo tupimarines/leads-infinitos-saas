@@ -33,6 +33,9 @@
                     {% elif job.status == 'failed' %}
                     <span class="badge"
                         style="background: rgba(255, 93, 93, 0.2); color: #ff5d5d; border: 1px solid rgba(255, 93, 93, 0.3);">Falhou</span>
+                    {% elif job.status == 'cancelled' %}
+                    <span class="badge"
+                        style="background: rgba(156, 163, 175, 0.2); color: #9ca3af; border: 1px solid rgba(156, 163, 175, 0.3);">Cancelado</span>
                     {% endif %}
                 </div>
             </div>
@@ -67,6 +70,10 @@
 
             <div class="job-actions">
                 {% if job.status == 'running' or job.status == 'pending' %}
+                <button class="btn btn-sm btn-outline-danger" onclick="cancelJob({{ job.id }});"
+                    title="Cancelar extração ou validação">
+                    <i class="fas fa-stop"></i> Cancelar
+                </button>
                 <button class="btn btn-sm btn-outline-primary" onclick="refreshJob({{ job.id }});"
                     title="Atualizar Status">
                     <i class="fas fa-sync-alt"></i> Atualizar
@@ -192,6 +199,16 @@
         color: white;
     }
 
+    .btn-outline-danger {
+        color: #ff5d5d;
+        border-color: rgba(255, 93, 93, 0.5);
+    }
+
+    .btn-outline-danger:hover {
+        background: rgba(255, 93, 93, 0.2);
+        color: #ff5d5d;
+    }
+
     .btn-success {
         background: var(--success);
         border: none;
@@ -203,6 +220,17 @@
 </style>
 
 <script>
+    function cancelJob(jobId) {
+        if (!confirm('Deseja cancelar este job? A extração ou validação será interrompida.')) return;
+        fetch(`/api/job/${jobId}/cancel`, { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) alert('Erro: ' + data.error);
+                else location.reload();
+            })
+            .catch(e => { console.error(e); alert('Erro ao cancelar'); });
+    }
+
     function refreshJob(jobId) {
         fetch(`/api/job/${jobId}`)
             .then(response => response.json())
@@ -246,7 +274,7 @@
             const runningCards = document.querySelectorAll('.job-card');
             runningCards.forEach(card => {
                 const badge = card.querySelector('.badge');
-                if (badge && (badge.textContent.includes('Executando') || badge.textContent.includes('Pendente'))) {
+                if (badge && (badge.textContent.includes('Executando') || badge.textContent.includes('Pendente')) && !badge.textContent.includes('Cancelado')) {
                     const id = card.getAttribute('data-job-id');
                     if (id) refreshJob(id);
                 }
