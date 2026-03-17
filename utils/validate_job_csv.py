@@ -220,10 +220,13 @@ def validate_job_csv(job_id, user_id, file_path=None):
         uazapi = UazapiService()
         # Batch 5: Uazapi dá 504 com batches maiores; 2-5 funciona (testado 2026-03)
         BATCH_SIZE = 5
+        total_batches = (len(rows) + BATCH_SIZE - 1) // BATCH_SIZE
         indices_drop = set()
         batches_skipped = 0
+        LOG_EVERY = 10  # log a cada N batches para acompanhar progresso
 
         for i in range(0, len(rows), BATCH_SIZE):
+            batch_num = (i // BATCH_SIZE) + 1
             # Verificar se job foi cancelado
             with conn.cursor() as cur:
                 cur.execute("SELECT status FROM scraping_jobs WHERE id = %s", (job_id,))
@@ -236,8 +239,11 @@ def validate_job_csv(job_id, user_id, file_path=None):
             result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)
             if result is None:
                 batches_skipped += 1
+                print(f"[validate_job_csv] job_id={job_id} batch {batch_num}/{total_batches} FALHOU ({err}), retry em 5s")
                 time.sleep(5)  # Backoff extra após falha (504) antes do próximo batch
                 continue
+            if batch_num % LOG_EVERY == 0 or batch_num == total_batches:
+                print(f"[validate_job_csv] job_id={job_id} batch {batch_num}/{total_batches} ({min(i+BATCH_SIZE, len(rows))}/{len(rows)} nums)")
             for j, item in enumerate(result):
                 if j < len(batch) and not item.get('isInWhatsapp', True):
                     df_idx = batch[j][0]
