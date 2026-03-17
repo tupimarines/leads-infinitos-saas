@@ -117,22 +117,28 @@ def _extract_phone_from_row(row, phone_col, whatsapp_link_col, website_col=None)
 def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, timeout=90):
     """
     Chama check_phone com retry: 2x se None/Timeout, 1s backoff.
-    429: 3x, 2s backoff. 400: sem retry.
+    429: 3x, 2s backoff. 504: 3x, 3s backoff (gateway timeout Uazapi).
+    400/404: sem retry.
     Retorna (result_list, error_msg). result_list é None em falha.
     """
     import requests
     last_err = None
-    for attempt in range(max_retries + 1):
+    max_attempts = max_retries + 1
+    for attempt in range(max_attempts):
         try:
             result = uazapi.check_phone(token, numbers, timeout=timeout)
             if result is not None:
                 return result, None
             last_err = "Timeout ou resposta vazia"
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 429:
-                if attempt < 3:
-                    time.sleep(2)
-                    continue
+            code = e.response.status_code if e.response else None
+            if code == 429 and attempt < 3:
+                time.sleep(2)
+                continue
+            if code == 504 and attempt < 3:
+                # Gateway timeout Uazapi - retry com backoff maior
+                time.sleep(3)
+                continue
             last_err = str(e)
             break
         except Exception as e:
@@ -212,7 +218,8 @@ def validate_job_csv(job_id, user_id, file_path=None):
 
         from services.uazapi import UazapiService
         uazapi = UazapiService()
-        BATCH_SIZE = 50
+        # Batch menor (20) reduz 504 da Uazapi; 50 números por request pode causar timeout
+        BATCH_SIZE = 20
         indices_drop = set()
         batches_skipped = 0
 
@@ -228,7 +235,7 @@ def validate_job_csv(job_id, user_id, file_path=None):
                     df_idx = batch[j][0]
                     indices_drop.add(df_idx)
             if i + BATCH_SIZE < len(rows):
-                time.sleep(0.5)
+                time.sleep(1)  # Pausa entre batches para evitar 504 da Uazapi
 
         df_valid = df_filtered[~df_filtered.index.isin(indices_drop)]
         valid = len(df_valid)
