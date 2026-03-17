@@ -22,7 +22,7 @@
                     <label>Nome da Instância</label>
                     <input type="text" id="new_instance_name" placeholder="Ex: whatsapp-02">
                 </div>
-                <button class="btn btn-primary" onclick="createInstance()">Criar Instância (UAZAPI)</button>
+                <button class="btn btn-primary" onclick="createInstance()">Criar Instância</button>
             </div>
             {% else %}
             <div class="flash" style="margin-top: 10px; border-color: rgba(255,93,93,.35); background: rgba(255,93,93,.12); color: #ffd4d4;">
@@ -40,9 +40,6 @@
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
                     <div>
                         <h3 style="margin: 0; font-size: 18px;">{{ inst.name }}</h3>
-                        <p class="muted" style="font-size: 12px; margin-top: 4px;">
-                            ID: {{ inst.id }} · Provedor: {{ (inst.api_provider or 'megaapi')|upper }} · Key: {{ inst.apikey[:20] if inst.apikey else 'N/A' }}...
-                        </p>
                     </div>
                     <div class="badge instance-status-badge" data-instance-name="{{ inst.name }}"
                         style="{% if inst.status == 'connected' %}background: rgba(25, 195, 125, 0.12); color: #19c37d; border-color: rgba(25, 195, 125, 0.35);{% elif inst.status == 'connecting' %}background: rgba(255, 193, 7, 0.12); color: #f5c842; border-color: rgba(255, 193, 7, 0.35);{% else %}background: rgba(255, 93, 93, 0.12); color: #ff5d5d; border-color: rgba(255, 93, 93, 0.35);{% endif %}">

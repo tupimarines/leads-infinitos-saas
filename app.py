@@ -4010,16 +4010,22 @@ def create_campaign():
         # 5. Adicionar Leads
         CampaignLead.add_leads(campaign_id, valid_leads)
         
-        # 5b. Uazapi: validar lista automaticamente antes de enviar (remove números sem WhatsApp)
+        # 5b. Uazapi: atribuir send_batch aos pendentes (para follow-up cadence)
         if use_uazapi_sender:
-            try:
-                val = _run_validate_leads(campaign_id, current_user.id)
-                if val["invalid"] > 0:
-                    print(f"[UAZAPI] Auto-validação: {val['valid']} válidos, {val['invalid']} inválidos removidos")
-                if val.get("partial"):
-                    print(f"[UAZAPI] Auto-validação parcial: {val['batches_skipped']} batches pulados (timeout/erro)")
-            except Exception as e:
-                print(f"⚠️ [UAZAPI] Auto-validação falhou (continuando): {e}")
+            from utils.limits import get_user_daily_limit
+            plan_limit = get_user_daily_limit(current_user.id)
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM campaign_leads WHERE campaign_id = %s AND status = 'pending' ORDER BY id ASC",
+                    (campaign_id,)
+                )
+                pending_ids = [r[0] for r in cur.fetchall()]
+                for i, lead_id in enumerate(pending_ids):
+                    batch_num = (i // plan_limit) + 1
+                    cur.execute("UPDATE campaign_leads SET send_batch = %s WHERE id = %s", (batch_num, lead_id))
+            conn.commit()
+            conn.close()
         
         # 6. Uazapi: se use_uazapi_sender, montar messages, chamar API, salvar folder_id
         if use_uazapi_sender:
@@ -4961,32 +4967,6 @@ def sync_campaign_uazapi_stats(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
-def _get_leads_for_validation(campaign_id):
-    """
-    Retorna leads pendentes com phone/whatsapp_link normalizado para validação.
-    Apenas status='pending' (F3).
-    """
-    from utils.sync_uazapi import _normalize_phone_for_api
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """SELECT id, phone, whatsapp_link FROM campaign_leads
-                   WHERE campaign_id = %s AND status = 'pending'""",
-                (campaign_id,)
-            )
-            rows = cur.fetchall()
-        leads = []
-        for r in rows:
-            raw = r.get('phone') or r.get('whatsapp_link')
-            norm = _normalize_phone_for_api(raw)
-            if norm:
-                leads.append({'id': r['id'], 'phone': norm})
-        return leads
-    finally:
-        conn.close()
-
-
 def _get_uazapi_instance_for_campaign(campaign_id, user_id, admin_mode=False):
     """
     Retorna (token, instance_id) da primeira instância Uazapi vinculada à campanha.
@@ -5267,131 +5247,6 @@ def _is_previous_stage_fully_done(campaign_id, step):
             return total > 0 and total == done_count
     finally:
         conn.close()
-
-
-def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, timeout=90):
-    """
-    Chama check_phone com retry (F10): 2x se None/Timeout, 1s backoff.
-    429: 3x, 2s backoff.
-    400: sem retry.
-    Retorna (result_list, error_msg). result_list é None em falha.
-    """
-    import requests
-    last_err = None
-    for attempt in range(max_retries + 1):
-        try:
-            result = uazapi.check_phone(token, numbers, timeout=timeout)
-            if result is not None:
-                return result, None
-            last_err = "Timeout ou resposta vazia"
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 429:
-                if attempt < 3:
-                    time.sleep(2)
-                    continue
-            last_err = str(e)
-            break
-        except Exception as e:
-            last_err = str(e)
-        if attempt < max_retries:
-            time.sleep(backoff)
-    return None, last_err
-
-
-def _run_validate_leads(campaign_id, user_id):
-    """
-    Executa validação de leads pendentes (check_phone batch).
-    Marca inválidos, atribui send_batch.
-    Retorna dict: {valid, invalid, batches_skipped, partial}.
-    Usado na criação e no endpoint validate-leads.
-    """
-    token, _ = _get_uazapi_instance_for_campaign(campaign_id, user_id)
-    if not token:
-        return {"valid": 0, "invalid": 0, "batches_skipped": 0, "partial": False}
-    from utils.limits import get_user_daily_limit
-    plan_limit = get_user_daily_limit(user_id)
-    leads = _get_leads_for_validation(campaign_id)
-    if not leads:
-        return {"valid": 0, "invalid": 0, "batches_skipped": 0, "partial": False}
-    BATCH_SIZE = 50
-    DELAY_BETWEEN_BATCHES = 0.5
-    invalid_ids = []
-    batches_skipped = 0
-    uazapi = UazapiService()
-    for i in range(0, len(leads), BATCH_SIZE):
-        batch = leads[i:i + BATCH_SIZE]
-        numbers = [x['phone'] for x in batch]
-        result, _ = _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1)
-        if result is None:
-            batches_skipped += 1
-            continue
-        for idx, item in enumerate(result):
-            if not item.get('isInWhatsapp', True) and idx < len(batch):
-                invalid_ids.append(batch[idx]['id'])
-        time.sleep(DELAY_BETWEEN_BATCHES)
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        if invalid_ids:
-            cur.execute("UPDATE campaign_leads SET status = 'invalid' WHERE id = ANY(%s)", (invalid_ids,))
-        cur.execute(
-            """SELECT id FROM campaign_leads WHERE campaign_id = %s AND status = 'pending' ORDER BY id ASC""",
-            (campaign_id,)
-        )
-        pending_ids = [r[0] for r in cur.fetchall()]
-        for i, lead_id in enumerate(pending_ids):
-            batch_num = (i // plan_limit) + 1
-            cur.execute("UPDATE campaign_leads SET send_batch = %s WHERE id = %s", (batch_num, lead_id))
-    conn.commit()
-    conn.close()
-    return {
-        "valid": len(pending_ids),
-        "invalid": len(invalid_ids),
-        "batches_skipped": batches_skipped,
-        "partial": batches_skipped > 0,
-    }
-
-
-@app.route("/api/campaigns/<int:campaign_id>/validate-leads", methods=["POST"])
-@login_required
-def validate_campaign_leads(campaign_id):
-    """
-    Valida leads pendentes via POST /chat/check em batch (50).
-    Marca isInWhatsapp=false como status='invalid'.
-    Após validação, atribui send_batch aos válidos restantes.
-    Timeout 90s.
-    """
-    try:
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT id, use_uazapi_sender FROM campaigns WHERE id = %s AND user_id = %s",
-                (campaign_id, current_user.id)
-            )
-            campaign = cur.fetchone()
-        conn.close()
-        if not campaign:
-            return json.dumps({"error": "Campanha não encontrada"}), 404
-        if not campaign.get('use_uazapi_sender'):
-            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
-
-        token, instance_id = _get_uazapi_instance_for_campaign(campaign_id, current_user.id)
-        if not token:
-            return json.dumps({"error": "Instância Uazapi não encontrada"}), 400
-
-        leads = _get_leads_for_validation(campaign_id)
-        if not leads:
-            return json.dumps({"valid": 0, "invalid": 0, "message": "Nenhum lead pendente para validar"})
-
-        val = _run_validate_leads(campaign_id, current_user.id)
-        resp = {"valid": val["valid"], "invalid": val["invalid"]}
-        if val.get("partial"):
-            resp["batches_skipped"] = val["batches_skipped"]
-            resp["partial"] = True
-            resp["message"] = f"Validação parcial: {val['batches_skipped']} batch(s) pulado(s) por timeout/erro da API."
-        return json.dumps(resp)
-    except Exception as e:
-        print(f"Erro ao validar leads: {e}")
-        return json.dumps({"error": str(e)}), 500
 
 
 def _create_stage_campaign(campaign_id):

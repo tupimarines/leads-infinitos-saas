@@ -150,7 +150,7 @@ def _check_phone_with_retry(uazapi, token, numbers, max_retries=2, backoff=1, ti
 
 def validate_job_csv(job_id, user_id, file_path=None):
     """
-    Valida lista CSV via check_phone (batch 50).
+    Valida lista CSV via check_phone (batch 10).
     Lê CSV, extrai telefones, chama Uazapi, remove inválidos, sobrescreve CSV.
     Retorna {valid, invalid, batches_skipped, partial} ou None em skip/falha.
 
