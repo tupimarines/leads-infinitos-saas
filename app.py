@@ -247,7 +247,7 @@ def init_db() -> None:
             keyword TEXT NOT NULL,
             locations TEXT NOT NULL,
             total_results INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
             progress INTEGER DEFAULT 0,
             current_location TEXT,
             results_path TEXT,
@@ -272,6 +272,15 @@ def init_db() -> None:
                 ALTER TABLE scraping_jobs ADD COLUMN lead_count INTEGER DEFAULT 0;
             END IF;
         END $$;
+        """
+    )
+
+    # Permitir status 'cancelled' no scraping_jobs (botão Cancelar)
+    cur.execute(
+        """
+        ALTER TABLE scraping_jobs DROP CONSTRAINT IF EXISTS scraping_jobs_status_check;
+        ALTER TABLE scraping_jobs ADD CONSTRAINT scraping_jobs_status_check
+            CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'));
         """
     )
     
