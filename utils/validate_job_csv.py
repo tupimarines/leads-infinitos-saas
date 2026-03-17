@@ -218,15 +218,15 @@ def validate_job_csv(job_id, user_id, file_path=None):
 
         from services.uazapi import UazapiService
         uazapi = UazapiService()
-        # Batch menor (20) reduz 504 da Uazapi; 50 números por request pode causar timeout
-        BATCH_SIZE = 20
+        # Batch 10: Uazapi dá 504 com batches maiores; 2-10 funciona (testado 2026-03)
+        BATCH_SIZE = 10
         indices_drop = set()
         batches_skipped = 0
 
         for i in range(0, len(rows), BATCH_SIZE):
             batch = rows[i : i + BATCH_SIZE]
             numbers = [p for _, _, p in batch]
-            result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=90)
+            result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)
             if result is None:
                 batches_skipped += 1
                 continue
