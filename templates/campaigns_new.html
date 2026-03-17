@@ -1062,10 +1062,21 @@
         try {
             const res = await fetch('/api/upload-csv-leads', {
                 method: 'POST',
-                body: formData
+                body: formData,
+                credentials: 'same-origin'
             });
 
-            const json = await res.json();
+            const text = await res.text();
+            let json;
+            try {
+                json = JSON.parse(text);
+            } catch (parseErr) {
+                // Server returned HTML (e.g. 401 redirect, 502/504, 500 error page)
+                const hint = res.status === 401 ? 'Sessão expirada. Faça login novamente.' :
+                    res.status === 502 || res.status === 504 ? 'Timeout do servidor. A validação pode demorar com listas grandes. Tente com menos leads.' :
+                    res.status >= 500 ? 'Erro interno do servidor.' : 'Resposta inválida do servidor.';
+                throw new Error(`${hint} (HTTP ${res.status})`);
+            }
 
             if (res.ok) {
                 // Success: Add new option to select and select it (usar valid quando validado)

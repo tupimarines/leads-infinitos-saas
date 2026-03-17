@@ -35,7 +35,7 @@ services:
   web:
     build: .
     container_name: "leads_infinitos_web"
-    command: sh -c "python -c 'from app import init_db; init_db()' && gunicorn -b 0.0.0.0:8000 --timeout 120 --workers 2 app:app"
+    command: sh -c "python -c 'from app import init_db; init_db()' && gunicorn -b 0.0.0.0:8000 --timeout 360 --workers 2 app:app"
     volumes:
       - .:/app
     ports:

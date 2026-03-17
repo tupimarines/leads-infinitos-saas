@@ -1688,6 +1688,14 @@ login_manager.login_view = "login"
 login_manager.init_app(app)
 
 
+@login_manager.unauthorized_handler
+def unauthorized():
+    """Return JSON 401 for API/XHR requests instead of redirecting to HTML login."""
+    if request.path.startswith('/api/') or request.is_json or request.accept_mimetypes.best == 'application/json':
+        return jsonify({"error": "unauthorized", "message": "Sessão expirada. Faça login novamente."}), 401
+    return redirect(url_for(login_manager.login_view, next=request.url))
+
+
 @login_manager.user_loader
 def load_user(user_id: str):
     try:
@@ -3610,8 +3618,11 @@ def upload_csv_leads():
         
         file.save(filepath)
         
-        # Analisar o arquivo para contar leads
-        df = pd.read_csv(filepath, dtype=str)
+        # Analisar o arquivo para contar leads (encoding para CSVs com acentos)
+        try:
+            df = pd.read_csv(filepath, dtype=str, encoding='utf-8', encoding_errors='replace')
+        except Exception:
+            df = pd.read_csv(filepath, dtype=str)
         
         # Adicionar coluna 'status' se não existir (valor 1 = pronto para envio)
         if 'status' not in [c.lower() for c in df.columns]:
