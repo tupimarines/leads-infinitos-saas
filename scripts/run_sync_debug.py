@@ -21,8 +21,8 @@ except Exception:
     pass
 
 
-def _debug_chunks(campaign_ids):
-    """Lista todos campaign_stage_sends e verifica cada folder na Uazapi."""
+def _debug_chunks(campaign_ids, limit=0):
+    """Lista campaign_stage_sends e verifica cada folder na Uazapi. limit=0 processa todos."""
     import psycopg2
     from psycopg2.extras import RealDictCursor
     from utils.sync_uazapi import fetch_all_phones_by_status
@@ -60,6 +60,9 @@ def _debug_chunks(campaign_ids):
     finally:
         conn.close()
 
+    if limit > 0:
+        sends = sends[:limit]
+        print(f"(limitado a {limit} sends)\n")
     if not sends:
         print(f"Nenhum campaign_stage_send com folder_id para campanhas {campaign_ids}")
         return 1
@@ -112,6 +115,7 @@ def main():
     parser.add_argument("--folder", "-f", help="Folder ID Uazapi (usa token direto)")
     parser.add_argument("--token", "-t", help="Token da instância Uazapi")
     parser.add_argument("--chunks", "-c", action="store_true", help="Listar todos os chunks (campaign_stage_sends) e verificar cada folder")
+    parser.add_argument("--limit", "-l", type=int, default=0, help="Limitar a N sends (0= todos). Ex: --chunks --limit 10")
     args = parser.parse_args()
     campaign_ids = args.campaign_id if isinstance(args.campaign_id, list) else [args.campaign_id] if args.campaign_id else []
     campaign_id = campaign_ids[0] if len(campaign_ids) == 1 else (campaign_ids[0] if campaign_ids else None)
@@ -143,6 +147,7 @@ def main():
 
     # Modo --chunks: lista todos campaign_stage_sends e verifica cada folder
     if chunks_mode:
+        limit = getattr(args, "limit", 0) or 0
         if not campaign_ids:
             # Pegar últimas campanhas Uazapi
             import psycopg2
@@ -163,7 +168,7 @@ def main():
                 campaign_ids = [r['id'] for r in cur.fetchall()]
             conn.close()
             print(f"Usando campanhas: {campaign_ids}\n")
-        return _debug_chunks(campaign_ids)
+        return _debug_chunks(campaign_ids, limit=limit)
 
     if not campaign_id:
         # Try to find teste225 or similar
