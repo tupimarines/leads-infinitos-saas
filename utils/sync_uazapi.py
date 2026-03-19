@@ -189,8 +189,7 @@ def get_uazapi_campaign_counts(uazapi_service, token, folder_id, context=None):
         page_size = 500
         while True:
             resp = uazapi_service.list_messages(
-                token, folder_id, message_status=message_status, page=page, page_size=page_size,
-                context=context
+                token, folder_id, message_status=message_status, page=page, page_size=page_size
             )
             if not resp:
                 break
@@ -227,8 +226,7 @@ def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status,
     page_size = 500
     while True:
         resp = uazapi_service.list_messages(
-            token, folder_id, message_status=message_status, page=page, page_size=page_size,
-            context=context
+            token, folder_id, message_status=message_status, page=page, page_size=page_size
         )
         if not resp:
             break

@@ -406,6 +406,14 @@ def _materialize_scheduled_stage_sends(conn):
         # Stage 'initial': inclui 'pending' (leads do próximo chunk ainda não enviados)
         # Stages follow1/2/breakup: apenas 'sent' (leads já receberam etapa anterior)
         status_clause = "AND status IN ('sent', 'pending')" if stage == "initial" else "AND status = 'sent'"
+        # Excluir leads já enviados em sends anteriores (evita duplicatas antes do sync)
+        exclude_clause = """
+                  AND id NOT IN (
+                    SELECT (elem)::int FROM campaign_stage_sends css,
+                    LATERAL jsonb_array_elements_text(COALESCE(css.lead_ids, '[]'::jsonb)) AS elem
+                    WHERE css.campaign_id = %s AND css.stage = %s AND css.uazapi_folder_id IS NOT NULL
+                  )
+        """ if stage == "initial" else ""
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"""
@@ -416,10 +424,11 @@ def _materialize_scheduled_stage_sends(conn):
                   AND current_step = %s
                   AND COALESCE(removed_from_funnel, FALSE) = FALSE
                   AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
+                  {exclude_clause}
                 ORDER BY COALESCE(send_batch, 999) ASC, id ASC
                 LIMIT %s
                 """,
-                (campaign_id, step, total_limit),
+                (campaign_id, step, campaign_id, stage, total_limit) if exclude_clause else (campaign_id, step, total_limit),
             )
             leads = cur.fetchall() or []
 
@@ -460,6 +469,7 @@ def _materialize_scheduled_stage_sends(conn):
                     step_msgs = [str(v).strip() for v in custom_variations if str(v).strip()]
             if not step_msgs:
                 step_msgs = ["Olá!"]
+                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: usando fallback 'Olá!' (campaign_steps vazio ou message_template inválido)")
             if not token:
                 with conn.cursor() as cur:
                     cur.execute(
