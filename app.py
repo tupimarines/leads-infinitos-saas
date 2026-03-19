@@ -6248,7 +6248,16 @@ def update_campaign(campaign_id):
                 cur.execute("UPDATE campaigns SET name = %s WHERE id = %s", (data['name'], campaign_id))
             
             if 'scheduled_start' in data:
-                 cur.execute("UPDATE campaigns SET scheduled_start = %s WHERE id = %s", (data['scheduled_start'], campaign_id))
+                val = data['scheduled_start']
+                if val:
+                    try:
+                        parsed = datetime.fromisoformat(val.replace('Z', '+00:00'))
+                        if parsed.tzinfo is None:
+                            parsed = BRAZIL_TZ.localize(parsed)
+                        val = parsed.astimezone(pytz.UTC).replace(tzinfo=None)
+                    except Exception:
+                        pass
+                cur.execute("UPDATE campaigns SET scheduled_start = %s WHERE id = %s", (val, campaign_id))
                  
             if 'message_templates' in data:
                 templates = json.dumps(data['message_templates'])

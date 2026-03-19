@@ -57,7 +57,7 @@ CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.d
 CHATWOOT_ACCESS_TOKEN = os.environ.get('CHATWOOT_ACCESS_TOKEN')
 CHATWOOT_ACCOUNT_ID = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
 
-CADENCE_POLL_INTERVAL = 60  # seconds between each poll cycle
+CADENCE_POLL_INTERVAL = 30  # seconds (mais frequente para pegar scheduled_start e Continuar)
 SAFETY_BUFFER_MINUTES = 5
 PRE_DISPARO_WINDOW_MIN = 2
 PRE_DISPARO_WINDOW_MAX = 5
@@ -634,7 +634,8 @@ def process_cadence():
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_saturday, c.send_sunday,
-                           c.use_uazapi_sender, c.uazapi_folder_id, c.delay_min_minutes, c.delay_max_minutes
+                           c.use_uazapi_sender, c.uazapi_folder_id, c.delay_min_minutes, c.delay_max_minutes,
+                           c.scheduled_start
                     FROM campaigns c
                     WHERE c.enable_cadence = TRUE
                       AND c.status IN ('running', 'pending', 'completed')
@@ -881,7 +882,20 @@ def schedule_next_initial_chunk(campaign, conn):
     send_sat = bool(campaign.get('send_saturday'))
     send_sun = bool(campaign.get('send_sunday'))
     now_brazil = datetime.now(BRAZIL_TZ)
-    target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
+    # Se usuário editou scheduled_start para daqui a pouco (ex: 5 min), usar "agora + 30s" em vez do próximo dia
+    sched_start = campaign.get('scheduled_start')
+    if sched_start:
+        if getattr(sched_start, 'tzinfo', None) is None:
+            sched_start = pytz.UTC.localize(sched_start).astimezone(BRAZIL_TZ)
+        else:
+            sched_start = sched_start.astimezone(BRAZIL_TZ)
+        delta_sec = (now_brazil - sched_start).total_seconds()
+        if 0 <= delta_sec <= 600:  # passou há 0–10 min: usuário acabou de "acordar" a campanha
+            target_dt = now_brazil + timedelta(seconds=30)
+        else:
+            target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
+    else:
+        target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
     scheduled_for = target_dt.astimezone(pytz.UTC).replace(tzinfo=None)
 
     # Delay da campanha
