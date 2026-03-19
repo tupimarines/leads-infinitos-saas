@@ -504,6 +504,7 @@ def _materialize_scheduled_stage_sends(conn):
                 continue
 
             if not can_create_campaign_today(send.get("instance_id")):
+                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: limite diário atingido (1 campanha/instância/dia)")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
@@ -526,6 +527,7 @@ def _materialize_scheduled_stage_sends(conn):
                 info=f"Campaign {campaign_id} {stage} inst {send.get('instance_id')}",
             )
             if not result or not result.get("folder_id"):
+                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou (sem folder_id)")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
@@ -535,6 +537,7 @@ def _materialize_scheduled_stage_sends(conn):
                 continue
 
             folder_id = result["folder_id"]
+            print(f"  ✅ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: folder_id={folder_id} ({len(messages)} msgs)")
             remote_jid = _resolve_uazapi_remote_jid(token)
             with conn.cursor() as cur:
                 cur.execute(
@@ -882,15 +885,18 @@ def schedule_next_initial_chunk(campaign, conn):
     send_sat = bool(campaign.get('send_saturday'))
     send_sun = bool(campaign.get('send_sunday'))
     now_brazil = datetime.now(BRAZIL_TZ)
-    # Se usuário editou scheduled_start para daqui a pouco (ex: 5 min), usar "agora + 30s" em vez do próximo dia
+    # Se usuário editou scheduled_start para daqui a pouco (ex: 2 min), usar "agora + 30s" UMA VEZ
+    # Janela estreita (0-90s) evita loop: só usa "agora" quando acabou de passar
     sched_start = campaign.get('scheduled_start')
+    use_immediate = False
     if sched_start:
         if getattr(sched_start, 'tzinfo', None) is None:
             sched_start = pytz.UTC.localize(sched_start).astimezone(BRAZIL_TZ)
         else:
             sched_start = sched_start.astimezone(BRAZIL_TZ)
         delta_sec = (now_brazil - sched_start).total_seconds()
-        if 0 <= delta_sec <= 600:  # passou há 0–10 min: usuário acabou de "acordar" a campanha
+        if 0 <= delta_sec <= 90:  # passou há 0–90s: disparo imediato
+            use_immediate = True
             target_dt = now_brazil + timedelta(seconds=30)
         else:
             target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
@@ -947,6 +953,9 @@ def schedule_next_initial_chunk(campaign, conn):
             created += 1
 
     if created > 0:
+        if use_immediate:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE campaigns SET scheduled_start = NULL WHERE id = %s", (cid,))
         conn.commit()
         sched_brt = pytz.UTC.localize(scheduled_for).astimezone(BRAZIL_TZ).strftime("%d/%m %H:%M BRT")
         print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {sched_brt} ({created} instâncias)")

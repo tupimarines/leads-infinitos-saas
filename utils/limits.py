@@ -203,10 +203,14 @@ def get_sent_today_count_by_instance(instance_id: int) -> int:
         conn.close()
 
 
+# Chunks de 30 msgs: até 8 por instância/dia = 240 msgs (permite Continuar ao longo do dia)
+UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY = 8
+
+
 def can_create_campaign_today(instance_id: int) -> bool:
     """
-    Retorna True se a instância ainda pode criar campanha hoje (1 por instância por dia).
-    Nova campanha liberada apenas após meia-noite BRT.
+    Retorna True se a instância ainda pode criar campanha (chunk) hoje.
+    Permite até UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY chunks por instância/dia.
     """
     conn = get_db_connection()
     try:
@@ -228,7 +232,7 @@ def can_create_campaign_today(instance_id: int) -> bool:
     finally:
         conn.close()
 
-    return get_sent_today_count_by_instance(instance_id) < 1
+    return get_sent_today_count_by_instance(instance_id) < UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY
 
 
 def check_daily_limit(user_id: int, plan_limit: int) -> bool:
