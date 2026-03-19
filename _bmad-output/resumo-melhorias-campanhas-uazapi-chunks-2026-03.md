@@ -175,3 +175,14 @@ O script verifica para cada `campaign_stage_send`:
 **Follow-ups (steps 2–4):** `campaign_steps` (edit no Kanban ou botão Gerar) → `campaigns.message_template`. Sem mensagem → erro (não envia).
 
 O sync roda a cada 10 min (`STAGE_SYNC_INTERVAL_MINUTES`). O `list_folders` da Uazapi pode ter delay: o Kanban pode mostrar X leads movidos (log_success) enquanto menos mensagens chegaram no WhatsApp. Aguardar alguns minutos e recarregar; em caso de divergência persistente, conferir com Uazapi.
+
+---
+
+## 14. Remoção do agendamento a cada 5 min (2026-03-19)
+
+**Problema:** O worker criava um novo chunk (campaign_stage_send) a cada 5 min em horário comercial, gerando dezenas de campanhas na Uazapi por instância (flood).
+
+**Solução:** `_next_initial_send_slot` passou a retornar apenas o **primeiro horário do dia** (send_hour_start) ou do dia seguinte. Campanhas iniciais são criadas somente quando:
+- Usuário clica **Continuar** (endpoint cria sends para ~30s)
+- Usuário define **scheduled_start** no edit e o horário é atingido
+- Atinge o **horário de envio do dia** (ex: 8h)
