@@ -4815,6 +4815,7 @@ def get_campaign_stats(campaign_id):
                     COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
                     COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed,
                     COUNT(CASE WHEN status = 'invalid' THEN 1 END) as invalid,
+                    COUNT(CASE WHEN status = 'pending' AND current_step = 1 AND COALESCE(removed_from_funnel, FALSE) = FALSE THEN 1 END) as pending_initial,
                     MIN(sent_at) as started_at,
                     MAX(sent_at) as last_sent_at
                 FROM campaign_leads
@@ -4892,6 +4893,7 @@ def get_campaign_stats(campaign_id):
             "total_leads": total_leads,
             "sent": sent,
             "pending": pending,
+            "pending_initial": int(stats.get('pending_initial') or 0),
             "failed": failed,
             "invalid": stats['invalid'] or 0,
             "closed_deals": closed_deals,
@@ -4977,6 +4979,127 @@ def sync_campaign_uazapi_stats(campaign_id):
         })
     except Exception as e:
         print(f"Erro ao sincronizar stats Uazapi campanha {campaign_id}: {e}")
+        return json.dumps({"error": str(e)}), 500
+
+
+@app.route("/api/campaigns/<int:campaign_id>/continue-initial-chunk", methods=["POST"])
+@login_required
+def continue_initial_chunk(campaign_id):
+    """
+    Força a criação do próximo chunk de 30 mensagens (stage initial) para campanhas Uazapi.
+    Agenda para ~2 min à frente para o worker_cadence materializar imediatamente.
+    Útil quando o horário de envio já passou e o usuário quer continuar hoje.
+    """
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT c.id, c.name, c.use_uazapi_sender, c.enable_cadence, c.delay_min_minutes, c.delay_max_minutes
+                   FROM campaigns c
+                   WHERE c.id = %s AND c.user_id = %s""",
+                (campaign_id, current_user.id)
+            )
+            campaign = cur.fetchone()
+        conn.close()
+        if not campaign:
+            return json.dumps({"error": "Campanha não encontrada"}), 404
+        if not campaign.get('use_uazapi_sender'):
+            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
+        if not campaign.get('enable_cadence'):
+            return json.dumps({"error": "Campanha sem cadência habilitada"}), 400
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM campaign_leads
+                WHERE campaign_id = %s
+                  AND status = 'pending'
+                  AND current_step = 1
+                  AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                """,
+                (campaign_id,),
+            )
+            row = cur.fetchone()
+        pending_count = int(row.get('cnt') or 0) if row else 0
+        if pending_count <= 0:
+            conn.close()
+            return json.dumps({"error": "Nenhum lead pendente para enviar nesta etapa"}), 400
+
+        instances = _get_uazapi_instances_for_campaign(campaign_id, current_user.id)
+        if not instances:
+            conn.close()
+            return json.dumps({"error": "Nenhuma instância Uazapi vinculada"}), 400
+
+        from utils.limits import can_create_campaign_today
+        allowed = [i for i in instances if can_create_campaign_today(i['instance_id'])]
+        if not allowed:
+            conn.close()
+            return json.dumps({"error": "Limite diário por instância atingido. Tente após meia-noite BRT."}), 429
+
+        delay_min = int(campaign.get('delay_min_minutes') or 5)
+        delay_max = int(campaign.get('delay_max_minutes') or 15)
+        if delay_max < delay_min:
+            delay_max = delay_min
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
+                (campaign_id,),
+            )
+            step1 = cur.fetchone()
+        variations = []
+        if step1 and step1.get('message_template'):
+            try:
+                parsed = json.loads(step1['message_template'] or '[]')
+                variations = [str(x).strip() for x in (parsed if isinstance(parsed, list) else [parsed]) if str(x).strip()]
+            except Exception:
+                pass
+        if not variations:
+            variations = ["Olá!"]
+
+        scheduled_for = datetime.utcnow() + timedelta(minutes=2)
+        created = 0
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            for inst in allowed:
+                cur.execute(
+                    """
+                    SELECT id FROM campaign_stage_sends
+                    WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
+                      AND scheduled_for >= (NOW() - INTERVAL '20 minutes')
+                      AND scheduled_for <= (NOW() + INTERVAL '10 minutes')
+                      AND status IN ('scheduled', 'running', 'partial')
+                    LIMIT 1
+                    """,
+                    (campaign_id, inst['instance_id']),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO campaign_stage_sends
+                    (campaign_id, stage, instance_id, scheduled_for, status, planned_count, lead_ids,
+                     delay_min_minutes, delay_max_minutes, message_variations)
+                    VALUES (%s, 'initial', %s, %s, 'scheduled', 0, '[]'::jsonb, %s, %s, %s)
+                    """,
+                    (campaign_id, inst['instance_id'], scheduled_for, delay_min, delay_max, json.dumps(variations)),
+                )
+                created += 1
+        conn.commit()
+        conn.close()
+
+        if created <= 0:
+            return json.dumps({"error": "Já existe agendamento em andamento para esta janela"}), 409
+
+        print(f"[UAZAPI] continue-initial-chunk campaign_id={campaign_id}: {created} instâncias agendadas para {scheduled_for}")
+        return json.dumps({
+            "success": True,
+            "scheduled_for": scheduled_for.isoformat(),
+            "instances_created": created,
+            "message": "Próximo chunk agendado. O envio ocorrerá em ~2 minutos."
+        })
+    except Exception as e:
+        print(f"Erro ao continuar chunk inicial campanha {campaign_id}: {e}")
         return json.dumps({"error": str(e)}), 500
 
 

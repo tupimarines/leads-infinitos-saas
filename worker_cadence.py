@@ -401,13 +401,16 @@ def _materialize_scheduled_stage_sends(conn):
         if total_limit <= 0:
             continue
 
+        # Stage 'initial': inclui 'pending' (leads do próximo chunk ainda não enviados)
+        # Stages follow1/2/breakup: apenas 'sent' (leads já receberam etapa anterior)
+        status_clause = "AND status IN ('sent', 'pending')" if stage == "initial" else "AND status = 'sent'"
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT id, phone, whatsapp_link, name
                 FROM campaign_leads
                 WHERE campaign_id = %s
-                  AND status = 'sent'
+                  {status_clause}
                   AND current_step = %s
                   AND COALESCE(removed_from_funnel, FALSE) = FALSE
                   AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
@@ -629,7 +632,7 @@ def process_cadence():
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_saturday, c.send_sunday,
-                           c.use_uazapi_sender, c.uazapi_folder_id
+                           c.use_uazapi_sender, c.uazapi_folder_id, c.delay_min_minutes, c.delay_max_minutes
                     FROM campaigns c
                     WHERE c.enable_cadence = TRUE
                       AND c.status IN ('running', 'pending', 'completed')
@@ -649,6 +652,9 @@ def process_cadence():
                     process_rollover(campaign, conn)
                     process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
                     process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
+                else:
+                    # Uazapi: agendar próximo chunk de 30 mensagens (initial) para o horário de envio
+                    schedule_next_initial_chunk(campaign, conn)
                 # Part B.1 e B.2: apenas em horário comercial
                 if is_business_hours():
                     process_campaign_sends(campaign, conn)
@@ -784,6 +790,20 @@ def _parse_rollover_time(rollover_str):
     return 23, 0
 
 
+def _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun):
+    """
+    Próximo horário de envio para chunk inicial: hoje se ainda não passou, senão próximo dia útil.
+    """
+    send_hour = send_hour or 8
+    today_at = datetime(
+        now_brazil.year, now_brazil.month, now_brazil.day,
+        send_hour, 0, 0, tzinfo=BRAZIL_TZ
+    )
+    if now_brazil < today_at:
+        return today_at
+    return _next_send_datetime(now_brazil, 1, send_hour, send_sat, send_sun)
+
+
 def _next_send_datetime(from_dt, delay_days, send_hour_start, send_saturday, send_sunday):
     """
     Calcula próximo dia útil no horário send_hour_start.
@@ -810,6 +830,109 @@ def _next_send_datetime(from_dt, delay_days, send_hour_start, send_saturday, sen
         d += timedelta(days=1)
     target = datetime(d.year, d.month, d.day, send_hour_start or 8, 0, 0, tzinfo=BRAZIL_TZ)
     return target
+
+
+def schedule_next_initial_chunk(campaign, conn):
+    """
+    Para campanhas Uazapi: agenda o próximo chunk de 30 mensagens (stage initial) para
+    o próximo horário de envio. Corrige o bug onde chunks 2+ nunca eram enviados.
+    """
+    cid = campaign['id']
+    if not campaign.get('use_uazapi_sender') or not uazapi_service:
+        return
+
+    # Leads pendentes no stage initial (chunk 2, 3, ...)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM campaign_leads
+            WHERE campaign_id = %s
+              AND status = 'pending'
+              AND current_step = 1
+              AND COALESCE(removed_from_funnel, FALSE) = FALSE
+            """,
+            (cid,),
+        )
+        row = cur.fetchone()
+    if not row or int(row.get('cnt') or 0) <= 0:
+        return
+
+    # Instâncias Uazapi vinculadas
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT i.id AS instance_id, i.apikey
+            FROM campaign_instances ci
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE ci.campaign_id = %s
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+            ORDER BY i.id ASC
+            """,
+            (cid,),
+        )
+        instances = cur.fetchall() or []
+    if not instances:
+        return
+
+    send_hour = int(campaign.get('send_hour_start') or 8)
+    send_sat = bool(campaign.get('send_saturday'))
+    send_sun = bool(campaign.get('send_sunday'))
+    now_brazil = datetime.now(BRAZIL_TZ)
+    target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
+    scheduled_for = target_dt.astimezone(pytz.UTC).replace(tzinfo=None)
+
+    # Delay da campanha
+    delay_min = int(campaign.get('delay_min_minutes') or 5)
+    delay_max = int(campaign.get('delay_max_minutes') or 15)
+    if delay_max < delay_min:
+        delay_max = delay_min
+
+    # Mensagens do step 1
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
+            (cid,),
+        )
+        step1 = cur.fetchone()
+    variations = []
+    if step1 and step1.get('message_template'):
+        try:
+            parsed = json.loads(step1['message_template'] or '[]')
+            variations = [str(x).strip() for x in (parsed if isinstance(parsed, list) else [parsed]) if str(x).strip()]
+        except Exception:
+            pass
+    if not variations:
+        variations = ["Olá!"]
+
+    created = 0
+    for inst in instances:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id FROM campaign_stage_sends
+                WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
+                  AND scheduled_for = %s AND status IN ('scheduled', 'running', 'partial')
+                LIMIT 1
+                """,
+                (cid, inst['instance_id'], scheduled_for),
+            )
+            if cur.fetchone():
+                continue
+            cur.execute(
+                """
+                INSERT INTO campaign_stage_sends
+                (campaign_id, stage, instance_id, scheduled_for, status, planned_count, lead_ids,
+                 delay_min_minutes, delay_max_minutes, message_variations)
+                VALUES (%s, 'initial', %s, %s, 'scheduled', 0, '[]'::jsonb, %s, %s, %s)
+                """,
+                (cid, inst['instance_id'], scheduled_for, delay_min, delay_max, json.dumps(variations)),
+            )
+            created += 1
+
+    if created > 0:
+        conn.commit()
+        print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {scheduled_for} ({created} instâncias)")
 
 
 def process_rollover(campaign, conn):

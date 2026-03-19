@@ -170,6 +170,15 @@
                         <span class="text-xs font-semibold">Kanban</span>
                     </a>
 
+                    <!-- Continuar Campanha (Uazapi: força próximo chunk de 30 msgs) -->
+                    {% if campaign.use_uazapi_sender and campaign.enable_cadence %}
+                    <button id="continue-btn-{{ campaign.id }}" onclick="continueInitialChunk({{ campaign.id }})"
+                        class="hidden text-[10px] bg-emerald-600/20 text-emerald-400 px-2 py-1 rounded border border-emerald-500/30 hover:bg-emerald-600/30 transition-colors"
+                        title="Continuar campanha: agenda próximo chunk de 30 mensagens para envio em ~2 min">
+                        Continuar
+                    </button>
+                    {% endif %}
+
                     <!-- Pause/Resume Button -->
                     {% if campaign.status in ['running', 'paused', 'pending'] %}
                     <button onclick="togglePause({{ campaign.id }})"
@@ -353,8 +362,50 @@
             }
 
             renderStageProgressCard(campaignId, data.stage_progress, data.last_sync_at);
+
+            // Mostrar botão Continuar quando há leads pendentes na etapa inicial (Uazapi)
+            const continueBtn = document.getElementById(`continue-btn-${campaignId}`);
+            if (continueBtn) {
+                const pendingInitial = data.pending_initial || 0;
+                if (pendingInitial > 0) {
+                    continueBtn.classList.remove('hidden');
+                    continueBtn.title = `Continuar: ${pendingInitial} lead(s) pendente(s) na etapa inicial`;
+                } else {
+                    continueBtn.classList.add('hidden');
+                }
+            }
         } catch (error) {
             console.error('Erro ao atualizar stats:', error);
+        }
+    }
+
+    async function continueInitialChunk(campaignId) {
+        const btn = document.getElementById(`continue-btn-${campaignId}`);
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/campaigns/${campaignId}/continue-initial-chunk`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                if (typeof showToast === 'function') {
+                    showToast(data.message || 'Próximo chunk agendado. Envio em ~2 min.', 'success');
+                } else {
+                    alert(data.message || 'Próximo chunk agendado. Envio em ~2 min.');
+                }
+                await updateCampaignStats(campaignId);
+            } else {
+                const msg = data.error || 'Erro ao continuar campanha';
+                if (typeof showToast === 'function') showToast(msg, 'error');
+                else alert(msg);
+            }
+        } catch (error) {
+            const msg = 'Erro ao processar solicitação';
+            if (typeof showToast === 'function') showToast(msg, 'error');
+            else alert(msg);
+        } finally {
+            if (btn) btn.disabled = false;
         }
     }
 
