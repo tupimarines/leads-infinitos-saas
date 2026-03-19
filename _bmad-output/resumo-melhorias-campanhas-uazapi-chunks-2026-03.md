@@ -157,3 +157,11 @@ O script verifica para cada `campaign_stage_send`:
 3. `Scheduled > 0` na API? → Uazapi ainda não enviou (delay 5–15 min/msg)
 4. `Sent > 0`? → Mensagens foram enviadas; verificar números/WhatsApp
 5. Delay: primeira msg do chunk leva 5–15 min após create_advanced_campaign
+
+---
+
+## 12. edit_campaign(continue) após create (2026-03-19)
+
+**Problema:** Campanhas retornam `status=queued` na API mas mensagens não chegam no WhatsApp.
+
+**Solução:** Após `create_advanced_campaign` com sucesso, chamar `edit_campaign(folder_id, "continue")` quando status for `queued` ou `scheduled`, para garantir que a campanha inicie o envio. Logs: `▶️ [Materialize] edit_campaign(continue) ok` ou `⚠️ edit_campaign(continue) falhou`.

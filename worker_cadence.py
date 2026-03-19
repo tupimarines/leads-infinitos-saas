@@ -545,6 +545,13 @@ def _materialize_scheduled_stage_sends(conn):
             api_status = (result or {}).get("status", "?")
             api_count = (result or {}).get("count", len(messages))
             print(f"  ✅ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: folder_id={folder_id} ({len(messages)} msgs) API status={api_status} count={api_count}")
+            # Garantir início: campanhas que retornam "queued" podem precisar de continue para iniciar envio
+            if api_status in ("queued", "scheduled"):
+                ctrl = uazapi_service.edit_campaign(token, folder_id, "continue")
+                if ctrl:
+                    print(f"  ▶️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: edit_campaign(continue) ok")
+                else:
+                    print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: edit_campaign(continue) falhou (campanha pode iniciar sozinha)")
             remote_jid = _resolve_uazapi_remote_jid(token)
             with conn.cursor() as cur:
                 cur.execute(
