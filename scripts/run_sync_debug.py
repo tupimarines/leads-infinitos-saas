@@ -6,6 +6,7 @@ Uso:
   python scripts/run_sync_debug.py --chunks 140 141   # debug chunks 2+ (campaign_stage_sends)
   python scripts/run_sync_debug.py --listfolders     # listar TODAS as campanhas ativas/queue por instância
   python scripts/run_sync_debug.py --overlap         # detectar sobreposição (várias campanhas na mesma instância)
+  python scripts/run_sync_debug.py --delete-scheduled  # excluir TODAS as campanhas com status scheduled (POST /sender/edit action=delete)
 """
 import os
 import sys
@@ -227,6 +228,74 @@ def _check_overlap():
     return 0
 
 
+def _delete_scheduled():
+    """Exclui todas as campanhas com status 'scheduled' via POST /sender/edit action=delete."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from services.uazapi import UazapiService
+
+    def get_db():
+        return psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            database=os.environ.get('DB_NAME', 'leads_infinitos'),
+            user=os.environ.get('DB_USER', 'postgres'),
+            password=os.environ.get('DB_PASSWORD', ''),
+            port=os.environ.get('DB_PORT', '5432'),
+            cursor_factory=RealDictCursor,
+        )
+
+    uazapi = UazapiService()
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT i.id, i.name, i.apikey
+            FROM instances i
+            WHERE COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+            ORDER BY i.id
+            """
+        )
+        instances = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    if not instances:
+        print("Nenhuma instância Uazapi encontrada.")
+        return 1
+
+    total_deleted = 0
+    print("=== Excluindo campanhas scheduled (POST /sender/edit action=delete) ===\n")
+    for inst in instances:
+        token = inst.get("apikey")
+        if not token:
+            continue
+        print(f"--- Instância {inst['id']}: {inst.get('name', '?')} ---")
+        try:
+            folders = uazapi.list_folders(token) or []
+            if isinstance(folders, dict):
+                folders = folders.get("folders") or folders.get("data") or folders.get("items") or []
+            scheduled = [f for f in folders if (f.get("status") or "").lower() == "scheduled"]
+            if not scheduled:
+                print("  (nenhuma campanha scheduled)")
+            else:
+                for f in scheduled:
+                    fid = f.get("id") or f.get("folder_id") or f.get("folderId")
+                    info = (f.get("info") or "")[:50]
+                    result = uazapi.edit_campaign(token, str(fid), "delete")
+                    if result is not None:
+                        print(f"  ✅ folder_id={fid} delete ok ({info})")
+                        total_deleted += 1
+                    else:
+                        print(f"  ❌ folder_id={fid} delete falhou ({info})")
+            print()
+        except Exception as e:
+            print(f"  ⚠️ Erro: {e}\n")
+    print(f"Total excluídas: {total_deleted}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sync-debug Uazapi")
     parser.add_argument("campaign_id", nargs="*", type=int, help="ID(s) da campanha no DB")
@@ -236,6 +305,7 @@ def main():
     parser.add_argument("--limit", "-l", type=int, default=0, help="Limitar a N sends (0= todos). Ex: --chunks --limit 10")
     parser.add_argument("--listfolders", "-L", action="store_true", help="Listar TODAS as campanhas (folders) ativas/queue por instância Uazapi")
     parser.add_argument("--overlap", "-o", action="store_true", help="Detectar sobreposição: instâncias com mais de 1 campanha ativa")
+    parser.add_argument("--delete-scheduled", "-D", action="store_true", help="Excluir TODAS as campanhas com status scheduled (POST /sender/edit action=delete)")
     args = parser.parse_args()
     campaign_ids = args.campaign_id if isinstance(args.campaign_id, list) else [args.campaign_id] if args.campaign_id else []
     campaign_id = campaign_ids[0] if len(campaign_ids) == 1 else (campaign_ids[0] if campaign_ids else None)
@@ -272,6 +342,10 @@ def main():
     # Modo --overlap: detectar sobreposição
     if getattr(args, "overlap", False):
         return _check_overlap()
+
+    # Modo --delete-scheduled: excluir campanhas scheduled
+    if getattr(args, "delete_scheduled", False):
+        return _delete_scheduled()
 
     # Modo --chunks: lista todos campaign_stage_sends e verifica cada folder
     if chunks_mode:
