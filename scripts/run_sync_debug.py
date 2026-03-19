@@ -87,9 +87,9 @@ def _debug_chunks(campaign_ids):
         except Exception as e:
             print(f"  ⚠️ Erro get_status: {e}")
 
-        # Contagens da API
+        # Contagens da API (context opcional para compatibilidade)
         try:
-            counts = get_uazapi_campaign_counts(uazapi, token, fid, {"campaign_id": cid, "instance_id": inst_id})
+            counts = get_uazapi_campaign_counts(uazapi, token, fid)
             print(f"  API: Sent={counts.get('sent', 0)} Failed={counts.get('failed', 0)} Scheduled={counts.get('scheduled', 0)}")
         except Exception as e:
             print(f"  ⚠️ Erro list_messages: {e}")
