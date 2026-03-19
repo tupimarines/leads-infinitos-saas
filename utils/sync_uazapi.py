@@ -361,7 +361,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             continue
 
         ctx = {"campaign_id": campaign_id, "instance_id": send.get("instance_id")}
-        folders_list = uazapi_service.list_folders(send_token, context=ctx) or []
+        folders_list = uazapi_service.list_folders(send_token) or []
         folder_info = None
         for f in folders_list:
             cur_fid = _normalize_folder_id(f.get("id") or f.get("folder_id") or f.get("folderId"))
@@ -678,7 +678,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             lead_ids_by_step[i + 1] = ids if isinstance(ids, list) else []
 
     ctx_legacy = {"campaign_id": campaign_id}
-    folders_list = uazapi_service.list_folders(token, context=ctx_legacy) if folder_id else None
+    folders_list = uazapi_service.list_folders(token) if folder_id else None
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         if folders_list and folder_id and lead_ids_by_step.get(1):
             n = _sync_folder_via_listfolders(
