@@ -934,7 +934,8 @@ def schedule_next_initial_chunk(campaign, conn):
 
     if created > 0:
         conn.commit()
-        print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {scheduled_for} ({created} instâncias)")
+        sched_brt = pytz.UTC.localize(scheduled_for).astimezone(BRAZIL_TZ).strftime("%d/%m %H:%M BRT")
+        print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {sched_brt} ({created} instâncias)")
 
 
 def process_rollover(campaign, conn):
