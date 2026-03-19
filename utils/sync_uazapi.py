@@ -174,10 +174,11 @@ def _extract_phones_from_message(m):
     return None
 
 
-def get_uazapi_campaign_counts(uazapi_service, token, folder_id):
+def get_uazapi_campaign_counts(uazapi_service, token, folder_id, context=None):
     """
     Retorna contagens reais da Uazapi (Sent, Failed, Scheduled) com paginação completa.
     Usado por stats API e worker para saber quando campanha inicial terminou.
+    context: dict opcional (campaign_id, instance_id) para logs de erro.
     """
     if not uazapi_service or not token or not folder_id:
         return {"sent": 0, "failed": 0, "scheduled": 0}
@@ -188,7 +189,8 @@ def get_uazapi_campaign_counts(uazapi_service, token, folder_id):
         page_size = 500
         while True:
             resp = uazapi_service.list_messages(
-                token, folder_id, message_status=message_status, page=page, page_size=page_size
+                token, folder_id, message_status=message_status, page=page, page_size=page_size,
+                context=context
             )
             if not resp:
                 break
@@ -217,14 +219,16 @@ def is_initial_campaign_finished(counts):
     return (counts.get("scheduled") or 0) == 0
 
 
-def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status):
-    """Busca todos os telefones de um status, iterando paginação."""
+def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status, context=None):
+    """Busca todos os telefones de um status, iterando paginação.
+    context: dict opcional (campaign_id, instance_id) para logs de erro."""
     phones = set()
     page = 1
     page_size = 500
     while True:
         resp = uazapi_service.list_messages(
-            token, folder_id, message_status=message_status, page=page, page_size=page_size
+            token, folder_id, message_status=message_status, page=page, page_size=page_size,
+            context=context
         )
         if not resp:
             break
@@ -264,8 +268,8 @@ def _sync_folder_via_listfolders(
     instance_remote_jid=None,
 ):
     """
-    Se folder encontrado em listfolders com status=done e log_sucess>0, marca lead_ids como sent e
-    atualiza current_step para next_step.
+    Usa list_folders (log_sucess) como fonte de verdade — list_messages retorna só a 1ª msg do batch.
+    Marca os primeiros log_success leads como sent. Funciona para status done, scheduled, sending, running.
     Retorna número de leads atualizados.
     """
     if not folders_list or not isinstance(folders_list, list) or not lead_ids:
@@ -278,9 +282,8 @@ def _sync_folder_via_listfolders(
             break
     if not folder_info:
         return 0
-    status = (folder_info.get("status") or "").lower()
-    log_success = folder_info.get("log_sucess") or folder_info.get("log_success") or 0
-    if status != "done" or log_success <= 0:
+    log_success = int(folder_info.get("log_sucess") or folder_info.get("log_success") or 0)
+    if log_success <= 0:
         return 0
     ids_to_update = lead_ids[: int(log_success)] if isinstance(lead_ids, list) else []
     if not ids_to_update:
@@ -357,7 +360,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         if not send_token or not fid:
             continue
 
-        folders_list = uazapi_service.list_folders(send_token) or []
+        ctx = {"campaign_id": campaign_id, "instance_id": send.get("instance_id")}
+        folders_list = uazapi_service.list_folders(send_token, context=ctx) or []
         folder_info = None
         for f in folders_list:
             cur_fid = _normalize_folder_id(f.get("id") or f.get("folder_id") or f.get("folderId"))
@@ -372,9 +376,9 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     f"(campaign={campaign_id}, send_id={send.get('id')}, stage={send.get('stage')}, folder_id={fid})"
                 )
 
-            sent_phones_fb = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent")
-            failed_phones_fb = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed")
-            counts_fb = get_uazapi_campaign_counts(uazapi_service, send_token, fid)
+            sent_phones_fb = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent", context=ctx)
+            failed_phones_fb = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed", context=ctx)
+            counts_fb = get_uazapi_campaign_counts(uazapi_service, send_token, fid, context=ctx)
             scheduled_fb = int(counts_fb.get("scheduled") or 0)
 
             lead_ids = send.get("lead_ids") or []
@@ -534,8 +538,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             )
         )
         if needs_reconcile:
-            sent_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent")
-            failed_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed")
+            sent_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent", context=ctx)
+            failed_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed", context=ctx)
             if lead_ids:
                 sent_ids_done, failed_ids_done = _reconcile_send_by_messages(
                     conn=conn,
@@ -673,7 +677,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         if ids:
             lead_ids_by_step[i + 1] = ids if isinstance(ids, list) else []
 
-    folders_list = uazapi_service.list_folders(token) if folder_id else None
+    ctx_legacy = {"campaign_id": campaign_id}
+    folders_list = uazapi_service.list_folders(token, context=ctx_legacy) if folder_id else None
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         if folders_list and folder_id and lead_ids_by_step.get(1):
             n = _sync_folder_via_listfolders(
@@ -703,8 +708,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         conn.commit()
         return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
 
-    sent_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Sent")
-    failed_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Failed")
+    sent_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Sent", context=ctx_legacy)
+    failed_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Failed", context=ctx_legacy)
 
     sent_normalized = set()
     for ph in sent_phones:

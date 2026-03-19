@@ -25,7 +25,7 @@ def _debug_chunks(campaign_ids):
     """Lista todos campaign_stage_sends e verifica cada folder na Uazapi."""
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    from utils.sync_uazapi import fetch_all_phones_by_status, get_uazapi_campaign_counts
+    from utils.sync_uazapi import fetch_all_phones_by_status
     from services.uazapi import UazapiService
 
     def get_db():
@@ -87,14 +87,7 @@ def _debug_chunks(campaign_ids):
         except Exception as e:
             print(f"  ⚠️ Erro get_status: {e}")
 
-        # Contagens da API (context opcional para compatibilidade)
-        try:
-            counts = get_uazapi_campaign_counts(uazapi, token, fid)
-            print(f"  API: Sent={counts.get('sent', 0)} Failed={counts.get('failed', 0)} Scheduled={counts.get('scheduled', 0)}")
-        except Exception as e:
-            print(f"  ⚠️ Erro list_messages: {e}")
-
-        # list_folders: verificar se folder existe e status
+        # list_folders é fonte de verdade (log_success); list_messages retorna só 1ª msg do batch
         try:
             folders = uazapi.list_folders(token) or []
             found = None

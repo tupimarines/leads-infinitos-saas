@@ -96,10 +96,11 @@
 
 | Arquivo | Alterações |
 |---------|------------|
-| `worker_cadence.py` | schedule_next_initial_chunk, _materialize (query, timezone, logs), poll 30s, scheduled_start |
+| `worker_cadence.py` | schedule_next_initial_chunk, _materialize (query, timezone, logs), poll 30s, scheduled_start, **sempre carregar mensagens de campaign_steps** |
 | `app.py` | continue-initial-chunk endpoint, pending_initial em stats, update scheduled_start UTC |
 | `templates/campaigns_list.html` | Botão Continuar, função continueInitialChunk |
 | `utils/limits.py` | UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY = 8 |
+| `utils/sync_uazapi.py` | **_sync_folder_via_listfolders usa log_success para qualquer status** |
 
 ---
 
@@ -110,6 +111,22 @@
 3. `d7a377a` - fix: log de agendamento em BRT para clareza
 4. `fedae05` - fix: scheduled_start no edit + poll 30s + envio imediato quando horário recém passou
 5. `47f37d3` - fix: loop infinito + limite 8 chunks/dia + logs materialize
+
+---
+
+## 10. Materialize: mensagens de campaign_steps (edit form)
+
+**Problema:** Chunks 2+ podiam usar snapshot antigo (message_variations) em vez das mensagens atuais do edit.
+
+**Solução:** Sempre carregar de `campaign_steps` (fonte de verdade); fallback para message_variations só se vazio.
+
+---
+
+## 11. Sync: list_folders como fonte de verdade
+
+**Problema:** `list_messages` retorna só a 1ª mensagem do batch; contagens erradas.
+
+**Solução:** `_sync_folder_via_listfolders` usa `log_success` de list_folders para qualquer status (done, scheduled, sending, running).
 
 ---
 

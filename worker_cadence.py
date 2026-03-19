@@ -446,16 +446,20 @@ def _materialize_scheduled_stage_sends(conn):
             send_id = send["id"]
             token = send.get("apikey")
             chunk = chunks[idx] if idx < len(chunks) else []
-            custom_variations = send.get("message_variations")
-            if isinstance(custom_variations, str):
-                try:
-                    custom_variations = json.loads(custom_variations)
-                except Exception:
-                    custom_variations = []
-            if not isinstance(custom_variations, list):
-                custom_variations = []
-            custom_variations = [str(v).strip() for v in custom_variations if str(v).strip()]
-            step_msgs = custom_variations or _load_step_messages(conn, campaign_id, step)
+            # Sempre puxar mensagens de campaign_steps (edit form) — fonte de verdade.
+            # Fallback para message_variations (snapshot do agendamento) se campaign_steps vazio.
+            step_msgs = _load_step_messages(conn, campaign_id, step)
+            if not step_msgs:
+                custom_variations = send.get("message_variations")
+                if isinstance(custom_variations, str):
+                    try:
+                        custom_variations = json.loads(custom_variations)
+                    except Exception:
+                        custom_variations = []
+                if isinstance(custom_variations, list):
+                    step_msgs = [str(v).strip() for v in custom_variations if str(v).strip()]
+            if not step_msgs:
+                step_msgs = ["Olá!"]
             if not token:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -495,6 +499,7 @@ def _materialize_scheduled_stage_sends(conn):
                 lead_ids.append(lead["id"])
 
             if not messages:
+                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: 0 msgs (chunk={len(chunk)} leads, {len(step_msgs)} variações) — verificar phones")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'done', planned_count = 0, success_count = 0, failed_count = 0, updated_at = NOW() WHERE id = %s",
