@@ -5062,12 +5062,14 @@ def continue_initial_chunk(campaign_id):
         created = 0
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for inst in allowed:
+                # Bloquear só se já existe agendamento FUTURO imediato (próximos 15 min).
+                # Sends do passado (já materializados) não bloqueiam o Continuar.
                 cur.execute(
                     """
                     SELECT id FROM campaign_stage_sends
                     WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
-                      AND scheduled_for >= (NOW() - INTERVAL '20 minutes')
-                      AND scheduled_for <= (NOW() + INTERVAL '10 minutes')
+                      AND scheduled_for >= (NOW() AT TIME ZONE 'UTC')
+                      AND scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + INTERVAL '15 minutes')
                       AND status IN ('scheduled', 'running', 'partial')
                     LIMIT 1
                     """,
