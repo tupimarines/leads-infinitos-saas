@@ -5058,7 +5058,7 @@ def continue_initial_chunk(campaign_id):
         if not variations:
             variations = ["Olá!"]
 
-        scheduled_for = datetime.utcnow() + timedelta(minutes=2)
+        scheduled_for = datetime.utcnow() + timedelta(seconds=30)
         created = 0
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for inst in allowed:
@@ -5096,7 +5096,7 @@ def continue_initial_chunk(campaign_id):
             "success": True,
             "scheduled_for": scheduled_for.isoformat(),
             "instances_created": created,
-            "message": "Próximo chunk agendado. O envio ocorrerá em ~2 minutos."
+            "message": "Próximo chunk agendado. O envio ocorrerá em ~30 segundos (worker cadence precisa estar rodando)."
         })
     except Exception as e:
         print(f"Erro ao continuar chunk inicial campanha {campaign_id}: {e}")

@@ -390,9 +390,9 @@
             const data = await res.json();
             if (res.ok && data.success) {
                 if (typeof showToast === 'function') {
-                    showToast(data.message || 'Próximo chunk agendado. Envio em ~2 min.', 'success');
+                    showToast(data.message || 'Próximo chunk agendado. Envio em ~30 seg (worker cadence precisa estar rodando).', 'success');
                 } else {
-                    alert(data.message || 'Próximo chunk agendado. Envio em ~2 min.');
+                    alert(data.message || 'Próximo chunk agendado. Envio em ~30 seg (worker cadence precisa estar rodando).');
                 }
                 await updateCampaignStats(campaignId);
             } else {

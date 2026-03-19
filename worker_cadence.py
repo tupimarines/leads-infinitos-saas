@@ -356,7 +356,7 @@ def _materialize_scheduled_stage_sends(conn):
     if not uazapi_service:
         return
 
-    # scheduled_for é persistido em UTC naive; comparar na mesma base para evitar drift de fuso.
+    # scheduled_for é persistido em UTC naive; usar UTC na query para evitar drift de fuso (servidor em BRT).
     now_utc_naive = datetime.utcnow()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -371,7 +371,8 @@ def _materialize_scheduled_stage_sends(conn):
             WHERE css.status = 'scheduled'
               AND css.uazapi_folder_id IS NULL
               AND css.scheduled_for IS NOT NULL
-              AND css.scheduled_for <= (NOW() + INTERVAL '5 minutes')
+              AND css.scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + INTERVAL '5 minutes')
+              AND css.scheduled_for >= ((NOW() AT TIME ZONE 'UTC') - INTERVAL '15 minutes')
             ORDER BY css.scheduled_for ASC, css.id ASC
             """
         )
@@ -396,6 +397,7 @@ def _materialize_scheduled_stage_sends(conn):
         if not step:
             continue
         sends = sorted(sends, key=lambda x: x.get("instance_id") or 0)
+        print(f"  📤 [Materialize] campaign_id={campaign_id} stage={stage} scheduled_for={scheduled_for} sends={len(sends)}")
         per_instance_limit = 30
         total_limit = per_instance_limit * len(sends)
         if total_limit <= 0:
