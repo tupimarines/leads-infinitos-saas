@@ -803,11 +803,29 @@ def _parse_rollover_time(rollover_str):
     return 23, 0
 
 
+# Intervalo mínimo entre chunks iniciais (evita agendar para "amanhã 8h" quando há leads pendentes)
+INITIAL_CHUNK_INTERVAL_MINUTES = 5
+
+
 def _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun):
     """
-    Próximo horário de envio para chunk inicial: hoje se ainda não passou, senão próximo dia útil.
+    Próximo horário de envio para chunk inicial:
+    - Em horário comercial: agora + 5 min (arredondado) — permite vários chunks no mesmo dia
+    - Fora do horário: hoje 8h se ainda não passou, senão próximo dia útil
     """
     send_hour = send_hour or 8
+    if is_business_hours():
+        # Próximo slot em 5 min (arredondado) — ex: 14:32 -> 14:35, 14:37 -> 14:40
+        from math import ceil
+        total_mins = now_brazil.hour * 60 + now_brazil.minute
+        next_slot_mins = int(ceil((total_mins + 2) / INITIAL_CHUNK_INTERVAL_MINUTES) * INITIAL_CHUNK_INTERVAL_MINUTES)
+        next_hour = (next_slot_mins // 60) % 24
+        next_min = next_slot_mins % 60
+        base = datetime(now_brazil.year, now_brazil.month, now_brazil.day, 0, 0, 0, tzinfo=BRAZIL_TZ)
+        target = base + timedelta(minutes=next_slot_mins)
+        if target <= now_brazil:
+            target += timedelta(minutes=INITIAL_CHUNK_INTERVAL_MINUTES)
+        return target
     today_at = datetime(
         now_brazil.year, now_brazil.month, now_brazil.day,
         send_hour, 0, 0, tzinfo=BRAZIL_TZ
