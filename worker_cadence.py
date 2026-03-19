@@ -19,6 +19,7 @@ import base64
 import re
 from datetime import datetime, date, timedelta
 import psycopg2
+from psycopg2 import errors as psycopg2_errors
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 import pytz
@@ -705,6 +706,7 @@ def process_cadence():
                       AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
                 """)
                 campaigns = cur.fetchall()
+            conn.commit()  # Libera locks antes do loop longo (evita deadlock com worker_sender/sync)
 
             if not campaigns:
                 conn.close()
@@ -733,6 +735,14 @@ def process_cadence():
             conn.close()
             time.sleep(CADENCE_POLL_INTERVAL)
 
+        except psycopg2_errors.DeadlockDetected as e:
+            print(f"⚠️ [Cadence] Deadlock detected, retrying in ~5s: {e}")
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+            time.sleep(5 + random.uniform(0, 3))  # jitter para evitar colisão repetida
         except Exception as e:
             print(f"❌ [Cadence] Error in main loop: {e}")
             import traceback
