@@ -5048,15 +5048,24 @@ def continue_initial_chunk(campaign_id):
                 (campaign_id,),
             )
             step1 = cur.fetchone()
+            cur.execute("SELECT message_template FROM campaigns WHERE id = %s LIMIT 1", (campaign_id,))
+            camp_row = cur.fetchone()
         variations = []
-        if step1 and step1.get('message_template'):
+        for row in (step1, camp_row):
+            if not row or not row.get('message_template'):
+                continue
             try:
-                parsed = json.loads(step1['message_template'] or '[]')
+                parsed = json.loads(row['message_template'] or '[]')
                 variations = [str(x).strip() for x in (parsed if isinstance(parsed, list) else [parsed]) if str(x).strip()]
+                if variations:
+                    break
             except Exception:
                 pass
         if not variations:
-            variations = ["Olá!"]
+            conn.close()
+            return json.dumps({
+                "error": "Nenhuma mensagem configurada. Configure em campaign_steps (step 1) ou campaigns.message_template."
+            }), 400
 
         scheduled_for = datetime.utcnow() + timedelta(seconds=30)
         created = 0
@@ -5571,8 +5580,6 @@ def _create_stage_campaign(campaign_id):
             variations = [variations]
     except Exception:
         variations = []
-    if not variations:
-        variations = ["Olá!"]
 
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5596,6 +5603,11 @@ def _create_stage_campaign(campaign_id):
         step_msgs = custom_variations
     if not step_msgs:
         step_msgs = variations
+    if not step_msgs:
+        conn.close()
+        return json.dumps({
+            "error": f"Nenhuma mensagem configurada para a etapa. Configure em campaign_steps (step {step}) ou campaigns.message_template."
+        }), 400
 
     def _chunk(lst, n):
         return [lst[i:i + n] for i in range(0, len(lst), n)]

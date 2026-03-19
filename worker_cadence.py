@@ -328,6 +328,11 @@ def _resolve_uazapi_remote_jid(token):
 
 
 def _load_step_messages(conn, campaign_id, step):
+    """
+    Carrega mensagens do step. Fonte: campaign_steps (Kanban/edit).
+    Step 1 (Inicial): fallback para campaigns.message_template (criação da campanha).
+    Retorna [] se não houver mensagem configurada (não usa fallback "Olá!").
+    """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",
@@ -338,12 +343,33 @@ def _load_step_messages(conn, campaign_id, step):
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
-            return [str(x).strip() for x in parsed if str(x).strip()]
+            msgs = [str(x).strip() for x in parsed if str(x).strip()]
+            if msgs:
+                return msgs
         if isinstance(parsed, str) and parsed.strip():
             return [parsed.strip()]
     except Exception:
         pass
-    return ["Olá!"]
+    # Step 1 (Inicial): fallback para mensagens da criação da campanha
+    if step == 1:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT message_template FROM campaigns WHERE id = %s LIMIT 1",
+                (campaign_id,),
+            )
+            camp_row = cur.fetchone() or {}
+        camp_raw = camp_row.get("message_template") or "[]"
+        try:
+            camp_parsed = json.loads(camp_raw)
+            if isinstance(camp_parsed, list):
+                msgs = [str(x).strip() for x in camp_parsed if str(x).strip()]
+                if msgs:
+                    return msgs
+            if isinstance(camp_parsed, str) and camp_parsed.strip():
+                return [camp_parsed.strip()]
+        except Exception:
+            pass
+    return []
 
 
 def _materialize_scheduled_stage_sends(conn):
@@ -468,8 +494,14 @@ def _materialize_scheduled_stage_sends(conn):
                 if isinstance(custom_variations, list):
                     step_msgs = [str(v).strip() for v in custom_variations if str(v).strip()]
             if not step_msgs:
-                step_msgs = ["Olá!"]
-                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: usando fallback 'Olá!' (campaign_steps vazio ou message_template inválido)")
+                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: sem mensagem configurada (campaign_steps step {step} e campaigns.message_template vazios)")
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                continue
             if not token:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -961,22 +993,11 @@ def schedule_next_initial_chunk(campaign, conn):
     if delay_max < delay_min:
         delay_max = delay_min
 
-    # Mensagens do step 1
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
-            (cid,),
-        )
-        step1 = cur.fetchone()
-    variations = []
-    if step1 and step1.get('message_template'):
-        try:
-            parsed = json.loads(step1['message_template'] or '[]')
-            variations = [str(x).strip() for x in (parsed if isinstance(parsed, list) else [parsed]) if str(x).strip()]
-        except Exception:
-            pass
+    # Mensagens do step 1: campaign_steps ou campaigns.message_template (criação)
+    variations = _load_step_messages(conn, cid, 1)
     if not variations:
-        variations = ["Olá!"]
+        print(f"  ❌ [Initial Chunk] Campaign '{campaign.get('name')}': sem mensagem configurada (campaign_steps step 1 e campaigns.message_template vazios)")
+        return
 
     created = 0
     for inst in instances:

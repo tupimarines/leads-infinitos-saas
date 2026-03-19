@@ -4,6 +4,8 @@ Uso:
   python scripts/run_sync_debug.py [campaign_id]
   python scripts/run_sync_debug.py --folder FOLDER_ID --token TOKEN [campaign_id]
   python scripts/run_sync_debug.py --chunks 140 141   # debug chunks 2+ (campaign_stage_sends)
+  python scripts/run_sync_debug.py --listfolders     # listar TODAS as campanhas ativas/queue por instância
+  python scripts/run_sync_debug.py --overlap         # detectar sobreposição (várias campanhas na mesma instância)
 """
 import os
 import sys
@@ -109,6 +111,122 @@ def _debug_chunks(campaign_ids, limit=0):
     return 0
 
 
+def _list_all_folders():
+    """Lista todas as campanhas (folders) ativas/queue em cada instância Uazapi."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from services.uazapi import UazapiService
+
+    def get_db():
+        return psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            database=os.environ.get('DB_NAME', 'leads_infinitos'),
+            user=os.environ.get('DB_USER', 'postgres'),
+            password=os.environ.get('DB_PASSWORD', ''),
+            port=os.environ.get('DB_PORT', '5432'),
+            cursor_factory=RealDictCursor,
+        )
+
+    uazapi = UazapiService()
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT i.id, i.name, i.apikey
+            FROM instances i
+            WHERE COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+            ORDER BY i.id
+            """
+        )
+        instances = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    if not instances:
+        print("Nenhuma instância Uazapi encontrada.")
+        return 1
+
+    print(f"=== list_folders: {len(instances)} instâncias Uazapi ===\n")
+    for inst in instances:
+        token = inst.get("apikey")
+        if not token:
+            continue
+        print(f"--- Instância {inst['id']}: {inst.get('name', '?')} ---")
+        try:
+            # Sem status = todas; status=Active = só ativas
+            folders = uazapi.list_folders(token) or []
+            if isinstance(folders, dict):
+                folders = folders.get("folders") or folders.get("data") or folders.get("items") or []
+            if not folders:
+                print("  (nenhum folder)")
+            else:
+                for f in folders:
+                    fid = f.get("id") or f.get("folder_id") or f.get("folderId")
+                    status = f.get("status", "?")
+                    info = (f.get("info") or "")[:60]
+                    log_ok = f.get("log_sucess") or f.get("log_success") or 0
+                    log_fail = f.get("log_failed") or 0
+                    log_tot = f.get("log_total") or 0
+                    print(f"  folder_id={fid} status={status} log_success={log_ok} failed={log_fail} total={log_tot} info={info}")
+            print()
+        except Exception as e:
+            print(f"  ⚠️ Erro: {e}\n")
+    return 0
+
+
+def _check_overlap():
+    """Detecta instâncias com mais de uma campanha ativa (running/scheduled/partial) — possível sobreposição."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    def get_db():
+        return psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            database=os.environ.get('DB_NAME', 'leads_infinitos'),
+            user=os.environ.get('DB_USER', 'postgres'),
+            password=os.environ.get('DB_PASSWORD', ''),
+            port=os.environ.get('DB_PORT', '5432'),
+            cursor_factory=RealDictCursor,
+        )
+
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT instance_id, COUNT(*) AS cnt,
+                   array_agg(css.id ORDER BY css.scheduled_for) AS send_ids,
+                   array_agg(css.campaign_id ORDER BY css.scheduled_for) AS campaign_ids,
+                   array_agg(css.stage ORDER BY css.scheduled_for) AS stages,
+                   array_agg(css.uazapi_folder_id ORDER BY css.scheduled_for) AS folder_ids
+            FROM campaign_stage_sends css
+            JOIN instances i ON i.id = css.instance_id
+            WHERE css.status IN ('scheduled', 'running', 'partial')
+              AND css.uazapi_folder_id IS NOT NULL
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+            GROUP BY instance_id
+            HAVING COUNT(*) > 1
+            """
+        )
+        rows = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    if not rows:
+        print("Nenhuma sobreposição detectada (cada instância tem no máximo 1 send ativo).")
+        return 0
+
+    print(f"=== ⚠️ Sobreposição: {len(rows)} instância(s) com múltiplos sends ativos ===\n")
+    for r in rows:
+        print(f"Instância {r['instance_id']}: {r['cnt']} sends ativos")
+        for i, (cid, stage, fid) in enumerate(zip(r['campaign_ids'] or [], r['stages'] or [], r['folder_ids'] or [])):
+            print(f"  {i+1}. campaign={cid} stage={stage} folder_id={fid}")
+        print("  → Uazapi pode permitir só 1 campanha ativa por instância; as demais podem ficar em queue ou enviar mensagem errada.\n")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sync-debug Uazapi")
     parser.add_argument("campaign_id", nargs="*", type=int, help="ID(s) da campanha no DB")
@@ -116,6 +234,8 @@ def main():
     parser.add_argument("--token", "-t", help="Token da instância Uazapi")
     parser.add_argument("--chunks", "-c", action="store_true", help="Listar todos os chunks (campaign_stage_sends) e verificar cada folder")
     parser.add_argument("--limit", "-l", type=int, default=0, help="Limitar a N sends (0= todos). Ex: --chunks --limit 10")
+    parser.add_argument("--listfolders", "-L", action="store_true", help="Listar TODAS as campanhas (folders) ativas/queue por instância Uazapi")
+    parser.add_argument("--overlap", "-o", action="store_true", help="Detectar sobreposição: instâncias com mais de 1 campanha ativa")
     args = parser.parse_args()
     campaign_ids = args.campaign_id if isinstance(args.campaign_id, list) else [args.campaign_id] if args.campaign_id else []
     campaign_id = campaign_ids[0] if len(campaign_ids) == 1 else (campaign_ids[0] if campaign_ids else None)
@@ -144,6 +264,14 @@ def main():
         print("Primeira mensagem (estrutura):")
         print(json.dumps(first_msg, indent=2, default=str) if first_msg else "  (vazio)\n")
         return 0
+
+    # Modo --listfolders: listar todas as campanhas ativas/queue
+    if getattr(args, "listfolders", False):
+        return _list_all_folders()
+
+    # Modo --overlap: detectar sobreposição
+    if getattr(args, "overlap", False):
+        return _check_overlap()
 
     # Modo --chunks: lista todos campaign_stage_sends e verifica cada folder
     if chunks_mode:

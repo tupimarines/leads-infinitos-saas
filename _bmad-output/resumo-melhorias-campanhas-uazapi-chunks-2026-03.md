@@ -165,3 +165,13 @@ O script verifica para cada `campaign_stage_send`:
 **Problema:** Campanhas retornam `status=queued` na API mas mensagens não chegam no WhatsApp.
 
 **Solução:** Após `create_advanced_campaign` com sucesso, chamar `edit_campaign(folder_id, "continue")` quando status for `queued` ou `scheduled`, para garantir que a campanha inicie o envio. Logs: `▶️ [Materialize] edit_campaign(continue) ok` ou `⚠️ edit_campaign(continue) falhou`.
+
+---
+
+## 13. Fontes de mensagem e fallback (2026-03-19)
+
+**Inicial (step 1):** `campaign_steps` step 1 → fallback `campaigns.message_template` (criação). Sem mensagem → erro (não envia).
+
+**Follow-ups (steps 2–4):** `campaign_steps` (edit no Kanban ou botão Gerar) → `campaigns.message_template`. Sem mensagem → erro (não envia).
+
+O sync roda a cada 10 min (`STAGE_SYNC_INTERVAL_MINUTES`). O `list_folders` da Uazapi pode ter delay: o Kanban pode mostrar X leads movidos (log_success) enquanto menos mensagens chegaram no WhatsApp. Aguardar alguns minutos e recarregar; em caso de divergência persistente, conferir com Uazapi.
