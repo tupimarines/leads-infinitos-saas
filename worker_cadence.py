@@ -621,6 +621,10 @@ def _sync_active_stage_folders(conn):
             )
         except Exception as e:
             print(f"  ⚠️ [Stage Sync] Campaign {row['campaign_id']}: falha no sync: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
 # --- MAIN LOGIC ---
 
@@ -691,6 +695,11 @@ def process_cadence():
             print(f"❌ [Cadence] Error in main loop: {e}")
             import traceback
             traceback.print_exc()
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
             time.sleep(30)
 
 def check_monitoring_leads(conn):
