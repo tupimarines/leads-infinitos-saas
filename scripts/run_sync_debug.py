@@ -1,8 +1,14 @@
 #!/usr/bin/env python
-"""Script para rodar sync-debug sem Flask. Uso: python scripts/run_sync_debug.py [campaign_id]"""
+"""Script para rodar sync-debug sem Flask.
+Uso:
+  python scripts/run_sync_debug.py [campaign_id]
+  python scripts/run_sync_debug.py --folder FOLDER_ID --token TOKEN [campaign_id]
+  python scripts/run_sync_debug.py --chunks 140 141   # debug chunks 2+ (campaign_stage_sends)
+"""
 import os
 import sys
 import json
+import argparse
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,8 +20,158 @@ try:
 except Exception:
     pass
 
+
+def _debug_chunks(campaign_ids):
+    """Lista todos campaign_stage_sends e verifica cada folder na Uazapi."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from utils.sync_uazapi import fetch_all_phones_by_status, get_uazapi_campaign_counts
+    from services.uazapi import UazapiService
+
+    def get_db():
+        return psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            database=os.environ.get('DB_NAME', 'leads_infinitos'),
+            user=os.environ.get('DB_USER', 'postgres'),
+            password=os.environ.get('DB_PASSWORD', ''),
+            port=os.environ.get('DB_PORT', '5432'),
+            cursor_factory=RealDictCursor,
+        )
+
+    uazapi = UazapiService()
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.uazapi_folder_id,
+                   css.status, css.planned_count, css.success_count, css.failed_count,
+                   css.scheduled_for, css.last_sync_at,
+                   i.apikey, i.name AS instance_name
+            FROM campaign_stage_sends css
+            JOIN instances i ON i.id = css.instance_id
+            WHERE css.campaign_id = ANY(%s)
+              AND css.uazapi_folder_id IS NOT NULL
+            ORDER BY css.campaign_id, css.stage, css.instance_id, css.scheduled_for
+            """,
+            (campaign_ids,),
+        )
+        sends = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    if not sends:
+        print(f"Nenhum campaign_stage_send com folder_id para campanhas {campaign_ids}")
+        return 1
+
+    print(f"=== Debug chunks: {len(sends)} sends para campanhas {campaign_ids} ===\n")
+    for s in sends:
+        fid = s.get("uazapi_folder_id")
+        token = s.get("apikey")
+        cid = s.get("campaign_id")
+        inst_id = s.get("instance_id")
+        inst_name = s.get("instance_name", "?")
+        print(f"--- Send id={s['id']} campaign={cid} stage={s['stage']} inst={inst_id} ({inst_name}) ---")
+        print(f"  folder_id={fid} status={s['status']} planned={s['planned_count']} success={s['success_count']} failed={s['failed_count']}")
+        print(f"  scheduled_for={s['scheduled_for']} last_sync={s['last_sync_at']}")
+
+        if not token:
+            print("  ⚠️ Sem apikey")
+            continue
+
+        # Status da instância
+        try:
+            status_resp = uazapi.get_status(token)
+            inst_status = (status_resp or {}).get("instance", {}).get("status") or (status_resp or {}).get("status") or "?"
+            print(f"  Instância status: {inst_status}")
+        except Exception as e:
+            print(f"  ⚠️ Erro get_status: {e}")
+
+        # Contagens da API
+        try:
+            counts = get_uazapi_campaign_counts(uazapi, token, fid, {"campaign_id": cid, "instance_id": inst_id})
+            print(f"  API: Sent={counts.get('sent', 0)} Failed={counts.get('failed', 0)} Scheduled={counts.get('scheduled', 0)}")
+        except Exception as e:
+            print(f"  ⚠️ Erro list_messages: {e}")
+
+        # list_folders: verificar se folder existe e status
+        try:
+            folders = uazapi.list_folders(token) or []
+            found = None
+            for f in folders:
+                cur_fid = str(f.get("id") or f.get("folder_id") or f.get("folderId") or "")
+                if cur_fid == str(fid):
+                    found = f
+                    break
+            if found:
+                print(f"  list_folders: status={found.get('status')} log_success={found.get('log_sucess') or found.get('log_success')} log_failed={found.get('log_failed')}")
+            else:
+                print(f"  ⚠️ Folder {fid} NÃO encontrado em list_folders (total {len(folders)} folders)")
+        except Exception as e:
+            print(f"  ⚠️ Erro list_folders: {e}")
+        print()
+    return 0
+
+
 def main():
-    campaign_id = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    parser = argparse.ArgumentParser(description="Sync-debug Uazapi")
+    parser.add_argument("campaign_id", nargs="*", type=int, help="ID(s) da campanha no DB")
+    parser.add_argument("--folder", "-f", help="Folder ID Uazapi (usa token direto)")
+    parser.add_argument("--token", "-t", help="Token da instância Uazapi")
+    parser.add_argument("--chunks", "-c", action="store_true", help="Listar todos os chunks (campaign_stage_sends) e verificar cada folder")
+    args = parser.parse_args()
+    campaign_ids = args.campaign_id if isinstance(args.campaign_id, list) else [args.campaign_id] if args.campaign_id else []
+    campaign_id = campaign_ids[0] if len(campaign_ids) == 1 else (campaign_ids[0] if campaign_ids else None)
+    folder_id_arg = args.folder
+    token_arg = args.token
+    chunks_mode = args.chunks
+
+    # Modo direto: --folder + --token (sem campanha no DB)
+    if folder_id_arg and token_arg:
+        from utils.sync_uazapi import fetch_all_phones_by_status
+        from services.uazapi import UazapiService
+        uazapi = UazapiService()
+        sent_phones = list(fetch_all_phones_by_status(uazapi, token_arg, folder_id_arg, "Sent"))
+        failed_phones = list(fetch_all_phones_by_status(uazapi, token_arg, folder_id_arg, "Failed"))
+        raw_sent = uazapi.list_messages(token_arg, folder_id_arg, message_status="Sent", page=1, page_size=1)
+        first_msg = None
+        if raw_sent:
+            msgs = raw_sent.get("messages") or raw_sent.get("data")
+            if isinstance(msgs, list) and msgs:
+                first_msg = msgs[0]
+            elif isinstance(msgs, dict):
+                first_msg = msgs
+        print(f"Folder: {folder_id_arg}\n")
+        print(f"API Sent: {len(sent_phones)} phones -> {sent_phones}")
+        print(f"API Failed: {len(failed_phones)} phones -> {failed_phones}\n")
+        print("Primeira mensagem (estrutura):")
+        print(json.dumps(first_msg, indent=2, default=str) if first_msg else "  (vazio)\n")
+        return 0
+
+    # Modo --chunks: lista todos campaign_stage_sends e verifica cada folder
+    if chunks_mode:
+        if not campaign_ids:
+            # Pegar últimas campanhas Uazapi
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(
+                host=os.environ.get('DB_HOST', 'localhost'),
+                database=os.environ.get('DB_NAME', 'leads_infinitos'),
+                user=os.environ.get('DB_USER', 'postgres'),
+                password=os.environ.get('DB_PASSWORD', ''),
+                port=os.environ.get('DB_PORT', '5432'),
+                cursor_factory=RealDictCursor,
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id FROM campaigns WHERE use_uazapi_sender = TRUE
+                       ORDER BY id DESC LIMIT 5"""
+                )
+                campaign_ids = [r['id'] for r in cur.fetchall()]
+            conn.close()
+            print(f"Usando campanhas: {campaign_ids}\n")
+        return _debug_chunks(campaign_ids)
+
     if not campaign_id:
         # Try to find teste225 or similar
         import psycopg2
@@ -52,7 +208,7 @@ def main():
             port=os.environ.get('DB_PORT', '5432'),
             cursor_factory=RealDictCursor
         )
-    from utils.sync_uazapi import _fetch_all_phones_by_status
+    from utils.sync_uazapi import fetch_all_phones_by_status
     from services.uazapi import UazapiService
 
     conn = get_db_connection()
@@ -92,8 +248,8 @@ def main():
     print(f"Campanha: {campaign['name']} (id={campaign_id})")
     print(f"Folder: {folder_id}\n")
 
-    sent_phones = list(_fetch_all_phones_by_status(uazapi, token, folder_id, "Sent"))
-    failed_phones = list(_fetch_all_phones_by_status(uazapi, token, folder_id, "Failed"))
+    sent_phones = list(fetch_all_phones_by_status(uazapi, token, folder_id, "Sent"))
+    failed_phones = list(fetch_all_phones_by_status(uazapi, token, folder_id, "Failed"))
 
     print(f"API Sent: {len(sent_phones)} phones -> {sent_phones}")
     print(f"API Failed: {len(failed_phones)} phones -> {failed_phones}\n")

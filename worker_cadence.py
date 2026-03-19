@@ -526,8 +526,9 @@ def _materialize_scheduled_stage_sends(conn):
                 messages=messages,
                 info=f"Campaign {campaign_id} {stage} inst {send.get('instance_id')}",
             )
-            if not result or not result.get("folder_id"):
-                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou (sem folder_id)")
+            folder_id = (result or {}).get("folder_id") or (result or {}).get("folderId")
+            if not result or not folder_id:
+                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou (sem folder_id). Response: {result}")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
@@ -536,8 +537,9 @@ def _materialize_scheduled_stage_sends(conn):
                 conn.commit()
                 continue
 
-            folder_id = result["folder_id"]
-            print(f"  ✅ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: folder_id={folder_id} ({len(messages)} msgs)")
+            api_status = (result or {}).get("status", "?")
+            api_count = (result or {}).get("count", len(messages))
+            print(f"  ✅ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: folder_id={folder_id} ({len(messages)} msgs) API status={api_status} count={api_count}")
             remote_jid = _resolve_uazapi_remote_jid(token)
             with conn.cursor() as cur:
                 cur.execute(
