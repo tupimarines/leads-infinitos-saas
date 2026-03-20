@@ -3515,7 +3515,18 @@ def toggle_campaign_pause(campaign_id):
                     fid = cfg.get(key)
                     if fid:
                         _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
-            return json.dumps({"success": True, "new_status": new_status})
+            # Despausar: mesmo fluxo do botão Continuar (próximo chunk inicial na hora)
+            resp_body = {"success": True, "new_status": new_status}
+            if new_status == "running" and campaign.get("enable_cadence"):
+                cres = _continue_initial_chunk_core(
+                    campaign_id, current_user.id, log_label="toggle-start+initial-chunk"
+                )
+                if cres.get("ok"):
+                    resp_body["initial_chunk"] = {
+                        "instances_created": cres["body"].get("instances_created", 0),
+                        "folders_created": cres["body"].get("folders_created", 0),
+                    }
+            return json.dumps(resp_body)
 
         # Comportamento atual para campanhas sem Uazapi principal
         conn = get_db_connection()
@@ -4982,13 +4993,10 @@ def sync_campaign_uazapi_stats(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
-@app.route("/api/campaigns/<int:campaign_id>/continue-initial-chunk", methods=["POST"])
-@login_required
-def continue_initial_chunk(campaign_id):
+def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initial-chunk"):
     """
-    Força a criação do próximo chunk de 30 mensagens (stage initial) para campanhas Uazapi.
-    Agenda para ~2 min à frente para o worker_cadence materializar imediatamente.
-    Útil quando o horário de envio já passou e o usuário quer continuar hoje.
+    Agenda campaign_stage_sends (initial) e materializa na hora via worker_cadence (force_send_ids).
+    Retorna dict: ok (bool), status_code, body (dict JSON-serializável).
     """
     try:
         conn = get_db_connection()
@@ -4997,16 +5005,16 @@ def continue_initial_chunk(campaign_id):
                 """SELECT c.id, c.name, c.use_uazapi_sender, c.enable_cadence, c.delay_min_minutes, c.delay_max_minutes
                    FROM campaigns c
                    WHERE c.id = %s AND c.user_id = %s""",
-                (campaign_id, current_user.id)
+                (campaign_id, user_id),
             )
             campaign = cur.fetchone()
         conn.close()
         if not campaign:
-            return json.dumps({"error": "Campanha não encontrada"}), 404
-        if not campaign.get('use_uazapi_sender'):
-            return json.dumps({"error": "Campanha não usa Uazapi"}), 400
-        if not campaign.get('enable_cadence'):
-            return json.dumps({"error": "Campanha sem cadência habilitada"}), 400
+            return {"ok": False, "status_code": 404, "body": {"error": "Campanha não encontrada"}}
+        if not campaign.get("use_uazapi_sender"):
+            return {"ok": False, "status_code": 400, "body": {"error": "Campanha não usa Uazapi"}}
+        if not campaign.get("enable_cadence"):
+            return {"ok": False, "status_code": 400, "body": {"error": "Campanha sem cadência habilitada"}}
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5021,24 +5029,33 @@ def continue_initial_chunk(campaign_id):
                 (campaign_id,),
             )
             row = cur.fetchone()
-        pending_count = int(row.get('cnt') or 0) if row else 0
+        pending_count = int(row.get("cnt") or 0) if row else 0
         if pending_count <= 0:
             conn.close()
-            return json.dumps({"error": "Nenhum lead pendente para enviar nesta etapa"}), 400
+            return {
+                "ok": False,
+                "status_code": 400,
+                "body": {"error": "Nenhum lead pendente para enviar nesta etapa"},
+            }
 
-        instances = _get_uazapi_instances_for_campaign(campaign_id, current_user.id)
+        instances = _get_uazapi_instances_for_campaign(campaign_id, user_id)
         if not instances:
             conn.close()
-            return json.dumps({"error": "Nenhuma instância Uazapi vinculada"}), 400
+            return {"ok": False, "status_code": 400, "body": {"error": "Nenhuma instância Uazapi vinculada"}}
 
         from utils.limits import can_create_campaign_today
-        allowed = [i for i in instances if can_create_campaign_today(i['instance_id'])]
+
+        allowed = [i for i in instances if can_create_campaign_today(i["instance_id"])]
         if not allowed:
             conn.close()
-            return json.dumps({"error": "Limite diário por instância atingido. Tente após meia-noite BRT."}), 429
+            return {
+                "ok": False,
+                "status_code": 429,
+                "body": {"error": "Limite diário por instância atingido. Tente após meia-noite BRT."},
+            }
 
-        delay_min = int(campaign.get('delay_min_minutes') or 5)
-        delay_max = int(campaign.get('delay_max_minutes') or 15)
+        delay_min = int(campaign.get("delay_min_minutes") or 5)
+        delay_max = int(campaign.get("delay_max_minutes") or 15)
         if delay_max < delay_min:
             delay_max = delay_min
 
@@ -5052,27 +5069,33 @@ def continue_initial_chunk(campaign_id):
             camp_row = cur.fetchone()
         variations = []
         for row in (step1, camp_row):
-            if not row or not row.get('message_template'):
+            if not row or not row.get("message_template"):
                 continue
             try:
-                parsed = json.loads(row['message_template'] or '[]')
-                variations = [str(x).strip() for x in (parsed if isinstance(parsed, list) else [parsed]) if str(x).strip()]
+                parsed = json.loads(row["message_template"] or "[]")
+                variations = [
+                    str(x).strip()
+                    for x in (parsed if isinstance(parsed, list) else [parsed])
+                    if str(x).strip()
+                ]
                 if variations:
                     break
             except Exception:
                 pass
         if not variations:
             conn.close()
-            return json.dumps({
-                "error": "Nenhuma mensagem configurada. Configure em campaign_steps (step 1) ou campaigns.message_template."
-            }), 400
+            return {
+                "ok": False,
+                "status_code": 400,
+                "body": {
+                    "error": "Nenhuma mensagem configurada. Configure em campaign_steps (step 1) ou campaigns.message_template."
+                },
+            }
 
         scheduled_for = datetime.utcnow() + timedelta(seconds=30)
-        created = 0
+        created_ids = []
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for inst in allowed:
-                # Bloquear só se já existe agendamento FUTURO imediato (próximos 15 min).
-                # Sends do passado (já materializados) não bloqueiam o Continuar.
                 cur.execute(
                     """
                     SELECT id FROM campaign_stage_sends
@@ -5082,7 +5105,7 @@ def continue_initial_chunk(campaign_id):
                       AND status IN ('scheduled', 'running', 'partial')
                     LIMIT 1
                     """,
-                    (campaign_id, inst['instance_id']),
+                    (campaign_id, inst["instance_id"]),
                 )
                 if cur.fetchone():
                     continue
@@ -5092,26 +5115,79 @@ def continue_initial_chunk(campaign_id):
                     (campaign_id, stage, instance_id, scheduled_for, status, planned_count, lead_ids,
                      delay_min_minutes, delay_max_minutes, message_variations)
                     VALUES (%s, 'initial', %s, %s, 'scheduled', 0, '[]'::jsonb, %s, %s, %s)
+                    RETURNING id
                     """,
-                    (campaign_id, inst['instance_id'], scheduled_for, delay_min, delay_max, json.dumps(variations)),
+                    (
+                        campaign_id,
+                        inst["instance_id"],
+                        scheduled_for,
+                        delay_min,
+                        delay_max,
+                        json.dumps(variations),
+                    ),
                 )
-                created += 1
+                ins = cur.fetchone()
+                if ins and ins.get("id") is not None:
+                    created_ids.append(ins["id"])
         conn.commit()
         conn.close()
 
-        if created <= 0:
-            return json.dumps({"error": "Já existe agendamento em andamento para esta janela"}), 409
+        if not created_ids:
+            return {
+                "ok": False,
+                "status_code": 409,
+                "body": {"error": "Já existe agendamento em andamento para esta janela"},
+            }
 
-        print(f"[UAZAPI] continue-initial-chunk campaign_id={campaign_id}: {created} instâncias agendadas para {scheduled_for}")
-        return json.dumps({
+        folders_created = 0
+        mat_err = None
+        try:
+            import worker_cadence as wc
+
+            conn_m = get_db_connection()
+            try:
+                mat = wc._materialize_scheduled_stage_sends(conn_m, force_send_ids=created_ids)
+                folders_created = (mat or {}).get("folders_created", 0)
+            finally:
+                conn_m.close()
+        except Exception as ex:
+            mat_err = str(ex)
+            print(f"[UAZAPI] {log_label} materialização imediata falhou (worker pode concluir): {ex}")
+
+        print(
+            f"[UAZAPI] {log_label} campaign_id={campaign_id}: "
+            f"{len(created_ids)} instâncias, scheduled_for={scheduled_for}, folders_created={folders_created}"
+        )
+        body = {
             "success": True,
             "scheduled_for": scheduled_for.isoformat(),
-            "instances_created": created,
-            "message": "Próximo chunk agendado. O envio ocorrerá em ~30 segundos (worker cadence precisa estar rodando)."
-        })
+            "instances_created": len(created_ids),
+            "folders_created": folders_created,
+            "message": (
+                f"Campanha criada na Uazapi ({folders_created} folder(s))."
+                if folders_created > 0
+                else (
+                    "Agendamento salvo; o worker cadence materializará em breve."
+                    if not mat_err
+                    else f"Materialização adiada ({mat_err}); o worker tentará na janela habitual."
+                )
+            ),
+        }
+        return {"ok": True, "status_code": 200, "body": body}
     except Exception as e:
         print(f"Erro ao continuar chunk inicial campanha {campaign_id}: {e}")
-        return json.dumps({"error": str(e)}), 500
+        return {"ok": False, "status_code": 500, "body": {"error": str(e)}}
+
+
+@app.route("/api/campaigns/<int:campaign_id>/continue-initial-chunk", methods=["POST"])
+@login_required
+def continue_initial_chunk(campaign_id):
+    """
+    Próximo chunk inicial (30 msgs): grava campaign_stage_sends e materializa na hora (POST /sender/advanced),
+    sem depender exclusivamente do worker nem da janela 2–5 min.
+    """
+    r = _continue_initial_chunk_core(campaign_id, current_user.id, log_label="continue-initial-chunk")
+    return json.dumps(r["body"]), r["status_code"]
 
 
 def _get_uazapi_instance_for_campaign(campaign_id, user_id, admin_mode=False):

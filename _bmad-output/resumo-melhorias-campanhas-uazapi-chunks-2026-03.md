@@ -42,6 +42,12 @@
 - Botão no card quando `pending_initial > 0`
 - Campo `pending_initial` na API de stats
 
+### 4b. Materialização imediata (2026-03-20)
+
+**Problema:** Só o worker materializava, com janela 2–5 min — atrasos/deadlocks faziam o folder nunca aparecer.
+
+**Solução:** Após `INSERT` com `RETURNING id`, o `app` chama `worker_cadence._materialize_scheduled_stage_sends(conn, force_send_ids=...)`, criando a campanha na Uazapi no mesmo fluxo. Toggle **Start** (Uazapi + cadência) reutiliza `_continue_initial_chunk_core`. Ver `_bmad-output/problem-solution-2026-03-20-uazapi-continue-chunk.md`.
+
 ---
 
 ## 5. Poll mais frequente

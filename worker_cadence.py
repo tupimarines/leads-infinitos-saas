@@ -373,37 +373,66 @@ def _load_step_messages(conn, campaign_id, step):
     return []
 
 
-def _materialize_scheduled_stage_sends(conn):
+def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
     """
     Pré-disparo determinístico (2-5 min antes):
     - recalcula elegíveis imediatamente antes do envio
     - exclui converted/lost/removed_from_funnel
     - cria folder só na janela curta
+
+    force_send_ids: ids de campaign_stage_sends — materializa na hora (ignora janela 2–5 min).
+    Usado pelo continue-initial-chunk para não depender só do worker.
+
+    Retorno: dict {"folders_created": int} ou None se uazapi indisponível.
     """
     if not uazapi_service:
-        return
+        return None
+
+    force_set = set(force_send_ids) if force_send_ids else None
+    folders_created = 0
 
     # scheduled_for é persistido em UTC naive; usar UTC na query para evitar drift de fuso (servidor em BRT).
     now_utc_naive = datetime.utcnow()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
-                   css.status, i.apikey,
-                   css.delay_min_minutes, css.delay_max_minutes, css.message_variations,
-                   c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max
-            FROM campaign_stage_sends css
-            JOIN campaigns c ON c.id = css.campaign_id
-            JOIN instances i ON i.id = css.instance_id
-            WHERE css.status = 'scheduled'
-              AND css.uazapi_folder_id IS NULL
-              AND css.scheduled_for IS NOT NULL
-              AND css.scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + INTERVAL '5 minutes')
-              AND css.scheduled_for >= ((NOW() AT TIME ZONE 'UTC') - INTERVAL '15 minutes')
-            ORDER BY css.scheduled_for ASC, css.id ASC
-            """
-        )
-        rows = cur.fetchall() or []
+    if force_set:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
+                       css.status, i.apikey,
+                       css.delay_min_minutes, css.delay_max_minutes, css.message_variations,
+                       c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max
+                FROM campaign_stage_sends css
+                JOIN campaigns c ON c.id = css.campaign_id
+                JOIN instances i ON i.id = css.instance_id
+                WHERE css.id = ANY(%s)
+                  AND css.status = 'scheduled'
+                  AND css.uazapi_folder_id IS NULL
+                  AND css.scheduled_for IS NOT NULL
+                ORDER BY css.scheduled_for ASC, css.id ASC
+                """,
+                (list(force_set),),
+            )
+            rows = cur.fetchall() or []
+    else:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
+                       css.status, i.apikey,
+                       css.delay_min_minutes, css.delay_max_minutes, css.message_variations,
+                       c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max
+                FROM campaign_stage_sends css
+                JOIN campaigns c ON c.id = css.campaign_id
+                JOIN instances i ON i.id = css.instance_id
+                WHERE css.status = 'scheduled'
+                  AND css.uazapi_folder_id IS NULL
+                  AND css.scheduled_for IS NOT NULL
+                  AND css.scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + INTERVAL '5 minutes')
+                  AND css.scheduled_for >= ((NOW() AT TIME ZONE 'UTC') - INTERVAL '15 minutes')
+                ORDER BY css.scheduled_for ASC, css.id ASC
+                """
+            )
+            rows = cur.fetchall() or []
 
     stage_to_step = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
     grouped = {}
@@ -412,9 +441,12 @@ def _materialize_scheduled_stage_sends(conn):
         if not sched:
             continue
         remaining = (sched - now_utc_naive).total_seconds()
-        if remaining > PRE_DISPARO_WINDOW_MAX * 60:
-            continue
-        if remaining < -15 * 60:
+        if force_set is None:
+            if remaining > PRE_DISPARO_WINDOW_MAX * 60:
+                continue
+            if remaining < -15 * 60:
+                continue
+        elif remaining < -86400:
             continue
         key = (row["campaign_id"], row["stage"], sched)
         grouped.setdefault(key, []).append(row)
@@ -615,6 +647,9 @@ def _materialize_scheduled_stage_sends(conn):
                     (send.get("instance_id"), campaign_id),
                 )
             conn.commit()
+            folders_created += 1
+
+    return {"folders_created": folders_created}
 
 
 def _sync_active_stage_folders(conn):
