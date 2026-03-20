@@ -5140,6 +5140,34 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 "body": {"error": "Limite diário por instância atingido. Tente após meia-noite BRT."},
             }
 
+        # Máximo 1 chunk/dia/instância: bloqueia só se houver chunk bem-sucedido hoje.
+        # Chunk com status 'failed' permite retry (ex: mensagem não configurada, API erro).
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT instance_id FROM campaign_stage_sends
+                WHERE campaign_id = %s AND stage = 'initial'
+                  AND instance_id = ANY(%s)
+                  AND (
+                    status IN ('scheduled', 'running', 'partial', 'queued')
+                    OR (
+                      (scheduled_for AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date
+                      AND status NOT IN ('failed')
+                    )
+                  )
+                """,
+                (campaign_id, [i["instance_id"] for i in allowed]),
+            )
+            busy_instances = {r["instance_id"] for r in (cur.fetchall() or [])}
+        allowed = [i for i in allowed if i["instance_id"] not in busy_instances]
+        if not allowed:
+            conn.close()
+            return {
+                "ok": False,
+                "status_code": 409,
+                "body": {"error": "Já existe chunk agendado ou enviado com sucesso hoje para esta instância. Máximo 1 chunk/dia/instância. Chunks com falha permitem retry."},
+            }
+
         delay_min = int(campaign.get("delay_min_minutes") or 5)
         delay_max = int(campaign.get("delay_max_minutes") or 15)
         if delay_max < delay_min:
@@ -5151,21 +5179,15 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 (campaign_id,),
             )
             step1 = cur.fetchone()
-            cur.execute("SELECT message_template FROM campaigns WHERE id = %s LIMIT 1", (campaign_id,))
-            camp_row = cur.fetchone()
         variations = []
-        for row in (step1, camp_row):
-            if not row or not row.get("message_template"):
-                continue
+        if step1 and step1.get("message_template"):
             try:
-                parsed = json.loads(row["message_template"] or "[]")
+                parsed = json.loads(step1["message_template"] or "[]")
                 variations = [
                     str(x).strip()
                     for x in (parsed if isinstance(parsed, list) else [parsed])
                     if str(x).strip()
                 ]
-                if variations:
-                    break
             except Exception:
                 pass
         if not variations:
@@ -5174,7 +5196,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 "ok": False,
                 "status_code": 400,
                 "body": {
-                    "error": "Nenhuma mensagem configurada. Configure em campaign_steps (step 1) ou campaigns.message_template."
+                    "error": "Nenhuma mensagem configurada no step 1 (Inicial). Configure em campaign_steps (Kanban ou edição da campanha)."
                 },
             }
 
@@ -5186,8 +5208,6 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                     """
                     SELECT id FROM campaign_stage_sends
                     WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
-                      AND scheduled_for >= (NOW() AT TIME ZONE 'UTC')
-                      AND scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + INTERVAL '15 minutes')
                       AND status IN ('scheduled', 'running', 'partial')
                     LIMIT 1
                     """,
@@ -5222,7 +5242,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             return {
                 "ok": False,
                 "status_code": 409,
-                "body": {"error": "Já existe agendamento em andamento para esta janela"},
+                "body": {"error": "Já existe chunk agendado ou enviado hoje para esta instância. Máximo 1 chunk/dia/instância."},
             }
 
         folders_created = 0

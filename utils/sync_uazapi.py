@@ -16,6 +16,17 @@ def _normalize_folder_id(value):
     return str(value).strip()
 
 
+def _lead_step_after_confirmed_send(stage: str) -> int:
+    """
+    current_step ao marcar envio confirmado (list_folders / list_messages).
+    Etapa initial em chunks: mantém step 1 até o rollover da campanha principal;
+    evita avançar para FU1 só porque log_success subiu na fila (queued/scheduled).
+    """
+    if stage == "initial":
+        return 1
+    return {"follow1": 3, "follow2": 4, "breakup": 4}.get(stage, 4)
+
+
 def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed_phones):
     """
     Reconcilia sucesso/falha por lead usando list_messages (Sent/Failed).
@@ -327,8 +338,6 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     updated_sent = 0
     updated_failed = 0
 
-    stage_to_next_step = {"initial": 2, "follow1": 3, "follow2": 4, "breakup": 4}
-
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence
@@ -428,7 +437,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
                              AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
                         (
-                            stage_to_next_step.get(send.get("stage"), 4),
+                            _lead_step_after_confirmed_send(send.get("stage") or ""),
                             send.get("stage"),
                             send.get("instance_id"),
                             send.get("instance_remote_jid"),
@@ -505,8 +514,17 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
             )
 
+        # log_success em queued/scheduled costuma refletir fila aceita, não entrega no WhatsApp.
+        skip_listfolders_leads = send.get("stage") == "initial" and status in (
+            "queued",
+            "scheduled",
+        )
         updated_from_listfolders = 0
-        if log_success > 0 and lead_ids:
+        if (
+            not skip_listfolders_leads
+            and log_success > 0
+            and lead_ids
+        ):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 n = _sync_folder_via_listfolders(
                     conn=conn,
@@ -516,7 +534,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     folders_list=folders_list,
                     folder_id=fid,
                     lead_ids=lead_ids,
-                    next_step=stage_to_next_step.get(send.get("stage"), 4),
+                    next_step=_lead_step_after_confirmed_send(send.get("stage") or ""),
                     cur=cur,
                     stage_label=send.get("stage"),
                     instance_id=send.get("instance_id"),
@@ -584,7 +602,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
                              AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
                         (
-                            stage_to_next_step.get(send.get("stage"), 4),
+                            _lead_step_after_confirmed_send(send.get("stage") or ""),
                             send.get("stage"),
                             send.get("instance_id"),
                             send.get("instance_remote_jid"),

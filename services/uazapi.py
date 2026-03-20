@@ -5,6 +5,7 @@ Usado pelo superadmin para criar instâncias, conectar, verificar status,
 deletar e enviar mensagens. URL base via UAZAPI_URL; admintoken via UAZAPI_ADMIN_TOKEN.
 """
 
+import json
 import os
 from typing import Any, Optional, Tuple
 
@@ -292,7 +293,14 @@ class UazapiService:
                 )
                 print(f"❌ [Uazapi] create_advanced_campaign Body: {response.text}")
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            if os.environ.get("UAZAPI_DEBUG", "").strip().lower() in ("1", "true", "yes"):
+                try:
+                    blob = json.dumps(data, ensure_ascii=False, default=str)[:4000]
+                    print(f"🔎 [Uazapi DEBUG] create_advanced_campaign response: {blob}")
+                except Exception:
+                    print(f"🔎 [Uazapi DEBUG] create_advanced_campaign response: {data!r}")
+            return data
         except requests.exceptions.RequestException as e:
             print(f"❌ [Uazapi] Error creating advanced campaign: {e}")
             if hasattr(e, "response") and e.response is not None:

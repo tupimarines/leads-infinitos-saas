@@ -63,6 +63,11 @@ SAFETY_BUFFER_MINUTES = 5
 PRE_DISPARO_WINDOW_MIN = 2
 PRE_DISPARO_WINDOW_MAX = 5
 STAGE_SYNC_INTERVAL_MINUTES = 10
+VERIFY_FOLDER_AFTER_SECONDS = 180  # list_folders 3 min após create_advanced_campaign
+
+# Fila de verificação pós-create: (send_id, folder_id, token, verify_at)
+_verify_folder_queue = []
+
 
 def get_db_connection():
     return psycopg2.connect(
@@ -330,9 +335,8 @@ def _resolve_uazapi_remote_jid(token):
 
 def _load_step_messages(conn, campaign_id, step):
     """
-    Carrega mensagens do step. Fonte: campaign_steps (Kanban/edit).
-    Step 1 (Inicial): fallback para campaigns.message_template (criação da campanha).
-    Retorna [] se não houver mensagem configurada (não usa fallback "Olá!").
+    Carrega mensagens do step. Fonte exclusiva: campaign_steps (Kanban/edit).
+    Sem fallback campaigns.message_template — se vazio, retorna [] e a campanha não é criada.
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -351,25 +355,6 @@ def _load_step_messages(conn, campaign_id, step):
             return [parsed.strip()]
     except Exception:
         pass
-    # Step 1 (Inicial): fallback para mensagens da criação da campanha
-    if step == 1:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT message_template FROM campaigns WHERE id = %s LIMIT 1",
-                (campaign_id,),
-            )
-            camp_row = cur.fetchone() or {}
-        camp_raw = camp_row.get("message_template") or "[]"
-        try:
-            camp_parsed = json.loads(camp_raw)
-            if isinstance(camp_parsed, list):
-                msgs = [str(x).strip() for x in camp_parsed if str(x).strip()]
-                if msgs:
-                    return msgs
-            if isinstance(camp_parsed, str) and camp_parsed.strip():
-                return [camp_parsed.strip()]
-        except Exception:
-            pass
     return []
 
 
@@ -514,20 +499,10 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
             send_id = send["id"]
             token = send.get("apikey")
             chunk = chunks[idx] if idx < len(chunks) else []
-            # Sempre puxar mensagens de campaign_steps (edit form) — fonte de verdade.
-            # Fallback para message_variations (snapshot do agendamento) se campaign_steps vazio.
+            # Fonte exclusiva: campaign_steps. Sem fallback — se vazio, não cria campanha.
             step_msgs = _load_step_messages(conn, campaign_id, step)
             if not step_msgs:
-                custom_variations = send.get("message_variations")
-                if isinstance(custom_variations, str):
-                    try:
-                        custom_variations = json.loads(custom_variations)
-                    except Exception:
-                        custom_variations = []
-                if isinstance(custom_variations, list):
-                    step_msgs = [str(v).strip() for v in custom_variations if str(v).strip()]
-            if not step_msgs:
-                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: sem mensagem configurada (campaign_steps step {step} e campaigns.message_template vazios)")
+                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: sem mensagem configurada em campaign_steps step {step}. Configure no Kanban ou edição da campanha.")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
@@ -584,7 +559,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 continue
 
             if not can_create_campaign_today(send.get("instance_id")):
-                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: limite diário atingido (1 campanha/instância/dia)")
+                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: limite diário de chunks Uazapi atingido para esta instância")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
@@ -648,8 +623,57 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 )
             conn.commit()
             folders_created += 1
+            # Enfileirar verificação 3 min após create_advanced_campaign
+            _verify_folder_queue.append({
+                "send_id": send_id,
+                "folder_id": folder_id,
+                "token": token,
+                "verify_at": time.time() + VERIFY_FOLDER_AFTER_SECONDS,
+            })
 
     return {"folders_created": folders_created}
+
+
+def _process_verify_folder_queue():
+    """
+    Processa fila de verificação: 3 min após create_advanced_campaign, chama list_folders
+    e confirma se folder existe e status em (queued, scheduled, sending). Log único por send.
+    """
+    if not uazapi_service:
+        return
+    now = time.time()
+    global _verify_folder_queue
+    to_remove = []
+    for i, item in enumerate(_verify_folder_queue):
+        if item["verify_at"] > now:
+            continue
+        to_remove.append(i)
+        send_id = item["send_id"]
+        fid = str(item["folder_id"] or "").strip()
+        token = (item["token"] or "").strip()
+        if not fid or not token:
+            continue
+        try:
+            folders = uazapi_service.list_folders(token) or []
+            found = None
+            for f in folders:
+                cf = str(f.get("id") or f.get("folder_id") or f.get("folderId") or "").strip()
+                if cf == fid:
+                    found = f
+                    break
+            status = (found.get("status") or "").lower() if found else None
+            if found:
+                ok_status = status in ("queued", "scheduled", "sending", "running", "ativo")
+                if ok_status:
+                    print(f"  ✅ [Verify] send_id={send_id} folder={fid} status={status} (list_folders ok)")
+                else:
+                    print(f"  ⚠️ [Verify] send_id={send_id} folder={fid} status={status} (verificar se envio iniciou)")
+            else:
+                print(f"  ⚠️ [Verify] send_id={send_id} folder={fid} NÃO encontrado em list_folders (API delay ou erro)")
+        except Exception as e:
+            print(f"  ⚠️ [Verify] send_id={send_id}: list_folders falhou: {e}")
+    for i in reversed(to_remove):
+        _verify_folder_queue.pop(i)
 
 
 def _sync_active_stage_folders(conn):
@@ -716,6 +740,9 @@ def process_cadence():
 
             # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)
             _materialize_scheduled_stage_sends(conn)
+
+            # Verificação pós-create: 3 min após create_advanced_campaign, list_folders confirma folder
+            _process_verify_folder_queue()
 
             now_sync = datetime.now(BRAZIL_TZ)
             should_sync = (
@@ -908,9 +935,12 @@ def _parse_rollover_time(rollover_str):
 
 def _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun):
     """
-    Próximo horário de envio para chunk inicial: APENAS o primeiro slot do dia.
-    Não agenda a cada 5 min — evita flood de campanhas na Uazapi.
-    Campanhas são criadas só por: botão Continuar, botão Gerar, ou ao atingir este horário.
+    Próximo horário de envio para chunk inicial (worker): APENAS o primeiro slot do dia.
+    - Antes de send_hour hoje: slot às send_hour (primeiro disparo do dia).
+    - Depois: próximo dia útil às send_hour (não encadeia chunks automaticamente).
+    Chunks adicionais no mesmo dia: apenas via botão Continuar (usuário explícito).
+    Evita flood: 1 chunk/dia/instância/etapa do worker; Continuar limitado por
+    can_create_campaign_today (8 chunks/dia).
     """
     send_hour = send_hour or 8
     today_at = datetime(
@@ -1035,10 +1065,10 @@ def schedule_next_initial_chunk(campaign, conn):
                 """
                 SELECT id FROM campaign_stage_sends
                 WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
-                  AND scheduled_for = %s AND status IN ('scheduled', 'running', 'partial')
+                  AND status IN ('scheduled', 'running', 'partial')
                 LIMIT 1
                 """,
-                (cid, inst['instance_id'], scheduled_for),
+                (cid, inst['instance_id']),
             )
             if cur.fetchone():
                 continue
