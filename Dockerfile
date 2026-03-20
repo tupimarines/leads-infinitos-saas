@@ -20,6 +20,6 @@ ENV PORT=8000
 EXPOSE 8000
 
 # Increase timeout and optimize for memory usage
-CMD ["gunicorn", "-b", "0.0.0.0:8000", "--timeout", "30", "--worker-class", "sync", "--workers", "1", "--max-requests", "100", "--max-requests-jitter", "10", "--preload", "app:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:8000", "--timeout", "600", "--worker-class", "sync", "--workers", "1", "--max-requests", "100", "--max-requests-jitter", "10", "--preload", "app:app"]
 
 

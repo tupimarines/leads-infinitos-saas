@@ -26,7 +26,7 @@ services:
     container_name: "leads_infinitos_web"
     ports:
       - "8000:8000"
-    command: gunicorn -b 0.0.0.0:8000 --timeout 360 --worker-class sync --workers 1 --max-requests 100 --max-requests-jitter 10 --preload app:app
+    command: gunicorn -b 0.0.0.0:8000 --timeout 600 --worker-class sync --workers 1 --max-requests 100 --max-requests-jitter 10 --preload app:app
     depends_on:
       migrate:
         condition: service_completed_successfully
