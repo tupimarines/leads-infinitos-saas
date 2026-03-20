@@ -203,36 +203,11 @@ def get_sent_today_count_by_instance(instance_id: int) -> int:
         conn.close()
 
 
-# Chunks de 30 msgs: até 8 por instância/dia = 240 msgs (permite Continuar ao longo do dia)
-UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY = 8
-
-
+# Limite de chunks por instância/dia removido para evitar travas.
+# Antes: 8 chunks/dia. Agora: sem limite (bloqueio só por chunk ativo).
 def can_create_campaign_today(instance_id: int) -> bool:
-    """
-    Retorna True se a instância ainda pode criar campanha (chunk) hoje.
-    Permite até UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY chunks por instância/dia.
-    """
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT u.email
-                FROM instances i
-                JOIN users u ON u.id = i.user_id
-                WHERE i.id = %s
-                LIMIT 1
-                """,
-                (instance_id,),
-            )
-            row = cur.fetchone() or {}
-        # Superadmin não fica limitado a 1 campanha/instância/dia.
-        if (row.get('email') or '').strip().lower() in [e.lower() for e in SUPER_ADMIN_EMAILS]:
-            return True
-    finally:
-        conn.close()
-
-    return get_sent_today_count_by_instance(instance_id) < UAZAPI_CHUNKS_PER_INSTANCE_PER_DAY
+    """Sempre permite criar chunks (limite diário removido)."""
+    return True
 
 
 def check_daily_limit(user_id: int, plan_limit: int) -> bool:

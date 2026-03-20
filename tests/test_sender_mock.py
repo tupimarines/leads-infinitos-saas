@@ -84,26 +84,11 @@ class TestLimitsPolicy(unittest.TestCase):
         self.assertIn("COALESCE(cl.current_step, 1) = 1", executed_sql)
         self.assertIn("COALESCE(cl.last_sent_stage, '') = 'initial'", executed_sql)
 
-    @patch('utils.limits.get_sent_today_count_by_instance', return_value=1)
-    @patch('utils.limits.get_db_connection')
-    def test_can_create_campaign_today_blocks_non_superadmin_when_limit_reached(
-        self, mock_conn, _mock_sent_count
-    ):
-        mock_cursor = MagicMock()
-        mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = {'email': 'cliente@empresa.com'}
+    def test_can_create_campaign_today_always_allows(self):
+        """Limite diário removido: sempre permite criar chunks."""
+        self.assertTrue(limits_module.can_create_campaign_today(instance_id=55))
 
-        self.assertFalse(limits_module.can_create_campaign_today(instance_id=55))
-
-    @patch('utils.limits.get_sent_today_count_by_instance', return_value=1)
-    @patch('utils.limits.get_db_connection')
-    def test_can_create_campaign_today_allows_superadmin_even_when_limit_reached(
-        self, mock_conn, _mock_sent_count
-    ):
-        mock_cursor = MagicMock()
-        mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = {'email': limits_module.SUPER_ADMIN_EMAILS[0]}
-
+    def test_can_create_campaign_today_allows_superadmin(self):
         self.assertTrue(limits_module.can_create_campaign_today(instance_id=55))
 
 if __name__ == '__main__':
