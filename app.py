@@ -2542,31 +2542,50 @@ def campaign_kanban_data(campaign_id):
             if inst and inst.get('apikey'):
                 from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
                 uazapi = UazapiService()
-                should_sync = True
                 with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
-                        """
-                        SELECT MAX(last_sync_at) AS last_sync_at
-                        FROM campaign_stage_sends
-                        WHERE campaign_id = %s
-                        """,
+                        """SELECT 1 FROM campaign_stage_sends
+                           WHERE campaign_id = %s AND status IN ('scheduled', 'running', 'partial')
+                           LIMIT 1""",
                         (campaign_id,),
                     )
-                    sync_row = cur.fetchone() or {}
-                last_sync_at = sync_row.get("last_sync_at")
-                if last_sync_at:
-                    now_utc = datetime.utcnow()
-                    should_sync = (now_utc - last_sync_at).total_seconds() >= (UAZAPI_SYNC_WEB_INTERVAL_MINUTES * 60)
-
-                if should_sync:
-                    sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
-                if campaign.uazapi_folder_id:
-                    counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
+                    has_active_chunks = cur.fetchone() is not None
+                if has_active_chunks:
+                    should_sync = True
+                    with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute(
+                            """SELECT MAX(last_sync_at) AS last_sync_at
+                               FROM campaign_stage_sends WHERE campaign_id = %s""",
+                            (campaign_id,),
+                        )
+                        sync_row = cur.fetchone() or {}
+                    last_sync_at = sync_row.get("last_sync_at")
+                    if last_sync_at:
+                        now_utc = datetime.utcnow()
+                        should_sync = (now_utc - last_sync_at).total_seconds() >= (UAZAPI_SYNC_WEB_INTERVAL_MINUTES * 60)
+                    if should_sync:
+                        sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
+                    if campaign.uazapi_folder_id:
+                        counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
+                        stats = {
+                            "sent": counts.get("sent", 0),
+                            "failed": counts.get("failed", 0),
+                            "scheduled": counts.get("scheduled", 0),
+                            "initial_campaign_finished": is_initial_campaign_finished(counts),
+                        }
+                elif campaign.uazapi_folder_id:
+                    with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute(
+                            """SELECT COALESCE(SUM(success_count), 0) AS sent, COALESCE(SUM(failed_count), 0) AS failed
+                               FROM campaign_stage_sends WHERE campaign_id = %s AND stage = 'initial'""",
+                            (campaign_id,),
+                        )
+                        row = cur.fetchone() or {}
                     stats = {
-                        "sent": counts.get("sent", 0),
-                        "failed": counts.get("failed", 0),
-                        "scheduled": counts.get("scheduled", 0),
-                        "initial_campaign_finished": is_initial_campaign_finished(counts),
+                        "sent": int(row.get("sent", 0)),
+                        "failed": int(row.get("failed", 0)),
+                        "scheduled": 0,
+                        "initial_campaign_finished": True,
                     }
         finally:
             conn_sync.close()
@@ -5140,21 +5159,14 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 "body": {"error": "Limite diário por instância atingido. Tente após meia-noite BRT."},
             }
 
-        # Máximo 1 chunk/dia/instância: bloqueia só se houver chunk bem-sucedido hoje.
-        # Chunk com status 'failed' permite retry (ex: mensagem não configurada, API erro).
+        # Bloqueia só se houver chunk ativo (não done/failed). Done permite próximo chunk.
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT instance_id FROM campaign_stage_sends
                 WHERE campaign_id = %s AND stage = 'initial'
                   AND instance_id = ANY(%s)
-                  AND (
-                    status IN ('scheduled', 'running', 'partial', 'queued')
-                    OR (
-                      (scheduled_for AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date
-                      AND status NOT IN ('failed')
-                    )
-                  )
+                  AND status IN ('scheduled', 'running', 'partial', 'queued')
                 """,
                 (campaign_id, [i["instance_id"] for i in allowed]),
             )
@@ -5165,7 +5177,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             return {
                 "ok": False,
                 "status_code": 409,
-                "body": {"error": "Já existe chunk agendado ou enviado com sucesso hoje para esta instância. Máximo 1 chunk/dia/instância. Chunks com falha permitem retry."},
+                "body": {"error": "Já existe chunk em andamento para esta instância. Aguarde conclusão ou falha."},
             }
 
         delay_min = int(campaign.get("delay_min_minutes") or 5)

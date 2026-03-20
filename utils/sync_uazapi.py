@@ -720,7 +720,11 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     updated_sent += n
 
     # 3) Fallback final por list_messages (status principal)
+    # list_messages serve só para atualizar quantitativo; pular quando não há chunks ativos
     if not folder_id:
+        conn.commit()
+        return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
+    if not stage_sends:
         conn.commit()
         return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
 
