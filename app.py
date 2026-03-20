@@ -122,536 +122,574 @@ def _get_user_plan_snapshot_for_limit(cur, user_id: int):
     }
 
 
+# Lock consultivo: serializa init_db entre réplicas web e evita deadlock DDL (AccessExclusive) vs workers (AccessShare).
+INIT_DB_ADVISORY_LOCK_KEY = 873920145
+
+
 def init_db() -> None:
+    """Migração idempotente com retry em deadlock (workers em paralelo)."""
+    from psycopg2 import errors as psycopg2_errors
+
+    last_err = None
+    for attempt in range(5):
+        try:
+            _init_db_body()
+            return
+        except psycopg2_errors.DeadlockDetected as e:
+            last_err = e
+            print(
+                f"⚠️ init_db: deadlock (tentativa {attempt + 1}/5). "
+                "Pausando workers ou aguardando — novo retry em ~2s..."
+            )
+            time.sleep(1.5 + random.uniform(0, 2.0))
+    print("❌ init_db: esgotadas tentativas após deadlock repetido.")
+    if last_err:
+        raise last_err
+    raise RuntimeError("init_db failed")
+
+
+def _init_db_body() -> None:
     print("🔄 Iniciando migração do banco de dados...")
     conn = get_db_connection()
     cur = conn.cursor()
+    cur.execute("SELECT pg_advisory_lock(%s)", (INIT_DB_ADVISORY_LOCK_KEY,))
+
+    try:
+        # Tabela de usuários
+        print("➡️ Verificando tabela users...")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_admin BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de usuários
-    print("➡️ Verificando tabela users...")
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            is_admin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Adicionar coluna is_admin se não existir (migração)
+        print("➡️ Adicionando coluna is_admin se necessário...")
+        cur.execute(
+            """
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
+            """
+        )
     
-    # Adicionar coluna is_admin se não existir (migração)
-    print("➡️ Adicionando coluna is_admin se necessário...")
-    cur.execute(
-        """
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
-        """
-    )
+        # Tabela de licenças
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS licenses (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                hotmart_purchase_id TEXT UNIQUE NOT NULL,
+                hotmart_product_id TEXT NOT NULL,
+                license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'infinite')),
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
+                purchase_date TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de licenças
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS licenses (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            hotmart_purchase_id TEXT UNIQUE NOT NULL,
-            hotmart_product_id TEXT NOT NULL,
-            license_type TEXT NOT NULL CHECK (license_type IN ('starter', 'pro', 'scale', 'infinite')),
-            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'cancelled')),
-            purchase_date TIMESTAMP NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Tabela de webhooks da Hotmart
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hotmart_webhooks (
+                id SERIAL PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                hotmart_purchase_id TEXT,
+                payload TEXT NOT NULL,
+                processed BOOLEAN DEFAULT FALSE,
+                processed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de webhooks da Hotmart
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hotmart_webhooks (
-            id SERIAL PRIMARY KEY,
-            event_type TEXT NOT NULL,
-            hotmart_purchase_id TEXT,
-            payload TEXT NOT NULL,
-            processed BOOLEAN DEFAULT FALSE,
-            processed_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Tabela de configurações da Hotmart
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hotmart_config (
+                id SERIAL PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                client_secret TEXT NOT NULL,
+                webhook_secret TEXT,
+                product_id TEXT NOT NULL,
+                sandbox_mode BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de configurações da Hotmart
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hotmart_config (
-            id SERIAL PRIMARY KEY,
-            client_id TEXT NOT NULL,
-            client_secret TEXT NOT NULL,
-            webhook_secret TEXT,
-            product_id TEXT NOT NULL,
-            sandbox_mode BOOLEAN DEFAULT FALSE,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Tabela de webhooks da Hubla
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hubla_webhooks (
+                id SERIAL PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                hubla_purchase_id TEXT,
+                payload TEXT NOT NULL,
+                processed BOOLEAN DEFAULT FALSE,
+                processed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de webhooks da Hubla
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hubla_webhooks (
-            id SERIAL PRIMARY KEY,
-            event_type TEXT NOT NULL,
-            hubla_purchase_id TEXT,
-            payload TEXT NOT NULL,
-            processed BOOLEAN DEFAULT FALSE,
-            processed_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Tabela de configurações da Hubla
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hubla_config (
+                id SERIAL PRIMARY KEY,
+                webhook_token TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                sandbox_mode BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de configurações da Hubla
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hubla_config (
-            id SERIAL PRIMARY KEY,
-            webhook_token TEXT NOT NULL,
-            product_id TEXT NOT NULL,
-            sandbox_mode BOOLEAN DEFAULT FALSE,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Tabela de reset de senha
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_resets (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                token TEXT UNIQUE NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de reset de senha
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS password_resets (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            token TEXT UNIQUE NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            used BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Tabela de jobs de scraping
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scraping_jobs (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                keyword TEXT NOT NULL,
+                locations TEXT NOT NULL,
+                total_results INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                progress INTEGER DEFAULT 0,
+                current_location TEXT,
+                results_path TEXT,
+                error_message TEXT,
+                lead_count INTEGER DEFAULT 0,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de jobs de scraping
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS scraping_jobs (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            keyword TEXT NOT NULL,
-            locations TEXT NOT NULL,
-            total_results INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
-            progress INTEGER DEFAULT 0,
-            current_location TEXT,
-            results_path TEXT,
-            error_message TEXT,
-            lead_count INTEGER DEFAULT 0,
-            started_at TIMESTAMP,
-            completed_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Adicionar coluna lead_count se ainda não existir (compatibilidade com DBs existentes)
+        cur.execute(
+            """
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='scraping_jobs' AND column_name='lead_count'
+                ) THEN
+                    ALTER TABLE scraping_jobs ADD COLUMN lead_count INTEGER DEFAULT 0;
+                END IF;
+            END $$;
+            """
+        )
+
+        # Permitir status 'cancelled' no scraping_jobs (botão Cancelar)
+        cur.execute(
+            """
+            ALTER TABLE scraping_jobs DROP CONSTRAINT IF EXISTS scraping_jobs_status_check;
+            ALTER TABLE scraping_jobs ADD CONSTRAINT scraping_jobs_status_check
+                CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'));
+            """
+        )
     
-    # Adicionar coluna lead_count se ainda não existir (compatibilidade com DBs existentes)
-    cur.execute(
-        """
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name='scraping_jobs' AND column_name='lead_count'
-            ) THEN
-                ALTER TABLE scraping_jobs ADD COLUMN lead_count INTEGER DEFAULT 0;
-            END IF;
-        END $$;
-        """
-    )
-
-    # Permitir status 'cancelled' no scraping_jobs (botão Cancelar)
-    cur.execute(
-        """
-        ALTER TABLE scraping_jobs DROP CONSTRAINT IF EXISTS scraping_jobs_status_check;
-        ALTER TABLE scraping_jobs ADD CONSTRAINT scraping_jobs_status_check
-            CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'));
-        """
-    )
+        # Criar índice para queries de agregação mensal
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_scraping_jobs_user_date 
+            ON scraping_jobs(user_id, created_at);
+            """
+        )
     
-    # Criar índice para queries de agregação mensal
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_scraping_jobs_user_date 
-        ON scraping_jobs(user_id, created_at);
-        """
-    )
+        # Tabela de histórico imutável de uso mensal (anti-bypass de limite)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS monthly_usage_history (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                cycle_start DATE NOT NULL,
+                cycle_end DATE NOT NULL,
+                leads_extracted INTEGER NOT NULL DEFAULT 0,
+                job_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Tabela de histórico imutável de uso mensal (anti-bypass de limite)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS monthly_usage_history (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            cycle_start DATE NOT NULL,
-            cycle_end DATE NOT NULL,
-            leads_extracted INTEGER NOT NULL DEFAULT 0,
-            job_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Índice para queries de limite mensal
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_monthly_usage_user_cycle 
+            ON monthly_usage_history(user_id, cycle_start);
+            """
+        )
+
+        # Tabela de instâncias do WhatsApp
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS instances (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                name TEXT NOT NULL,
+                server_url TEXT,
+                apikey TEXT,
+                status TEXT DEFAULT 'disconnected',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+
+        # Adicionar coluna api_provider (migração: MegaAPI vs Uazapi)
+        cur.execute(
+            """
+            ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_provider TEXT DEFAULT 'megaapi';
+            """
+        )
+
+        # Configuração de limite diário por instância (somente plano Infinite)
+        cur.execute(
+            """
+            ALTER TABLE instances ADD COLUMN IF NOT EXISTS daily_sends_per_instance INTEGER;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE instances DROP CONSTRAINT IF EXISTS instances_daily_sends_per_instance_check;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE instances ADD CONSTRAINT instances_daily_sends_per_instance_check
+            CHECK (
+                daily_sends_per_instance IS NULL
+                OR daily_sends_per_instance IN (10, 20, 30, 40, 50)
+            );
+            """
+        )
+
+        # Migração: remover instâncias MegaAPI do superadmin (manter apenas Uazapi)
+        print("➡️ Removendo instâncias MegaAPI do superadmin...")
+        cur.execute(
+            """
+            DELETE FROM instances
+            WHERE user_id IN (SELECT id FROM users WHERE email = ANY(%s))
+            AND (api_provider IS NULL OR api_provider != 'uazapi');
+            """,
+            (list(SUPER_ADMIN_EMAILS),),
+        )
+
+        # Migração: manter apenas planos ativos no CHECK de license_type
+        print("➡️ Atualizando constraint license_type para planos ativos...")
+        cur.execute("""
+            DO $$
+            DECLARE r RECORD;
+            BEGIN
+                FOR r IN (
+                    SELECT conname FROM pg_constraint c
+                    WHERE conrelid = 'public.licenses'::regclass AND contype = 'c'
+                    AND pg_get_constraintdef(c.oid) LIKE '%license_type%'
+                )
+                LOOP
+                    EXECUTE 'ALTER TABLE licenses DROP CONSTRAINT ' || quote_ident(r.conname);
+                END LOOP;
+            END $$;
+        """)
+        cur.execute("""
+            ALTER TABLE licenses ADD CONSTRAINT licenses_license_type_check
+            CHECK (license_type IN ('starter', 'starter_trial', 'pro', 'scale', 'infinite'));
+        """)
+
+        # Tabela de modelos de mensagem
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_templates (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+
+        # Tabela de campanhas
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                name TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                message_template TEXT,
+                daily_limit INTEGER DEFAULT 0,
+                closed_deals INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
     
-    # Índice para queries de limite mensal
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_monthly_usage_user_cycle 
-        ON monthly_usage_history(user_id, cycle_start);
-        """
-    )
+        # Adicionar coluna closed_deals se não existir (migração)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS closed_deals INTEGER DEFAULT 0;
+            """
+        )
 
-    # Tabela de instâncias do WhatsApp
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS instances (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            name TEXT NOT NULL,
-            server_url TEXT,
-            apikey TEXT,
-            status TEXT DEFAULT 'disconnected',
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Adicionar coluna sent_today se não existir (migração)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sent_today INTEGER DEFAULT 0;
+            """
+        )
 
-    # Adicionar coluna api_provider (migração: MegaAPI vs Uazapi)
-    cur.execute(
-        """
-        ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_provider TEXT DEFAULT 'megaapi';
-        """
-    )
-
-    # Configuração de limite diário por instância (somente plano Infinite)
-    cur.execute(
-        """
-        ALTER TABLE instances ADD COLUMN IF NOT EXISTS daily_sends_per_instance INTEGER;
-        """
-    )
-    cur.execute(
-        """
-        ALTER TABLE instances DROP CONSTRAINT IF EXISTS instances_daily_sends_per_instance_check;
-        """
-    )
-    cur.execute(
-        """
-        ALTER TABLE instances ADD CONSTRAINT instances_daily_sends_per_instance_check
-        CHECK (
-            daily_sends_per_instance IS NULL
-            OR daily_sends_per_instance IN (10, 20, 30, 40, 50)
-        );
-        """
-    )
-
-    # Migração: remover instâncias MegaAPI do superadmin (manter apenas Uazapi)
-    print("➡️ Removendo instâncias MegaAPI do superadmin...")
-    cur.execute(
-        """
-        DELETE FROM instances
-        WHERE user_id IN (SELECT id FROM users WHERE email = ANY(%s))
-        AND (api_provider IS NULL OR api_provider != 'uazapi');
-        """,
-        (list(SUPER_ADMIN_EMAILS),),
-    )
-
-    # Migração: manter apenas planos ativos no CHECK de license_type
-    print("➡️ Atualizando constraint license_type para planos ativos...")
-    cur.execute("""
-        DO $$
-        DECLARE r RECORD;
-        BEGIN
-            FOR r IN (
-                SELECT conname FROM pg_constraint c
-                WHERE conrelid = 'public.licenses'::regclass AND contype = 'c'
-                AND pg_get_constraintdef(c.oid) LIKE '%license_type%'
-            )
-            LOOP
-                EXECUTE 'ALTER TABLE licenses DROP CONSTRAINT ' || quote_ident(r.conname);
-            END LOOP;
-        END $$;
-    """)
-    cur.execute("""
-        ALTER TABLE licenses ADD CONSTRAINT licenses_license_type_check
-        CHECK (license_type IN ('starter', 'starter_trial', 'pro', 'scale', 'infinite'));
-    """)
-
-    # Tabela de modelos de mensagem
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS message_templates (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            name TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-
-    # Tabela de campanhas
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaigns (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            name TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            message_template TEXT,
-            daily_limit INTEGER DEFAULT 0,
-            closed_deals INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
+        # Adicionar coluna scheduled_start se não existir (migração)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMP;
+            """
+        )
     
-    # Adicionar coluna closed_deals se não existir (migração)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS closed_deals INTEGER DEFAULT 0;
-        """
-    )
-
-    # Adicionar coluna sent_today se não existir (migração)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sent_today INTEGER DEFAULT 0;
-        """
-    )
-
-    # Adicionar coluna scheduled_start se não existir (migração)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMP;
-        """
-    )
+        # Tabela de leads da campanha (Fila de Envio)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_leads (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+                phone TEXT NOT NULL,
+                name TEXT,
+                whatsapp_link TEXT,
+                status TEXT DEFAULT 'pending',
+                sent_at TIMESTAMP,
+                log TEXT
+            );
+            """
+        )
     
-    # Tabela de leads da campanha (Fila de Envio)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaign_leads (
-            id SERIAL PRIMARY KEY,
-            campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
-            phone TEXT NOT NULL,
-            name TEXT,
-            whatsapp_link TEXT,
-            status TEXT DEFAULT 'pending',
-            sent_at TIMESTAMP,
-            log TEXT
-        );
-        """
-    )
+        # Adicionar coluna whatsapp_link se não existir (migração)
+        cur.execute(
+            """
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS whatsapp_link TEXT;
+            """
+        )
+
+        # Adicionar coluna sent_by_instance para rastrear qual instância enviou (migração)
+        cur.execute(
+            """
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS sent_by_instance VARCHAR(255);
+            """
+        )
+
+        # Tabela de junção: instâncias vinculadas a campanhas (multi-instance)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_instances (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                UNIQUE(campaign_id, instance_id)
+            );
+            """
+        )
+
+        # Adicionar coluna rotation_mode em campaigns (migração)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS rotation_mode TEXT DEFAULT 'single';
+            """
+        )
+
+        # ============================================================
+        # CADENCE FEATURE MIGRATIONS
+        # ============================================================
+
+        # Cadence toggle + config on campaigns
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS enable_cadence BOOLEAN DEFAULT FALSE;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS cadence_config JSONB DEFAULT '{}';
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS terms_accepted BOOLEAN DEFAULT FALSE;
+            """
+        )
+
+        # Campaign Steps table — stores message content per cadence step
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_steps (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                step_number INTEGER NOT NULL,
+                step_label TEXT NOT NULL DEFAULT '',
+                message_template TEXT NOT NULL DEFAULT '[]',
+                media_path TEXT,
+                media_type TEXT,
+                delay_days INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(campaign_id, step_number)
+            );
+            """
+        )
+
+        # Cadence tracking columns on campaign_leads
+        cur.execute(
+            """
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS current_step INTEGER DEFAULT 1;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS cadence_status TEXT DEFAULT 'pending';
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMP;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_message_sent_at TIMESTAMP;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS chatwoot_conversation_id INTEGER;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS campaign_tags TEXT[] DEFAULT '{}';
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS notes TEXT;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS send_batch INTEGER DEFAULT NULL;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_stage TEXT;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_instance_id INTEGER;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_instance_remote_jid TEXT;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_folder_id TEXT;
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS removed_from_funnel BOOLEAN DEFAULT FALSE;
+            """
+        )
+
+        # uazapi_last_send_lead_ids para sync via listfolders (F9)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS uazapi_last_send_lead_ids JSONB;
+            """
+        )
+
+        # Tabela para rastrear 1 campanha por instância por dia (F2)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uazapi_instance_sends (
+                id SERIAL PRIMARY KEY,
+                instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            """
+        )
+
+        # Tracking de envios por etapa/instância (redesenho funil completo Uazapi)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_stage_sends (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                stage TEXT NOT NULL,
+                instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                instance_remote_jid TEXT,
+                uazapi_folder_id TEXT,
+                scheduled_for TIMESTAMP,
+                status TEXT DEFAULT 'scheduled',
+                planned_count INTEGER DEFAULT 0,
+                success_count INTEGER DEFAULT 0,
+                failed_count INTEGER DEFAULT 0,
+                lead_ids JSONB,
+                delay_min_minutes INTEGER,
+                delay_max_minutes INTEGER,
+                message_variations JSONB,
+                last_sync_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            );
+            ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
+            ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
+            ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS message_variations JSONB;
+            CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_campaign_stage
+                ON campaign_stage_sends(campaign_id, stage);
+            CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_folder_id
+                ON campaign_stage_sends(uazapi_folder_id);
+            CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_status
+                ON campaign_stage_sends(status);
+            CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_schedule
+                ON campaign_stage_sends(scheduled_for);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_stage_sends_window
+                ON campaign_stage_sends(campaign_id, stage, instance_id, scheduled_for)
+                WHERE scheduled_for IS NOT NULL AND status = 'scheduled';
+            """
+        )
+
+        # ============================================================
+        # END CADENCE FEATURE MIGRATIONS
+        # ============================================================
+
+        # ============================================================
+        # UAZAPI CAMPAIGN API MIGRATIONS
+        # ============================================================
+
+        # Colunas para campanhas via API Uazapi (envio em massa avançado)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS uazapi_folder_id TEXT;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS use_uazapi_sender BOOLEAN DEFAULT false;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
+            """
+        )
+
+        # Horário comercial configurável por campanha (faixa de horários + sábado/domingo)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_hour_start INTEGER DEFAULT 8;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_hour_end INTEGER DEFAULT 20;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_saturday BOOLEAN DEFAULT false;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_sunday BOOLEAN DEFAULT false;
+            """
+        )
+
+        # ============================================================
+        # END UAZAPI CAMPAIGN API MIGRATIONS
+        # ============================================================
+
+        # Inserir configuração inicial da Hotmart se não existir
+        cur.execute(
+            """
+            INSERT INTO hotmart_config 
+            (client_id, client_secret, product_id, sandbox_mode) 
+            VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """,
+            ('cb6bcde6-24cd-464f-80f3-e4efce3f048c', '7ee4a93d-1aec-473b-a8e6-1d0a813382e2', '5974664', True)
+        )
     
-    # Adicionar coluna whatsapp_link se não existir (migração)
-    cur.execute(
-        """
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS whatsapp_link TEXT;
-        """
-    )
-
-    # Adicionar coluna sent_by_instance para rastrear qual instância enviou (migração)
-    cur.execute(
-        """
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS sent_by_instance VARCHAR(255);
-        """
-    )
-
-    # Tabela de junção: instâncias vinculadas a campanhas (multi-instance)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaign_instances (
-            id SERIAL PRIMARY KEY,
-            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-            instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
-            UNIQUE(campaign_id, instance_id)
-        );
-        """
-    )
-
-    # Adicionar coluna rotation_mode em campaigns (migração)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS rotation_mode TEXT DEFAULT 'single';
-        """
-    )
-
-    # ============================================================
-    # CADENCE FEATURE MIGRATIONS
-    # ============================================================
-
-    # Cadence toggle + config on campaigns
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS enable_cadence BOOLEAN DEFAULT FALSE;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS cadence_config JSONB DEFAULT '{}';
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS terms_accepted BOOLEAN DEFAULT FALSE;
-        """
-    )
-
-    # Campaign Steps table — stores message content per cadence step
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaign_steps (
-            id SERIAL PRIMARY KEY,
-            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-            step_number INTEGER NOT NULL,
-            step_label TEXT NOT NULL DEFAULT '',
-            message_template TEXT NOT NULL DEFAULT '[]',
-            media_path TEXT,
-            media_type TEXT,
-            delay_days INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(campaign_id, step_number)
-        );
-        """
-    )
-
-    # Cadence tracking columns on campaign_leads
-    cur.execute(
-        """
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS current_step INTEGER DEFAULT 1;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS cadence_status TEXT DEFAULT 'pending';
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMP;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_message_sent_at TIMESTAMP;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS chatwoot_conversation_id INTEGER;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS campaign_tags TEXT[] DEFAULT '{}';
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS notes TEXT;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS send_batch INTEGER DEFAULT NULL;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_stage TEXT;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_instance_id INTEGER;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_instance_remote_jid TEXT;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS last_sent_folder_id TEXT;
-        ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS removed_from_funnel BOOLEAN DEFAULT FALSE;
-        """
-    )
-
-    # uazapi_last_send_lead_ids para sync via listfolders (F9)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS uazapi_last_send_lead_ids JSONB;
-        """
-    )
-
-    # Tabela para rastrear 1 campanha por instância por dia (F2)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS uazapi_instance_sends (
-            id SERIAL PRIMARY KEY,
-            instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
-            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """
-    )
-
-    # Tracking de envios por etapa/instância (redesenho funil completo Uazapi)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS campaign_stage_sends (
-            id SERIAL PRIMARY KEY,
-            campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-            stage TEXT NOT NULL,
-            instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
-            instance_remote_jid TEXT,
-            uazapi_folder_id TEXT,
-            scheduled_for TIMESTAMP,
-            status TEXT DEFAULT 'scheduled',
-            planned_count INTEGER DEFAULT 0,
-            success_count INTEGER DEFAULT 0,
-            failed_count INTEGER DEFAULT 0,
-            lead_ids JSONB,
-            delay_min_minutes INTEGER,
-            delay_max_minutes INTEGER,
-            message_variations JSONB,
-            last_sync_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        );
-        ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
-        ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
-        ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS message_variations JSONB;
-        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_campaign_stage
-            ON campaign_stage_sends(campaign_id, stage);
-        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_folder_id
-            ON campaign_stage_sends(uazapi_folder_id);
-        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_status
-            ON campaign_stage_sends(status);
-        CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_schedule
-            ON campaign_stage_sends(scheduled_for);
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_stage_sends_window
-            ON campaign_stage_sends(campaign_id, stage, instance_id, scheduled_for)
-            WHERE scheduled_for IS NOT NULL AND status = 'scheduled';
-        """
-    )
-
-    # ============================================================
-    # END CADENCE FEATURE MIGRATIONS
-    # ============================================================
-
-    # ============================================================
-    # UAZAPI CAMPAIGN API MIGRATIONS
-    # ============================================================
-
-    # Colunas para campanhas via API Uazapi (envio em massa avançado)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS uazapi_folder_id TEXT;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS use_uazapi_sender BOOLEAN DEFAULT false;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
-        """
-    )
-
-    # Horário comercial configurável por campanha (faixa de horários + sábado/domingo)
-    cur.execute(
-        """
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_hour_start INTEGER DEFAULT 8;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_hour_end INTEGER DEFAULT 20;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_saturday BOOLEAN DEFAULT false;
-        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS send_sunday BOOLEAN DEFAULT false;
-        """
-    )
-
-    # ============================================================
-    # END UAZAPI CAMPAIGN API MIGRATIONS
-    # ============================================================
-
-    # Inserir configuração inicial da Hotmart se não existir
-    cur.execute(
-        """
-        INSERT INTO hotmart_config 
-        (client_id, client_secret, product_id, sandbox_mode) 
-        VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
-        """,
-        ('cb6bcde6-24cd-464f-80f3-e4efce3f048c', '7ee4a93d-1aec-473b-a8e6-1d0a813382e2', '5974664', True)
-    )
+        # Inserir configuração inicial da Hubla se não existir
+        cur.execute(
+            """
+            INSERT INTO hubla_config 
+            (webhook_token, product_id, sandbox_mode) 
+            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            """,
+            ('your-hubla-webhook-token', 'your-hubla-product-id', True)
+        )
     
-    # Inserir configuração inicial da Hubla se não existir
-    cur.execute(
-        """
-        INSERT INTO hubla_config 
-        (webhook_token, product_id, sandbox_mode) 
-        VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
-        """,
-        ('your-hubla-webhook-token', 'your-hubla-product-id', True)
-    )
-    
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except BaseException:
+            pass
 
 
 class User(UserMixin):
