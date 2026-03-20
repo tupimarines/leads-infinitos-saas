@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 import redis
 from rq import Queue
 import psycopg2
+from psycopg2 import sql as psycopg2_sql
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from main import run_scraper_with_progress
@@ -126,6 +127,47 @@ def _get_user_plan_snapshot_for_limit(cur, user_id: int):
 INIT_DB_ADVISORY_LOCK_KEY = 873920145
 
 
+def _init_db_lock_hot_tables(cur) -> None:
+    """
+    ACCESS EXCLUSIVE em ordem alfabética nas tabelas que workers e DDL disputam.
+    Workers ficam em fila até o fim da transação de migração — evita deadlock.
+    Em DB vazio (primeiro deploy), nenhuma tabela existe ainda; locks são no-op.
+    """
+    want = (
+        "campaign_instances",
+        "campaign_leads",
+        "campaigns",
+        "campaign_stage_sends",
+        "instances",
+        "licenses",
+        "users",
+    )
+    cur.execute(
+        """
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND c.relname = ANY(%s)
+        ORDER BY 1
+        """,
+        (list(want),),
+    )
+    existing = [r[0] for r in cur.fetchall()]
+    if not existing:
+        return
+    print(
+        f"➡️ LOCK em {len(existing)} tabela(s) — workers aguardam até o fim da migração..."
+    )
+    for t in existing:
+        cur.execute(
+            psycopg2_sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(
+                psycopg2_sql.Identifier(t)
+            )
+        )
+
+
 def init_db() -> None:
     """Migração idempotente com retry em deadlock (workers em paralelo)."""
     from psycopg2 import errors as psycopg2_errors
@@ -155,6 +197,7 @@ def _init_db_body() -> None:
     cur.execute("SELECT pg_advisory_lock(%s)", (INIT_DB_ADVISORY_LOCK_KEY,))
 
     try:
+        _init_db_lock_hot_tables(cur)
         # Tabela de usuários
         print("➡️ Verificando tabela users...")
         cur.execute(
