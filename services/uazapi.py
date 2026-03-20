@@ -404,19 +404,31 @@ class UazapiService:
             payload["pageSize"] = page_size
         ctx_str = f" {context}" if context else ""
 
+        def _is_400_folder_gone(resp) -> bool:
+            if resp is None or resp.status_code != 400:
+                return False
+            body = (getattr(resp, "text", None) or "")[:200].lower()
+            return "folder not found" in body or "access denied" in body
+
         try:
             response = requests.post(
                 url, json=payload, headers=headers, timeout=15
             )
+            if response.status_code == 400 and _is_400_folder_gone(response):
+                return None  # pasta archived/removida — silencioso para evitar flood
+            if response.status_code == 400:
+                print(f"❌ [Uazapi] list_messages 400{ctx_str}: {(response.text or '')[:200]}")
+                return None
             if response.status_code != 200:
-                print(
-                    f"❌ [Uazapi] list_messages Status: {response.status_code}{ctx_str}"
-                )
+                print(f"❌ [Uazapi] list_messages Status: {response.status_code}{ctx_str}")
                 print(f"❌ [Uazapi] list_messages Body: {response.text}")
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
+            resp = getattr(e, "response", None)
+            if _is_400_folder_gone(resp):
+                return None  # silencioso
             print(f"❌ [Uazapi] Error listing messages: {e}{ctx_str}")
-            if hasattr(e, "response") and e.response is not None:
-                print(f"❌ [Uazapi] Response: {e.response.text}")
+            if resp is not None:
+                print(f"❌ [Uazapi] Response: {resp.text}")
             return None

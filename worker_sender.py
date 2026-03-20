@@ -708,15 +708,18 @@ def _sync_uazapi_usage(conn):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT c.id AS campaign_id, c.uazapi_folder_id, i.apikey
+            SELECT DISTINCT c.id AS campaign_id, c.uazapi_folder_id, i.apikey
             FROM campaigns c
             JOIN campaign_instances ci ON ci.campaign_id = c.id
             JOIN instances i ON i.id = ci.instance_id
+            JOIN campaign_stage_sends css ON css.campaign_id = c.id
             WHERE c.status IN ('pending', 'running', 'completed')
               AND c.use_uazapi_sender = TRUE
               AND c.uazapi_folder_id IS NOT NULL
               AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
               AND i.apikey IS NOT NULL
+              AND css.status IN ('scheduled', 'running', 'partial')
+              AND css.uazapi_folder_id IS NOT NULL
             ORDER BY c.id ASC
             """
         )
