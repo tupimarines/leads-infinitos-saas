@@ -200,7 +200,7 @@ def get_uazapi_campaign_counts(uazapi_service, token, folder_id, context=None):
         page_size = 500
         while True:
             resp = uazapi_service.list_messages(
-                token, folder_id, message_status=message_status, page=page, page_size=page_size
+                token, folder_id, message_status=message_status, page=page, page_size=page_size, context=context
             )
             if not resp:
                 break
@@ -237,7 +237,7 @@ def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status,
     page_size = 500
     while True:
         resp = uazapi_service.list_messages(
-            token, folder_id, message_status=message_status, page=page, page_size=page_size
+            token, folder_id, message_status=message_status, page=page, page_size=page_size, context=context
         )
         if not resp:
             break
@@ -368,7 +368,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             continue
 
         ctx = {"campaign_id": campaign_id, "instance_id": send.get("instance_id")}
-        folders_list = uazapi_service.list_folders(send_token) or []
+        folders_list = uazapi_service.list_folders(send_token, context=ctx) or []
         folder_info = None
         for f in folders_list:
             cur_fid = _normalize_folder_id(f.get("id") or f.get("folder_id") or f.get("folderId"))
@@ -640,16 +640,14 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
 
         effective_success = max(log_success, reconciled_success)
         effective_failed = max(log_failed, reconciled_failed)
-        reconciled_total = effective_success + effective_failed
 
-        # Regra estrita de conclusão: só fecha done quando list_folders confirma status done
-        # e sucesso >= planejado para o send da instância.
-        if status == "done" and planned_count > 0 and reconciled_total >= planned_count:
+        # list_folders é fonte de verdade: quando status=done, marcar done no DB.
+        # Não depende de list_messages (que pode falhar com 401/400 em pastas archived).
+        _api_done = status in ("done", "concluído", "completed", "concluido")
+        if _api_done:
             normalized_status = "done"
         elif status in ("failed", "error", "cancelled", "canceled") and log_success == 0:
             normalized_status = "failed"
-        elif status == "done" and planned_count > 0 and reconciled_total < planned_count:
-            normalized_status = "inconsistent"
         elif effective_success > 0 or effective_failed > 0:
             normalized_status = "partial"
         else:
@@ -694,7 +692,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             lead_ids_by_step[i + 1] = ids if isinstance(ids, list) else []
 
     ctx_legacy = {"campaign_id": campaign_id}
-    folders_list = uazapi_service.list_folders(token) if folder_id else None
+    folders_list = uazapi_service.list_folders(token, context=ctx_legacy) if folder_id else None
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         if folders_list and folder_id and lead_ids_by_step.get(1):
             n = _sync_folder_via_listfolders(

@@ -7,9 +7,14 @@ deletar e enviar mensagens. URL base via UAZAPI_URL; admintoken via UAZAPI_ADMIN
 
 import json
 import os
+import time
 from typing import Any, Optional, Tuple
 
 import requests
+
+# Rate limit para log de 401: uma vez por instance_id a cada 5 min
+_401_log_last: dict[tuple, float] = {}
+_401_LOG_INTERVAL_SEC = 300
 
 
 class UazapiService:
@@ -358,10 +363,37 @@ class UazapiService:
             params["status"] = status
         ctx_str = f" {context}" if context else ""
 
+        def _should_silent_return(resp) -> bool:
+            if resp is None:
+                return False
+            if resp.status_code == 401:
+                body = (getattr(resp, "text", None) or "").lower()
+                if "invalid token" in body:
+                    return True
+            if resp.status_code == 400:
+                body = (getattr(resp, "text", None) or "").lower()
+                if "folder not found" in body or "access denied" in body:
+                    return True
+            return False
+
+        def _maybe_log_401(resp, ctx: Optional[dict], endpoint: str) -> None:
+            if resp is None or resp.status_code != 401:
+                return
+            inst_id = (ctx or {}).get("instance_id")
+            key = ("inst", inst_id) if inst_id is not None else ("legacy", (ctx or {}).get("campaign_id"))
+            now = time.monotonic()
+            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
+                _401_log_last[key] = now
+                msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={key[1]}" if key[1] is not None else "instância"
+                print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
+
         try:
             response = requests.get(
                 url, headers=headers, params=params or None, timeout=15
             )
+            if _should_silent_return(response):
+                _maybe_log_401(response, context, "list_folders")
+                return None
             if response.status_code != 200:
                 print(
                     f"❌ [Uazapi] list_folders Status: {response.status_code}{ctx_str}"
@@ -370,9 +402,13 @@ class UazapiService:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
+            resp = getattr(e, "response", None)
+            if _should_silent_return(resp):
+                _maybe_log_401(resp, context, "list_folders")
+                return None
             print(f"❌ [Uazapi] Error listing folders: {e}{ctx_str}")
-            if hasattr(e, "response") and e.response is not None:
-                print(f"❌ [Uazapi] Response: {e.response.text}")
+            if resp is not None:
+                print(f"❌ [Uazapi] Response: {resp.text}")
             return None
 
     def list_messages(
@@ -404,18 +440,37 @@ class UazapiService:
             payload["pageSize"] = page_size
         ctx_str = f" {context}" if context else ""
 
-        def _is_400_folder_gone(resp) -> bool:
-            if resp is None or resp.status_code != 400:
+        def _should_silent_return(resp) -> bool:
+            if resp is None:
                 return False
-            body = (getattr(resp, "text", None) or "")[:200].lower()
-            return "folder not found" in body or "access denied" in body
+            if resp.status_code == 401:
+                body = (getattr(resp, "text", None) or "").lower()
+                if "invalid token" in body:
+                    return True
+            if resp.status_code == 400:
+                body = (getattr(resp, "text", None) or "").lower()
+                if "folder not found" in body or "access denied" in body:
+                    return True
+            return False
+
+        def _maybe_log_401(resp, ctx: Optional[dict], endpoint: str) -> None:
+            if resp is None or resp.status_code != 401:
+                return
+            inst_id = (ctx or {}).get("instance_id")
+            key = ("inst", inst_id) if inst_id is not None else ("legacy", (ctx or {}).get("campaign_id"))
+            now = time.monotonic()
+            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
+                _401_log_last[key] = now
+                msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={key[1]}" if key[1] is not None else "instância"
+                print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
 
         try:
             response = requests.post(
                 url, json=payload, headers=headers, timeout=15
             )
-            if response.status_code == 400 and _is_400_folder_gone(response):
-                return None  # pasta archived/removida — silencioso para evitar flood
+            if _should_silent_return(response):
+                _maybe_log_401(response, context, "list_messages")
+                return None
             if response.status_code == 400:
                 print(f"❌ [Uazapi] list_messages 400{ctx_str}: {(response.text or '')[:200]}")
                 return None
@@ -426,8 +481,9 @@ class UazapiService:
             return response.json()
         except requests.exceptions.RequestException as e:
             resp = getattr(e, "response", None)
-            if _is_400_folder_gone(resp):
-                return None  # silencioso
+            if _should_silent_return(resp):
+                _maybe_log_401(resp, context, "list_messages")
+                return None
             print(f"❌ [Uazapi] Error listing messages: {e}{ctx_str}")
             if resp is not None:
                 print(f"❌ [Uazapi] Response: {resp.text}")

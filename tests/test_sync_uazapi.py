@@ -172,11 +172,11 @@ class TestSyncCampaignLeadsFromUazapi:
                 self.committed = True
 
         class _FakeUazapiService:
-            def list_folders(self, _token):
+            def list_folders(self, _token, context=None):
                 # Força fallback list_messages (folder não encontrado)
                 return [{"id": "another-folder", "status": "running"}]
 
-            def list_messages(self, _token, _folder_id, message_status=None, page=1, page_size=500):
+            def list_messages(self, _token, _folder_id, message_status=None, page=1, page_size=500, context=None):
                 if message_status == "Sent":
                     return {"messages": [{"chatid": "5511999999999@s.whatsapp.net"}], "pagination": {"lastPage": 1}}
                 if message_status == "Failed":
