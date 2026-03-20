@@ -251,6 +251,8 @@ class UazapiService:
                 print(f"❌ [Uazapi] check_phone Body: {response.text}")
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError:
+            raise  # Propagar 503/WhatsApp disconnected para caller trocar instância
         except requests.exceptions.RequestException as e:
             print(f"❌ [Uazapi] Error checking phone: {e}")
             if hasattr(e, "response") and e.response is not None:

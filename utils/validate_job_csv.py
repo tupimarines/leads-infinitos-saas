@@ -45,6 +45,44 @@ def _get_uazapi_token_for_user(conn, user_id):
     return row[0] if row and row[0] else None
 
 
+def _get_connected_uazapi_token_for_user(conn, user_id):
+    """
+    Obtém apikey de uma instância Uazapi CONECTADA do usuário.
+    Faz check status em cada instância e retorna a primeira conectada.
+    Retorna None se nenhuma estiver conectada.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, name, apikey FROM instances
+            WHERE user_id = %s AND COALESCE(api_provider, 'megaapi') = 'uazapi'
+            ORDER BY id ASC
+            """,
+            (user_id,),
+        )
+        instances = cur.fetchall() or []
+    if not instances:
+        return None
+    from services.uazapi import UazapiService
+    uazapi = UazapiService()
+    for inst in instances:
+        apikey = inst.get("apikey")
+        if not apikey:
+            continue
+        try:
+            resp = uazapi.get_status(apikey)
+            if not resp:
+                continue
+            status = (resp.get("instance") or resp).get("status") or ""
+            if str(status).lower() in ("connected", "open"):
+                print(f"[validate_job_csv] usando instância conectada: {inst.get('name', inst.get('id'))}")
+                return apikey
+        except Exception:
+            continue
+    print(f"[validate_job_csv] nenhuma instância Uazapi conectada (check status em {len(instances)} instância(s))")
+    return None
+
+
 def _normalize_phone_for_api(phone):
     """
     Normaliza número para API Uazapi.
@@ -211,9 +249,9 @@ def validate_job_csv(job_id, user_id, file_path=None):
             print(f"[validate_job_csv] job_id={job_id} skip: no rows with valid phone")
             return None
 
-        token = _get_uazapi_token_for_user(conn, user_id)
+        token = _get_connected_uazapi_token_for_user(conn, user_id)
         if not token:
-            print(f"[validate_job_csv] job_id={job_id} skip: no Uazapi instance")
+            print(f"[validate_job_csv] job_id={job_id} skip: no Uazapi instance conectada")
             return None
 
         from services.uazapi import UazapiService
@@ -238,10 +276,18 @@ def validate_job_csv(job_id, user_id, file_path=None):
             numbers = [p for _, _, p in batch]
             result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)
             if result is None:
-                batches_skipped += 1
-                print(f"[validate_job_csv] job_id={job_id} batch {batch_num}/{total_batches} FALHOU ({err}), retry em 5s")
-                time.sleep(5)  # Backoff extra após falha (504) antes do próximo batch
-                continue
+                # 503/WhatsApp disconnected: tentar outra instância conectada
+                if err and ("503" in str(err) or "disconnected" in str(err).lower()):
+                    new_token = _get_connected_uazapi_token_for_user(conn, user_id)
+                    if new_token and new_token != token:
+                        token = new_token
+                        print(f"[validate_job_csv] job_id={job_id} batch {batch_num}: trocando para instância conectada, retry")
+                        result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)
+                if result is None:
+                    batches_skipped += 1
+                    print(f"[validate_job_csv] job_id={job_id} batch {batch_num}/{total_batches} FALHOU ({err}), retry em 5s")
+                    time.sleep(5)  # Backoff extra após falha (504) antes do próximo batch
+                    continue
             if batch_num % LOG_EVERY == 0 or batch_num == total_batches:
                 print(f"[validate_job_csv] job_id={job_id} batch {batch_num}/{total_batches} ({min(i+BATCH_SIZE, len(rows))}/{len(rows)} nums)")
             for j, item in enumerate(result):
