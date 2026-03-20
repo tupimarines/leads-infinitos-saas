@@ -335,8 +335,8 @@ def _resolve_uazapi_remote_jid(token):
 
 def _load_step_messages(conn, campaign_id, step):
     """
-    Carrega mensagens do step. Fonte exclusiva: campaign_steps (Kanban/edit).
-    Sem fallback campaigns.message_template — se vazio, retorna [] e a campanha não é criada.
+    Carrega mensagens do step. Fonte: campaign_steps; fallback: campaigns.message_template
+    (mensagens da criação da campanha, visíveis na edição).
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -344,17 +344,37 @@ def _load_step_messages(conn, campaign_id, step):
             (campaign_id, step),
         )
         row = cur.fetchone() or {}
-    raw = row.get("message_template") or "[]"
+    raw = row.get("message_template") or ""
+    msgs = _parse_message_template(raw)
+    if msgs:
+        return msgs
+    # Fallback: campaigns.message_template (criação/edição antiga)
+    if step == 1:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT message_template FROM campaigns WHERE id = %s LIMIT 1",
+                (campaign_id,),
+            )
+            row = cur.fetchone() or {}
+        raw = row.get("message_template") or ""
+        msgs = _parse_message_template(raw)
+    return msgs or []
+
+
+def _parse_message_template(raw):
+    """Parse message_template (JSON list ou string) em lista de mensagens."""
+    if not raw or not str(raw).strip():
+        return []
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
             msgs = [str(x).strip() for x in parsed if str(x).strip()]
-            if msgs:
-                return msgs
+            return msgs if msgs else []
         if isinstance(parsed, str) and parsed.strip():
             return [parsed.strip()]
     except Exception:
-        pass
+        if isinstance(raw, str) and raw.strip():
+            return [raw.strip()]
     return []
 
 
