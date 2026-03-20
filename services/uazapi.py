@@ -335,11 +335,12 @@ class UazapiService:
             return None
 
     def list_folders(
-        self, token: str, status: Optional[str] = None
+        self, token: str, status: Optional[str] = None, context: Optional[dict] = None
     ) -> Optional[list[dict[str, Any]]]:
         """
         Lista campanhas via GET /sender/listfolders.
         status: "Active" | "Archived" (opcional).
+        context: dict opcional (campaign_id, instance_id) para logs de erro.
         Retorna array de pastas/campanhas.
         """
         url = f"{self.base_url}/sender/listfolders"
@@ -347,6 +348,7 @@ class UazapiService:
         params: dict[str, str] = {}
         if status is not None:
             params["status"] = status
+        ctx_str = f" {context}" if context else ""
 
         try:
             response = requests.get(
@@ -354,13 +356,13 @@ class UazapiService:
             )
             if response.status_code != 200:
                 print(
-                    f"❌ [Uazapi] list_folders Status: {response.status_code}"
+                    f"❌ [Uazapi] list_folders Status: {response.status_code}{ctx_str}"
                 )
                 print(f"❌ [Uazapi] list_folders Body: {response.text}")
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"❌ [Uazapi] Error listing folders: {e}")
+            print(f"❌ [Uazapi] Error listing folders: {e}{ctx_str}")
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
             return None
@@ -372,10 +374,12 @@ class UazapiService:
         message_status: Optional[str] = None,
         page: Optional[int] = None,
         page_size: Optional[int] = None,
+        context: Optional[dict] = None,
     ) -> Optional[dict[str, Any]]:
         """
         Lista mensagens de campanha via POST /sender/listmessages.
         message_status: "Scheduled" | "Sent" | "Failed" (opcional).
+        context: dict opcional (campaign_id, instance_id) para logs de erro.
         Retorna dict com messages (array) e pagination.
         """
         url = f"{self.base_url}/sender/listmessages"
@@ -390,6 +394,7 @@ class UazapiService:
             payload["page"] = page
         if page_size is not None:
             payload["pageSize"] = page_size
+        ctx_str = f" {context}" if context else ""
 
         try:
             response = requests.post(
@@ -397,13 +402,13 @@ class UazapiService:
             )
             if response.status_code != 200:
                 print(
-                    f"❌ [Uazapi] list_messages Status: {response.status_code}"
+                    f"❌ [Uazapi] list_messages Status: {response.status_code}{ctx_str}"
                 )
                 print(f"❌ [Uazapi] list_messages Body: {response.text}")
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"❌ [Uazapi] Error listing messages: {e}")
+            print(f"❌ [Uazapi] Error listing messages: {e}{ctx_str}")
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
             return None
