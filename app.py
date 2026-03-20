@@ -5005,11 +5005,29 @@ def get_campaign_stats(campaign_id):
         
         conversion_rate = round((closed_deals / sent * 100), 1) if sent > 0 else 0
         
+        has_scheduled_chunk = False
+        if campaign.get('use_uazapi_sender') and campaign.get('enable_cadence'):
+            conn_sched = get_db_connection()
+            try:
+                with conn_sched.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT 1 FROM campaign_stage_sends
+                        WHERE campaign_id = %s AND stage = 'initial' AND status = 'scheduled'
+                        LIMIT 1
+                        """,
+                        (campaign_id,),
+                    )
+                    has_scheduled_chunk = cur.fetchone() is not None
+            finally:
+                conn_sched.close()
+
         result = {
             "total_leads": total_leads,
             "sent": sent,
             "pending": pending,
             "pending_initial": int(stats.get('pending_initial') or 0),
+            "has_scheduled_chunk": has_scheduled_chunk,
             "failed": failed,
             "invalid": stats['invalid'] or 0,
             "closed_deals": closed_deals,
@@ -5098,9 +5116,10 @@ def sync_campaign_uazapi_stats(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
-def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initial-chunk"):
+def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initial-chunk", cancel_scheduled=False):
     """
     Agenda campaign_stage_sends (initial) e materializa na hora via worker_cadence (force_send_ids).
+    cancel_scheduled: se True, cancela chunks agendados (status=scheduled) antes de criar novo.
     Retorna dict: ok (bool), status_code, body (dict JSON-serializável).
     """
     try:
@@ -5158,6 +5177,20 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 "status_code": 429,
                 "body": {"error": "Limite diário por instância atingido. Tente após meia-noite BRT."},
             }
+
+        # cancel_scheduled: cancela chunks agendados para liberar slot imediato
+        if cancel_scheduled:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW()
+                    WHERE campaign_id = %s AND stage = 'initial' AND status = 'scheduled'
+                    """,
+                    (campaign_id,),
+                )
+                if cur.rowcount > 0:
+                    print(f"[UAZAPI] {log_label} campaign_id={campaign_id}: cancelados {cur.rowcount} chunk(s) agendado(s)")
+            conn.commit()
 
         # Bloqueia só se houver chunk ativo (não done/failed). Done permite próximo chunk.
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5301,10 +5334,16 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
 @login_required
 def continue_initial_chunk(campaign_id):
     """
-    Próximo chunk inicial (30 msgs): grava campaign_stage_sends e materializa na hora (POST /sender/advanced),
-    sem depender exclusivamente do worker nem da janela 2–5 min.
+    Próximo chunk inicial (30 msgs): grava campaign_stage_sends e materializa na hora (POST /sender/advanced).
+    Body: {"cancel_scheduled": true} — cancela chunks agendados e cria novo para início imediato.
     """
-    r = _continue_initial_chunk_core(campaign_id, current_user.id, log_label="continue-initial-chunk")
+    data = request.get_json(silent=True) or {}
+    cancel_scheduled = data.get("cancel_scheduled") is True
+    r = _continue_initial_chunk_core(
+        campaign_id, current_user.id,
+        log_label="continue-initial-chunk",
+        cancel_scheduled=cancel_scheduled,
+    )
     return json.dumps(r["body"]), r["status_code"]
 
 

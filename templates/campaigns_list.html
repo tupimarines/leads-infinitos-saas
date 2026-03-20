@@ -110,15 +110,12 @@
         {% for campaign in campaigns %}
         <div class="campaign-card p-6" data-campaign-id="{{ campaign.id }}" data-status="{{ campaign.status }}" data-use-uazapi="{{ '1' if campaign.use_uazapi_sender and campaign.uazapi_folder_id else '0' }}">
             <!-- Campaign Header -->
-            <div class="flex justify-between items-start mb-4">
-                <div class="flex-1 min-w-0 mr-2">
-                    <h3 class="text-xl font-bold text-white mb-2 truncate" title="{{ campaign.name }}">{{ campaign.name
-                        }}</h3>
-                    <p class="text-xs text-gray-500 truncate">{{ campaign.message_template[:50] }}...</p>
-                </div>
+            <div class="mb-4">
+                <h3 class="text-xl font-bold text-white truncate mb-1" title="{{ campaign.name }}">{{ campaign.name }}</h3>
+                <p class="text-xs text-gray-500 truncate mb-3">{{ campaign.message_template[:50] }}...</p>
 
-                <!-- Actions Container -->
-                <div class="flex items-center gap-1 shrink-0">
+                <!-- Status and Actions Row -->
+                <div class="flex flex-wrap items-center justify-between gap-2">
                     <!-- Status Badge -->
                     {% if campaign.status == 'pending' %}
                     <span
@@ -148,7 +145,7 @@
                     </span>
                     {% endif %}
 
-
+                    <div class="flex items-center gap-1 ml-auto">
                     <!-- Edit Button -->
                     <a href="/campaigns/{{ campaign.id }}/edit"
                         class="text-gray-400 hover:text-blue-300 transition-colors p-2 rounded-lg border border-white/10 bg-white/5" title="Editar Campanha">
@@ -201,6 +198,7 @@
                         {% endif %}
                     </button>
                     {% endif %}
+                    </div>
                 </div>
             </div>
 
@@ -363,13 +361,18 @@
 
             renderStageProgressCard(campaignId, data.stage_progress, data.last_sync_at);
 
-            // Mostrar botão Continuar quando há leads pendentes na etapa inicial (Uazapi)
+            // Mostrar botão Continuar quando há leads pendentes ou chunk agendado (Uazapi)
             const continueBtn = document.getElementById(`continue-btn-${campaignId}`);
             if (continueBtn) {
                 const pendingInitial = data.pending_initial || 0;
-                if (pendingInitial > 0) {
+                const hasScheduledChunk = data.has_scheduled_chunk === true;
+                if (pendingInitial > 0 || hasScheduledChunk) {
                     continueBtn.classList.remove('hidden');
-                    continueBtn.title = `Continuar: ${pendingInitial} lead(s) pendente(s) na etapa inicial`;
+                    continueBtn.dataset.hasScheduledChunk = hasScheduledChunk ? '1' : '0';
+                    continueBtn.textContent = hasScheduledChunk ? 'Continuar agora' : 'Continuar';
+                    continueBtn.title = hasScheduledChunk
+                        ? 'Cancela o chunk agendado e cria novo para envio imediato (~30s)'
+                        : `Continuar: ${pendingInitial} lead(s) pendente(s) na etapa inicial`;
                 } else {
                     continueBtn.classList.add('hidden');
                 }
@@ -379,13 +382,15 @@
         }
     }
 
-    async function continueInitialChunk(campaignId) {
+    async function continueInitialChunk(campaignId, cancelScheduled = false) {
         const btn = document.getElementById(`continue-btn-${campaignId}`);
+        const forceCancel = cancelScheduled || (btn && btn.dataset.hasScheduledChunk === '1');
         if (btn) btn.disabled = true;
         try {
             const res = await fetch(`/api/campaigns/${campaignId}/continue-initial-chunk`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(forceCancel ? { cancel_scheduled: true } : {})
             });
             const data = await res.json();
             if (res.ok && data.success) {
@@ -395,6 +400,8 @@
                     alert(data.message || 'Próximo chunk agendado. Envio em ~30 seg (worker cadence precisa estar rodando).');
                 }
                 await updateCampaignStats(campaignId);
+            } else if (res.status === 409 && !forceCancel && confirm('Há chunk agendado. Cancelar agendamento e criar para envio imediato?')) {
+                await continueInitialChunk(campaignId, true);
             } else {
                 const msg = data.error || 'Erro ao continuar campanha';
                 if (typeof showToast === 'function') showToast(msg, 'error');
