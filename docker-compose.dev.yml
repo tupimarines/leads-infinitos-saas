@@ -27,15 +27,36 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+        test: ["CMD-SHELL", "pg_isready -U postgres"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  migrate:
+    build: .
+    container_name: "leads_infinitos_migrate"
+    command: python scripts/run_migrate_db.py
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=devpassword
+      - UAZAPI_URL=${UAZAPI_URL}
+      - UAZAPI_ADMIN_TOKEN=${UAZAPI_ADMIN_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
 
   web:
     build: .
     container_name: "leads_infinitos_web"
-    command: sh -c "python -c 'from app import init_db; init_db()' && gunicorn -b 0.0.0.0:8000 --timeout 360 --workers 2 app:app"
+    command: gunicorn -b 0.0.0.0:8000 --timeout 360 --workers 2 app:app
     volumes:
       - .:/app
     ports:
@@ -51,6 +72,8 @@ services:
       - UAZAPI_URL=${UAZAPI_URL}
       - UAZAPI_ADMIN_TOKEN=${UAZAPI_ADMIN_TOKEN}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       db:
@@ -77,6 +100,8 @@ services:
       - UAZAPI_ADMIN_TOKEN=${UAZAPI_ADMIN_TOKEN}
       - APIFY_TOKEN=${APIFY_TOKEN}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       db:
@@ -103,6 +128,8 @@ services:
       - UAZAPI_ADMIN_TOKEN=${UAZAPI_ADMIN_TOKEN}
       - APIFY_TOKEN=${APIFY_TOKEN}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       db:
@@ -131,6 +158,8 @@ services:
       - CHATWOOT_ACCESS_TOKEN=${CHATWOOT_ACCESS_TOKEN}
       - CHATWOOT_ACCOUNT_ID=${CHATWOOT_ACCOUNT_ID}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       db:

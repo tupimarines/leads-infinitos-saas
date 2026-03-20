@@ -1,12 +1,35 @@
 
 
 services:
+  # Roda uma vez por deploy: schema/init_db SEM workers concorrentes (evita deadlock no LOCK/DDL).
+  migrate:
+    build: .
+    container_name: "leads_infinitos_migrate"
+    command: python scripts/run_migrate_db.py
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME:-leads_infinitos}
+      - REDIS_URL=${REDIS_URL}
+      - UAZAPI_URL=${UAZAPI_URL}
+      - UAZAPI_ADMIN_TOKEN=${UAZAPI_ADMIN_TOKEN}
+    networks:
+      - dokploy-network
+    restart: "no"
+
   web:
     build: .
     container_name: "leads_infinitos_web"
     ports:
       - "8000:8000"
-    command: sh -c "python -c 'from app import init_db; init_db()' && gunicorn -b 0.0.0.0:8000 --timeout 360 --worker-class sync --workers 1 --max-requests 100 --max-requests-jitter 10 --preload app:app"
+    command: gunicorn -b 0.0.0.0:8000 --timeout 360 --worker-class sync --workers 1 --max-requests 100 --max-requests-jitter 10 --preload app:app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -35,6 +58,9 @@ services:
     build: .
     container_name: "leads_infinitos_worker"
     command: python worker.py
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - storage_data:/app/storage
     env_file:
@@ -63,6 +89,9 @@ services:
     build: .
     container_name: "leads_infinitos_sender"
     command: python worker_sender.py
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - storage_data:/app/storage
     env_file:
@@ -94,6 +123,9 @@ services:
     build: .
     container_name: "leads_infinitos_cadence"
     command: python worker_cadence.py
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - storage_data:/app/storage
     env_file:

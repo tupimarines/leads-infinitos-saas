@@ -124,10 +124,11 @@ python create_annual_licenses.py --yes --expires-days 365
 
 ### Outros utilitários
 
-Inicializar banco (primeiro uso):
+Migração do schema (primeiro uso / cada deploy):
 ```bash
-python init_db.py
+python scripts/run_migrate_db.py
 ```
+Ver também `docs/DEPLOY_ORDER.md` (Compose: serviço `migrate` antes do web/workers).
 
 Listar usuários e licenças:
 ```bash

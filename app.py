@@ -169,7 +169,7 @@ def _init_db_lock_hot_tables(cur) -> None:
 
 
 def init_db() -> None:
-    """Migração idempotente com retry em deadlock (workers em paralelo)."""
+    """Migração idempotente com retry em deadlock / lock timeout (workers em paralelo)."""
     from psycopg2 import errors as psycopg2_errors
 
     last_err = None
@@ -177,14 +177,17 @@ def init_db() -> None:
         try:
             _init_db_body()
             return
-        except psycopg2_errors.DeadlockDetected as e:
+        except (
+            psycopg2_errors.DeadlockDetected,
+            psycopg2_errors.LockNotAvailable,
+        ) as e:
             last_err = e
             print(
-                f"⚠️ init_db: deadlock (tentativa {attempt + 1}/5). "
-                "Pausando workers ou aguardando — novo retry em ~2s..."
+                f"⚠️ init_db: {type(e).__name__} (tentativa {attempt + 1}/5). "
+                "Pare workers antigos ou aguarde — novo retry em ~2s..."
             )
             time.sleep(1.5 + random.uniform(0, 2.0))
-    print("❌ init_db: esgotadas tentativas após deadlock repetido.")
+    print("❌ init_db: esgotadas tentativas após deadlock/lock timeout.")
     if last_err:
         raise last_err
     raise RuntimeError("init_db failed")
@@ -194,6 +197,8 @@ def _init_db_body() -> None:
     print("🔄 Iniciando migração do banco de dados...")
     conn = get_db_connection()
     cur = conn.cursor()
+    # Evita deploy pendurado para sempre se algo externo segurar lock (cancela após 2 min)
+    cur.execute("SET lock_timeout = '120s'")
     cur.execute("SELECT pg_advisory_lock(%s)", (INIT_DB_ADVISORY_LOCK_KEY,))
 
     try:
