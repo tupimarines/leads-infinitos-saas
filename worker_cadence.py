@@ -462,6 +462,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
         step = stage_to_step.get(stage)
         if not step:
             continue
+        # Ordenar por instance_id: chunks[0]→inst1, chunks[1]→inst2 (rotação, sem overlap de números)
         sends = sorted(sends, key=lambda x: x.get("instance_id") or 0)
         print(f"  📤 [Materialize] campaign_id={campaign_id} stage={stage} scheduled_for={scheduled_for} sends={len(sends)}")
         per_instance_limit = 30
@@ -469,10 +470,9 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
         if total_limit <= 0:
             continue
 
-        # Stage 'initial': inclui 'pending' (leads do próximo chunk ainda não enviados)
-        # Stages follow1/2/breakup: apenas 'sent' (leads já receberam etapa anterior)
-        status_clause = "AND status IN ('sent', 'pending')" if stage == "initial" else "AND status = 'sent'"
-        # Excluir leads já enviados em sends anteriores (evita duplicatas antes do sync)
+        # Stage 'initial': pending + excluir já enviados em chunks anteriores (evita reenvio)
+        # Stages follow1/2/breakup: apenas 'sent'
+        status_clause = "AND status = 'pending'" if stage == "initial" else "AND status = 'sent'"
         exclude_clause = """
                   AND id NOT IN (
                     SELECT (elem)::int FROM campaign_stage_sends css,
@@ -499,7 +499,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
             leads = cur.fetchall() or []
 
         if not leads:
-            print(f"  ❌ [Materialize] campaign_id={campaign_id} stage={stage}: 0 leads elegíveis (step {step}, excluindo já enviados em chunks anteriores)")
+            print(f"  ❌ [Materialize] campaign_id={campaign_id} stage={stage}: 0 leads elegíveis (step {step}, excl. follow1+/perdidos/convertidos/já enviados em chunks anteriores)")
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1084,8 +1084,9 @@ def schedule_next_initial_chunk(campaign, conn):
         print(f"  ❌ [Initial Chunk] Campaign '{campaign.get('name')}': sem mensagem configurada (campaign_steps step 1 e campaigns.message_template vazios)")
         return
 
+    # Um ciclo = chunks para todas as instâncias. Materialize atribui leads distintos por instância.
     created = 0
-    for inst in instances:
+    for inst in sorted(instances, key=lambda x: x.get('instance_id') or 0):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -1097,7 +1098,7 @@ def schedule_next_initial_chunk(campaign, conn):
                 (cid, inst['instance_id']),
             )
             if cur.fetchone():
-                continue
+                continue  # Instância já tem chunk ativo — evita duplicação
             cur.execute(
                 """
                 INSERT INTO campaign_stage_sends

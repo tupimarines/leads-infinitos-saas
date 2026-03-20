@@ -5206,6 +5206,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                   AND status = 'pending'
                   AND current_step = 1
                   AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                  AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
                 """,
                 (campaign_id,),
             )
@@ -5310,10 +5311,11 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 },
             }
 
+        # Um clique = chunks para todas as instâncias. Materialize atribui leads distintos por instância (chunks[0]→inst1, chunks[1]→inst2).
         scheduled_for = datetime.utcnow() + timedelta(seconds=30)
         created_ids = []
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            for inst in allowed:
+            for inst in sorted(allowed, key=lambda x: x.get("instance_id") or 0):
                 cur.execute(
                     """
                     SELECT id FROM campaign_stage_sends
@@ -5324,7 +5326,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                     (campaign_id, inst["instance_id"]),
                 )
                 if cur.fetchone():
-                    continue
+                    continue  # Instância já tem chunk ativo — evita duplicação
                 cur.execute(
                     """
                     INSERT INTO campaign_stage_sends
@@ -5352,7 +5354,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             return {
                 "ok": False,
                 "status_code": 409,
-                "body": {"error": "Já existe chunk agendado ou enviado hoje para esta instância. Máximo 1 chunk/dia/instância."},
+                "body": {"error": "Todas as instâncias já têm chunk em andamento (scheduled/running/partial). Aguarde conclusão."},
             }
 
         folders_created = 0
