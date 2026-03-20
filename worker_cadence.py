@@ -470,14 +470,16 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
         if total_limit <= 0:
             continue
 
-        # Stage 'initial': pending + excluir já enviados em chunks anteriores (evita reenvio)
-        # Stages follow1/2/breakup: apenas 'sent'
+        # Stage 'initial': pending + excluir apenas de chunks que efetivamente enviaram (done/running/partial)
+        # Chunks failed/cancelled: libera leads para retry
         status_clause = "AND status = 'pending'" if stage == "initial" else "AND status = 'sent'"
         exclude_clause = """
                   AND id NOT IN (
                     SELECT (elem)::int FROM campaign_stage_sends css,
                     LATERAL jsonb_array_elements_text(COALESCE(css.lead_ids, '[]'::jsonb)) AS elem
                     WHERE css.campaign_id = %s AND css.stage = %s AND css.uazapi_folder_id IS NOT NULL
+                      AND css.status IN ('done', 'running', 'partial')
+                      AND elem ~ '^[0-9]+$'
                   )
         """ if stage == "initial" else ""
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -499,7 +501,24 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
             leads = cur.fetchall() or []
 
         if not leads:
-            print(f"  ❌ [Materialize] campaign_id={campaign_id} stage={stage}: 0 leads elegíveis (step {step}, excl. follow1+/perdidos/convertidos/já enviados em chunks anteriores)")
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT COUNT(*) as c FROM campaign_leads
+                       WHERE campaign_id = %s AND status = 'pending' AND current_step = 1
+                         AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                         AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                    (campaign_id,),
+                )
+                total_pending = (cur.fetchone() or {}).get("c") or 0
+                cur.execute(
+                    """SELECT COUNT(DISTINCT (elem)::int) as c FROM campaign_stage_sends css,
+                       LATERAL jsonb_array_elements_text(COALESCE(css.lead_ids, '[]'::jsonb)) AS elem
+                       WHERE css.campaign_id = %s AND css.stage = %s AND css.uazapi_folder_id IS NOT NULL
+                         AND css.status IN ('done', 'running', 'partial') AND elem ~ '^[0-9]+$'""",
+                    (campaign_id, stage),
+                )
+                excluded_count = (cur.fetchone() or {}).get("c") or 0
+            print(f"  ❌ [Materialize] campaign_id={campaign_id} stage={stage}: 0 leads elegíveis. pending_total={total_pending} excluídos_em_chunks={excluded_count}")
             with conn.cursor() as cur:
                 cur.execute(
                     """
