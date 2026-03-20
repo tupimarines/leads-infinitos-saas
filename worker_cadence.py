@@ -395,6 +395,8 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
 
     force_set = set(force_send_ids) if force_send_ids else None
     folders_created = 0
+    if force_set:
+        print(f"  📤 [Materialize] force_send_ids={list(force_set)}")
 
     # scheduled_for é persistido em UTC naive; usar UTC na query para evitar drift de fuso (servidor em BRT).
     now_utc_naive = datetime.utcnow()
@@ -497,6 +499,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
             leads = cur.fetchall() or []
 
         if not leads:
+            print(f"  ❌ [Materialize] campaign_id={campaign_id} stage={stage}: 0 leads elegíveis (step {step}, excluindo já enviados em chunks anteriores)")
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -531,6 +534,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 conn.commit()
                 continue
             if not token:
+                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: sem token (apikey)")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
@@ -539,6 +543,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 conn.commit()
                 continue
             if not chunk:
+                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: chunk vazio (leads={len(leads)}, idx={idx})")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'done', planned_count = 0, success_count = 0, failed_count = 0, updated_at = NOW() WHERE id = %s",
@@ -603,7 +608,8 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
             )
             folder_id = (result or {}).get("folder_id") or (result or {}).get("folderId")
             if not result or not folder_id:
-                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou (sem folder_id). Response: {result}")
+                err_msg = (result or {}).get("error") or (result or {}).get("message") or str(result)
+                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou. folder_id={folder_id} err={err_msg}")
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
