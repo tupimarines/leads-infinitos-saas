@@ -5061,6 +5061,63 @@ def get_campaign_stats(campaign_id):
         return {"error": str(e)}, 500
 
 
+@app.route("/api/campaigns/<int:campaign_id>/messages-debug")
+@login_required
+def get_campaign_messages_debug(campaign_id):
+    """
+    Debug: retorna fontes de mensagens do step 1 (campaign_steps e campaigns.message_template).
+    Útil para verificar se o Continuar consegue puxar mensagens.
+    """
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        return json.dumps({"error": "Campanha não encontrada"}), 404
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, step_number, message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
+                (campaign_id,),
+            )
+            step1 = cur.fetchone()
+            cur.execute(
+                "SELECT id, message_template FROM campaigns WHERE id = %s LIMIT 1",
+                (campaign_id,),
+            )
+            camp = cur.fetchone()
+        step1_raw = step1.get("message_template") if step1 else None
+        camp_raw = camp.get("message_template") if camp else None
+        step1_parsed = []
+        camp_parsed = []
+        for raw, out in [(step1_raw, step1_parsed), (camp_raw, camp_parsed)]:
+            if not raw or not str(raw).strip():
+                continue
+            try:
+                p = json.loads(raw)
+                lst = p if isinstance(p, list) else [p]
+                out.extend(str(x).strip() for x in lst if str(x).strip())
+            except Exception:
+                if isinstance(raw, str) and raw.strip():
+                    out.append(raw.strip())
+        used_source = "campaign_steps" if step1_parsed else ("campaigns" if camp_parsed else None)
+        return jsonify({
+            "campaign_id": campaign_id,
+            "campaign_steps_step1": {
+                "exists": step1 is not None,
+                "raw_preview": (step1_raw[:200] + "...") if step1_raw and len(str(step1_raw)) > 200 else step1_raw,
+                "parsed_count": len(step1_parsed),
+            },
+            "campaigns_message_template": {
+                "exists": bool(camp_raw),
+                "raw_preview": (str(camp_raw)[:200] + "...") if camp_raw and len(str(camp_raw)) > 200 else camp_raw,
+                "parsed_count": len(camp_parsed),
+            },
+            "used_source": used_source,
+            "continuar_would_use": len(step1_parsed) or len(camp_parsed),
+        })
+    finally:
+        conn.close()
+
+
 @app.route("/api/campaigns/<int:campaign_id>/sync-uazapi", methods=["POST"])
 @login_required
 def sync_campaign_uazapi_stats(campaign_id):
@@ -5218,23 +5275,31 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
         if delay_max < delay_min:
             delay_max = delay_min
 
+        def _parse_message_variations(raw):
+            if not raw or not str(raw).strip():
+                return []
+            try:
+                parsed = json.loads(raw)
+                lst = parsed if isinstance(parsed, list) else [parsed]
+                return [str(x).strip() for x in lst if str(x).strip()]
+            except Exception:
+                return [raw.strip()] if isinstance(raw, str) and raw.strip() else []
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT message_template FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
                 (campaign_id,),
             )
             step1 = cur.fetchone()
-        variations = []
-        if step1 and step1.get("message_template"):
-            try:
-                parsed = json.loads(step1["message_template"] or "[]")
-                variations = [
-                    str(x).strip()
-                    for x in (parsed if isinstance(parsed, list) else [parsed])
-                    if str(x).strip()
-                ]
-            except Exception:
-                pass
+        variations = _parse_message_variations(step1.get("message_template") if step1 else None)
+        if not variations:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT message_template FROM campaigns WHERE id = %s LIMIT 1",
+                    (campaign_id,),
+                )
+                camp = cur.fetchone()
+            variations = _parse_message_variations(camp.get("message_template") if camp else None)
         if not variations:
             conn.close()
             return {
