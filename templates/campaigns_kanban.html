@@ -1059,10 +1059,10 @@
             <div class="flex items-start justify-between">
                 <div class="flex-1 min-w-0">
                     <p class="text-sm font-medium text-gray-200 truncate">${lead.name || 'Sem nome'}</p>
-                    <p class="text-xs text-gray-500 truncate mt-0.5">${formatPhone(lead.phone)}</p>
+                    <p class="text-xs text-gray-500 mt-0.5 break-all">${formatPhone(lead.phone)}</p>
                 </div>
-                <div class="flex flex-col items-end gap-0.5 ml-2">
-                    ${sentThisStage ? '<span class="text-[10px] text-green-400 font-medium">✓ Enviado nesta etapa</span>' : ''}
+                <div class="flex flex-col items-end gap-0.5 ml-2 shrink-0">
+                    ${sentThisStage ? '<span class="text-[10px] text-green-400 font-medium whitespace-nowrap">Enviado</span>' : ''}
                     ${!sentThisStage && hasPreviousSend ? `<span class="text-[10px] text-gray-400">Último: ${getStageLabel(lastSentStage)}</span>` : ''}
                     ${sentThisStage && sentAt ? `<span class="text-[10px] text-gray-600 whitespace-nowrap">${sentAt}</span>` : ''}
                 </div>

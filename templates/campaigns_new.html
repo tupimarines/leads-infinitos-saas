@@ -1158,7 +1158,17 @@
         const cadenceEnabled = document.getElementById('enable_cadence').value === 'true';
         if (cadenceEnabled) {
             const cadenceSetupMode = useUazapiSender ? getCadenceSetupMode() : 'now';
-            const configureNow = (!useUazapiSender || cadenceSetupMode === 'now');
+            let configureNow = (!useUazapiSender || cadenceSetupMode === 'now');
+            // Com Uazapi o padrão é "depois no Kanban" — nesse modo os steps não iam no payload.
+            // Se os três FU (2–4) estiverem preenchidos, persistir steps mesmo com "depois no Kanban".
+            if (useUazapiSender && cadenceSetupMode === 'kanban_later') {
+                const fuMsgs = [2, 3, 4].map((s) =>
+                    (document.getElementById(`msg_step_${s}`)?.value || '').trim()
+                );
+                if (fuMsgs.every((m) => m.length > 0)) {
+                    configureNow = true;
+                }
+            }
             data.cadence_setup_mode = cadenceSetupMode;
             data.enable_cadence = true;
             data.terms_accepted = true;
