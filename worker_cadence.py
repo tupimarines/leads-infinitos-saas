@@ -20,7 +20,7 @@ import re
 from datetime import datetime, date, timedelta
 import psycopg2
 from psycopg2 import errors as psycopg2_errors
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 from dotenv import load_dotenv
 import pytz
 
@@ -50,6 +50,13 @@ from utils.sync_uazapi import (
     fetch_all_phones_by_status,
     normalize_phone_for_match,
 )
+from utils.uazapi_pacing import (
+    build_pacing_segments_for_leads,
+    default_inter_message_delay_range_minutes,
+    estimate_segment_span_minutes,
+    stagger_scheduled_utc_naive,
+)
+from utils.cadence_uazapi import merge_fu1_into_campaign_db
 
 from utils.config import SUPER_ADMIN_EMAILS
 
@@ -69,6 +76,25 @@ VERIFY_FOLDER_AFTER_SECONDS = 180  # list_folders 3 min após create_advanced_ca
 _verify_folder_queue = []
 
 
+def _parse_json_lead_ids(raw):
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for x in raw:
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def get_db_connection():
     return psycopg2.connect(
         host=os.environ.get('DB_HOST', 'localhost'),
@@ -82,6 +108,26 @@ def get_db_connection():
 def is_business_hours():
     now_brazil = datetime.now(BRAZIL_TZ)
     return BUSINESS_HOUR_START <= now_brazil.hour < BUSINESS_HOUR_END
+
+
+def is_campaign_send_window(campaign: dict, now_brazil=None) -> bool:
+    """
+    Janela por campanha: hora do dia + opcional sábado/domingo.
+    Fora da janela ou em fim de semana bloqueado: não dispara envios Mega/process_campaign_sends.
+    """
+    now_brazil = now_brazil or datetime.now(BRAZIL_TZ)
+    wd = now_brazil.weekday()
+    if wd == 5 and not bool(campaign.get("send_saturday")):
+        return False
+    if wd == 6 and not bool(campaign.get("send_sunday")):
+        return False
+    try:
+        sh = int(campaign.get("send_hour_start") if campaign.get("send_hour_start") is not None else BUSINESS_HOUR_START)
+        eh = int(campaign.get("send_hour_end") if campaign.get("send_hour_end") is not None else BUSINESS_HOUR_END)
+    except (TypeError, ValueError):
+        sh, eh = BUSINESS_HOUR_START, BUSINESS_HOUR_END
+    h = now_brazil.hour
+    return sh <= h < eh
 
 def format_jid(phone):
     """Formats a phone number into a WhatsApp JID."""
@@ -406,8 +452,9 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 """
                 SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
                        css.status, i.apikey,
-                       css.delay_min_minutes, css.delay_max_minutes, css.message_variations,
-                       c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max
+                       css.delay_min_minutes, css.delay_max_minutes, css.message_variations, css.lead_ids,
+                       c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max,
+                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender
                 FROM campaign_stage_sends css
                 JOIN campaigns c ON c.id = css.campaign_id
                 JOIN instances i ON i.id = css.instance_id
@@ -426,8 +473,9 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 """
                 SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
                        css.status, i.apikey,
-                       css.delay_min_minutes, css.delay_max_minutes, css.message_variations,
-                       c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max
+                       css.delay_min_minutes, css.delay_max_minutes, css.message_variations, css.lead_ids,
+                       c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max,
+                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender
                 FROM campaign_stage_sends css
                 JOIN campaigns c ON c.id = css.campaign_id
                 JOIN instances i ON i.id = css.instance_id
@@ -477,9 +525,15 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                   AND id NOT IN (
                     SELECT (elem)::int FROM campaign_stage_sends css,
                     LATERAL jsonb_array_elements_text(COALESCE(css.lead_ids, '[]'::jsonb)) AS elem
-                    WHERE css.campaign_id = %s AND css.stage = %s AND css.uazapi_folder_id IS NOT NULL
-                      AND css.status IN ('done', 'running', 'partial')
+                    WHERE css.campaign_id = %s AND css.stage = %s
                       AND elem ~ '^[0-9]+$'
+                      AND (
+                        (css.uazapi_folder_id IS NOT NULL
+                         AND css.status IN ('done', 'running', 'partial'))
+                        OR (css.status = 'scheduled'
+                            AND jsonb_typeof(COALESCE(css.lead_ids, '[]'::jsonb)) = 'array'
+                            AND jsonb_array_length(COALESCE(css.lead_ids, '[]'::jsonb)) > 0)
+                      )
                   )
         """ if stage == "initial" else ""
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -537,11 +591,64 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
 
         chunks = [leads[i : i + per_instance_limit] for i in range(0, len(leads), per_instance_limit)]
 
+        def _build_messages_for_sub(sub, step_msgs_inner):
+            messages_inner = []
+            lids_inner = []
+            for lead in sub:
+                raw = lead.get("phone") or lead.get("whatsapp_link")
+                clean = re.sub(r"\D", "", str(raw or ""))
+                if len(clean) <= 11 and clean and not clean.startswith("55"):
+                    clean = "55" + clean
+                if not clean:
+                    continue
+                text = random.choice(step_msgs_inner)
+                name = lead.get("name")
+                if name:
+                    text = (
+                        text.replace("{nome}", name)
+                        .replace("{name}", name)
+                        .replace("{{nome}}", name)
+                        .replace("{{name}}", name)
+                    )
+                messages_inner.append({"number": clean, "type": "text", "text": text})
+                lids_inner.append(lead["id"])
+            return messages_inner, lids_inner
+
         for idx, send in enumerate(sends):
             send_id = send["id"]
             token = send.get("apikey")
-            chunk = chunks[idx] if idx < len(chunks) else []
-            # Fonte exclusiva: campaign_steps. Sem fallback — se vazio, não cria campanha.
+            camp_win = {
+                "send_hour_start": send.get("send_hour_start"),
+                "send_hour_end": send.get("send_hour_end"),
+                "send_saturday": send.get("send_saturday"),
+                "send_sunday": send.get("send_sunday"),
+            }
+            if send.get("use_uazapi_sender") and not is_campaign_send_window(camp_win):
+                print(
+                    f"  ⏭️ [Materialize] send_id={send_id} fora da janela de envio da campanha {campaign_id}; aguardando próximo ciclo."
+                )
+                continue
+
+            reserved_lids = _parse_json_lead_ids(send.get("lead_ids"))
+            if reserved_lids:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        f"""
+                        SELECT id, phone, whatsapp_link, name
+                        FROM campaign_leads
+                        WHERE campaign_id = %s AND id = ANY(%s)
+                          {status_clause}
+                          AND current_step = %s
+                          AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                          AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
+                        """,
+                        (campaign_id, reserved_lids, step),
+                    )
+                    by_id = {r["id"]: r for r in (cur.fetchall() or [])}
+                chunk = [by_id[i] for i in reserved_lids if i in by_id]
+            else:
+                chunk = chunks[idx] if idx < len(chunks) else []
+
             step_msgs = _load_step_messages(conn, campaign_id, step)
             if not step_msgs:
                 print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: sem mensagem configurada em campaign_steps step {step}. Configure no Kanban ou edição da campanha.")
@@ -571,37 +678,6 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 conn.commit()
                 continue
 
-            messages = []
-            lead_ids = []
-            for lead in chunk:
-                raw = lead.get("phone") or lead.get("whatsapp_link")
-                clean = re.sub(r"\D", "", str(raw or ""))
-                if len(clean) <= 11 and clean and not clean.startswith("55"):
-                    clean = "55" + clean
-                if not clean:
-                    continue
-                text = random.choice(step_msgs)
-                name = lead.get("name")
-                if name:
-                    text = (
-                        text.replace("{nome}", name)
-                        .replace("{name}", name)
-                        .replace("{{nome}}", name)
-                        .replace("{{name}}", name)
-                    )
-                messages.append({"number": clean, "type": "text", "text": text})
-                lead_ids.append(lead["id"])
-
-            if not messages:
-                print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: 0 msgs (chunk={len(chunk)} leads, {len(step_msgs)} variações) — verificar phones")
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE campaign_stage_sends SET status = 'done', planned_count = 0, success_count = 0, failed_count = 0, updated_at = NOW() WHERE id = %s",
-                        (send_id,),
-                    )
-                conn.commit()
-                continue
-
             if not can_create_campaign_today(send.get("instance_id")):
                 print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: limite diário de chunks Uazapi atingido para esta instância")
                 with conn.cursor() as cur:
@@ -612,69 +688,138 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 conn.commit()
                 continue
 
-            delay_min_src = send.get("delay_min_minutes") or send.get("campaign_delay_min") or 5
-            delay_max_src = send.get("delay_max_minutes") or send.get("campaign_delay_max") or 15
-            delay_min_sec = int(delay_min_src * 60)
-            delay_max_sec = int(delay_max_src * 60)
-            if delay_max_sec < delay_min_sec:
-                delay_max_sec = delay_min_sec
-            result = uazapi_service.create_advanced_campaign(
-                token=token,
-                delay_min_sec=delay_min_sec,
-                delay_max_sec=delay_max_sec,
-                messages=messages,
-                info=f"Campaign {campaign_id} {stage} inst {send.get('instance_id')}",
-            )
-            folder_id = (result or {}).get("folder_id") or (result or {}).get("folderId")
-            if not result or not folder_id:
-                err_msg = (result or {}).get("error") or (result or {}).get("message") or str(result)
-                print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou. folder_id={folder_id} err={err_msg}")
+            delay_fallback_min = int(send.get("delay_min_minutes") or send.get("campaign_delay_min") or 5)
+            delay_fallback_max = int(send.get("delay_max_minutes") or send.get("campaign_delay_max") or 15)
+            if delay_fallback_max < delay_fallback_min:
+                delay_fallback_max = delay_fallback_min
+
+            use_pacing = bool(send.get("use_uazapi_sender")) and stage == "initial" and len(chunk) >= 2
+            if use_pacing:
+                pacing_plan = build_pacing_segments_for_leads(chunk)
+            else:
+                pacing_plan = [(tuple(chunk), delay_fallback_min, delay_fallback_max, 0)]
+
+            t_chain = now_utc_naive
+            prev_sub, prev_dmin, prev_dmax, prev_gap = None, None, None, 0
+
+            for seg_i, (sub_chunk_t, dmin, dmax, gap_after) in enumerate(pacing_plan):
+                sub_chunk = list(sub_chunk_t)
+                messages, lead_ids = _build_messages_for_sub(sub_chunk, step_msgs)
+                if not messages:
+                    print(
+                        f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: segmento {seg_i} sem msgs válidas"
+                    )
+                    break
+
+                if seg_i > 0:
+                    if prev_sub is None:
+                        break
+                    span_prev = estimate_segment_span_minutes(len(prev_sub), prev_dmin, prev_dmax)
+                    t_chain = stagger_scheduled_utc_naive(
+                        t_chain, span_prev + prev_gap + seg_i
+                    )  # +seg_i s evita colisão no índice único (mesmo minuto)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO campaign_stage_sends
+                            (campaign_id, stage, instance_id, scheduled_for, status, planned_count, lead_ids,
+                             delay_min_minutes, delay_max_minutes, message_variations)
+                            VALUES (%s, %s, %s, %s, 'scheduled', %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                campaign_id,
+                                stage,
+                                send.get("instance_id"),
+                                t_chain,
+                                len(lead_ids),
+                                json.dumps(lead_ids),
+                                int(dmin),
+                                int(dmax),
+                                Json(step_msgs),
+                            ),
+                        )
+                    conn.commit()
+                    print(
+                        f"  📎 [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: "
+                        f"sub-campanha agendada seg={seg_i} em {t_chain} UTC ({len(lead_ids)} leads) delay {dmin}-{dmax} min"
+                    )
+                    prev_sub, prev_dmin, prev_dmax, prev_gap = sub_chunk, dmin, dmax, gap_after
+                    continue
+
+                delay_min_sec = int(dmin * 60)
+                delay_max_sec = int(dmax * 60)
+                if delay_max_sec < delay_min_sec:
+                    delay_max_sec = delay_min_sec
+                result = uazapi_service.create_advanced_campaign(
+                    token=token,
+                    delay_min_sec=delay_min_sec,
+                    delay_max_sec=delay_max_sec,
+                    messages=messages,
+                    info=f"Campaign {campaign_id} {stage} inst {send.get('instance_id')} seg0",
+                )
+                folder_id = (result or {}).get("folder_id") or (result or {}).get("folderId")
+                if not result or not folder_id:
+                    err_msg = (result or {}).get("error") or (result or {}).get("message") or str(result)
+                    print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou. folder_id={folder_id} err={err_msg}")
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
+                            (send_id,),
+                        )
+                    conn.commit()
+                    break
+
+                api_status = (result or {}).get("status", "?")
+                api_count = (result or {}).get("count", len(messages))
+                print(f"  ✅ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: folder_id={folder_id} ({len(messages)} msgs) API status={api_status} count={api_count}")
+                if api_status in ("queued", "scheduled"):
+                    ctrl = uazapi_service.edit_campaign(token, folder_id, "continue")
+                    if ctrl:
+                        print(f"  ▶️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: edit_campaign(continue) ok")
+                    else:
+                        print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: edit_campaign(continue) falhou (campanha pode iniciar sozinha)")
+                remote_jid = _resolve_uazapi_remote_jid(token)
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
-                        (send_id,),
+                        """
+                        UPDATE campaign_stage_sends
+                        SET uazapi_folder_id = %s,
+                            instance_remote_jid = %s,
+                            lead_ids = %s,
+                            planned_count = %s,
+                            delay_min_minutes = %s,
+                            delay_max_minutes = %s,
+                            message_variations = %s,
+                            status = 'running',
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (
+                            folder_id,
+                            remote_jid,
+                            json.dumps(lead_ids),
+                            len(lead_ids),
+                            int(dmin),
+                            int(dmax),
+                            Json(step_msgs),
+                            send_id,
+                        ),
+                    )
+                    cur.execute(
+                        "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
+                        (send.get("instance_id"), campaign_id),
                     )
                 conn.commit()
-                continue
-
-            api_status = (result or {}).get("status", "?")
-            api_count = (result or {}).get("count", len(messages))
-            print(f"  ✅ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: folder_id={folder_id} ({len(messages)} msgs) API status={api_status} count={api_count}")
-            # Garantir início: campanhas que retornam "queued" podem precisar de continue para iniciar envio
-            if api_status in ("queued", "scheduled"):
-                ctrl = uazapi_service.edit_campaign(token, folder_id, "continue")
-                if ctrl:
-                    print(f"  ▶️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: edit_campaign(continue) ok")
-                else:
-                    print(f"  ⚠️ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: edit_campaign(continue) falhou (campanha pode iniciar sozinha)")
-            remote_jid = _resolve_uazapi_remote_jid(token)
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE campaign_stage_sends
-                    SET uazapi_folder_id = %s,
-                        instance_remote_jid = %s,
-                        lead_ids = %s,
-                        planned_count = %s,
-                        status = 'running',
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (folder_id, remote_jid, json.dumps(lead_ids), len(lead_ids), send_id),
+                folders_created += 1
+                _verify_folder_queue.append(
+                    {
+                        "send_id": send_id,
+                        "folder_id": folder_id,
+                        "token": token,
+                        "verify_at": time.time() + VERIFY_FOLDER_AFTER_SECONDS,
+                    }
                 )
-                cur.execute(
-                    "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
-                    (send.get("instance_id"), campaign_id),
-                )
-            conn.commit()
-            folders_created += 1
-            # Enfileirar verificação 3 min após create_advanced_campaign
-            _verify_folder_queue.append({
-                "send_id": send_id,
-                "folder_id": folder_id,
-                "token": token,
-                "verify_at": time.time() + VERIFY_FOLDER_AFTER_SECONDS,
-            })
+                prev_sub, prev_dmin, prev_dmax, prev_gap = sub_chunk, dmin, dmax, gap_after
 
     return {"folders_created": folders_created}
 
@@ -804,7 +949,7 @@ def process_cadence():
             # 1. Find active cadence campaigns (para rollover e envio)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_saturday, c.send_sunday,
+                    SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                            c.use_uazapi_sender, c.uazapi_folder_id, c.delay_min_minutes, c.delay_max_minutes,
                            c.scheduled_start
                     FROM campaigns c
@@ -820,24 +965,26 @@ def process_cadence():
                 time.sleep(CADENCE_POLL_INTERVAL)
                 continue
 
+            process_uazapi_initial_stage_rollovers(conn)
+
             for campaign in campaigns:
-                # Part B.0: Rollover diário — DESABILITADO para use_uazapi_sender (F7).
-                # Campanhas Uazapi usam apenas botões "Gerar follow up" no Kanban.
                 if not campaign.get('use_uazapi_sender'):
                     process_rollover(campaign, conn)
-                    process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
-                    process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
                 else:
-                    # Uazapi: agendar próximo chunk de 30 mensagens (initial) para o horário de envio
                     schedule_next_initial_chunk(campaign, conn)
-                # Part B.1 e B.2: apenas em horário comercial
-                if is_business_hours():
+
+                process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
+                process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
+
+                if is_campaign_send_window(campaign):
                     process_campaign_sends(campaign, conn)
                     bootstrap_pending_leads(campaign, conn)
                 else:
                     now_brazil = datetime.now(BRAZIL_TZ)
                     if campaign == campaigns[0]:  # log uma vez por ciclo
-                        print(f"⏰ [Cadence] Off hours ({now_brazil.strftime('%H:%M')} BRT). Rollover ok, envio pausado.")
+                        print(
+                            f"⏰ [Cadence] Fora da janela da campanha ({now_brazil.strftime('%H:%M')} BRT). Envio Mega/cadência pausado."
+                        )
 
             conn.close()
             time.sleep(CADENCE_POLL_INTERVAL)
@@ -1091,9 +1238,17 @@ def schedule_next_initial_chunk(campaign, conn):
         target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
     scheduled_for = target_dt.astimezone(pytz.UTC).replace(tzinfo=None)
 
-    # Delay da campanha
-    delay_min = int(campaign.get('delay_min_minutes') or 5)
-    delay_max = int(campaign.get('delay_max_minutes') or 15)
+    delay_min, delay_max = default_inter_message_delay_range_minutes()
+    if campaign.get("delay_min_minutes") is not None:
+        try:
+            delay_min = int(campaign.get("delay_min_minutes"))
+        except (TypeError, ValueError):
+            pass
+    if campaign.get("delay_max_minutes") is not None:
+        try:
+            delay_max = int(campaign.get("delay_max_minutes"))
+        except (TypeError, ValueError):
+            pass
     if delay_max < delay_min:
         delay_max = delay_min
 
@@ -1136,6 +1291,201 @@ def schedule_next_initial_chunk(campaign, conn):
         conn.commit()
         sched_brt = pytz.UTC.localize(scheduled_for).astimezone(BRAZIL_TZ).strftime("%d/%m %H:%M BRT")
         print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {sched_brt} ({created} instâncias)")
+
+
+def process_uazapi_initial_stage_rollovers(conn):
+    """
+    Rollover automático (cadência + Uazapi): quando log_success da sub-campanha inicial
+    atinge o número planejado, cria FU1 na API e move os leads (step 1 → 2).
+    Um registro em campaign_stage_sends = um folder Uazapi; cada um faz rollover independente.
+    """
+    if not uazapi_service:
+        return
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT css.id AS send_id, css.campaign_id, css.instance_id, css.uazapi_folder_id, css.lead_ids,
+                   css.planned_count, css.success_count, css.failed_count,
+                   c.name AS campaign_name, c.user_id AS user_id, c.send_hour_start, c.send_saturday, c.send_sunday,
+                   i.apikey
+            FROM campaign_stage_sends css
+            JOIN campaigns c ON c.id = css.campaign_id
+            JOIN instances i ON i.id = css.instance_id
+            WHERE css.stage = 'initial'
+              AND css.status = 'done'
+              AND COALESCE(css.fu_rollover_done, FALSE) = FALSE
+              AND c.enable_cadence = TRUE
+              AND c.use_uazapi_sender = TRUE
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+            """
+        )
+        pending = cur.fetchall() or []
+
+    for row in pending:
+        cid = row["campaign_id"]
+        send_id = row["send_id"]
+        planned = int(row.get("planned_count") or 0)
+        succ = int(row.get("success_count") or 0)
+        fail = int(row.get("failed_count") or 0)
+        if planned <= 0:
+            continue
+        if succ + fail < planned:
+            continue
+        if succ < planned:
+            continue
+
+        lids_raw = row.get("lead_ids") or []
+        if isinstance(lids_raw, str):
+            try:
+                lids_raw = json.loads(lids_raw)
+            except Exception:
+                lids_raw = []
+        if not lids_raw:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
+                    (send_id,),
+                )
+            conn.commit()
+            continue
+
+        token = (row.get("apikey") or "").strip()
+        if not token or not row.get("uazapi_folder_id"):
+            continue
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
+                FROM campaign_leads cl
+                WHERE cl.campaign_id = %s
+                  AND cl.id = ANY(%s)
+                  AND cl.current_step = 1
+                  AND cl.status = 'sent'
+                  AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+                """,
+                (cid, lids_raw),
+            )
+            rollover_leads = cur.fetchall() or []
+        if not rollover_leads:
+            continue
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT message_template, delay_days, media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = 2 LIMIT 1",
+                (cid,),
+            )
+            step2 = cur.fetchone()
+        if not step2:
+            print(f"  ⏭️ [Uazapi Rollover] Campaign '{row['campaign_name']}': step 2 não configurado.")
+            continue
+
+        send_hour = int(row.get("send_hour_start") or 8)
+        send_sat = bool(row.get("send_saturday"))
+        send_sun = bool(row.get("send_sunday"))
+        delay_days = step2.get("delay_days")
+        delay_days = 1 if delay_days is None else int(delay_days)
+        now_brazil = datetime.now(BRAZIL_TZ)
+        target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
+        scheduled_ts = int(target_dt.timestamp() * 1000)
+
+        user_id = row.get("user_id")
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+            urow = cur.fetchone()
+        is_sa = urow and urow.get("email") in SUPER_ADMIN_EMAILS
+
+        media_file_data = None
+        media_type = "image"
+        if is_sa and step2.get("media_path"):
+            mp = step2["media_path"]
+            if mp and _is_media_path_safe(mp, user_id) and os.path.exists(mp):
+                try:
+                    with open(mp, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                    ext = os.path.splitext(mp)[1].lower()
+                    mime_map = {
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".png": "image/png",
+                        ".gif": "image/gif",
+                        ".mp4": "video/mp4",
+                        ".webm": "video/webm",
+                    }
+                    mime = mime_map.get(ext, "application/octet-stream")
+                    media_file_data = f"data:{mime};base64,{b64}"
+                    media_type = step2.get("media_type") or "image"
+                except Exception as e:
+                    print(f"  ⚠️ [Uazapi Rollover] Erro mídia step2: {e}")
+
+        raw_tpl = step2.get("message_template") or "[]"
+        try:
+            parsed = json.loads(raw_tpl)
+            msg_text = random.choice(parsed) if isinstance(parsed, list) else str(parsed)
+        except Exception:
+            msg_text = str(raw_tpl)
+
+        messages = []
+        moved_ids = []
+        for lead in rollover_leads:
+            phone = lead.get("phone") or ""
+            if not phone and lead.get("whatsapp_link"):
+                match = re.search(r"(\d{10,})", str(lead["whatsapp_link"]))
+                if match:
+                    phone = match.group(1)
+            if not phone:
+                continue
+            clean = re.sub(r"\D", "", str(phone))
+            if len(clean) <= 11 and not clean.startswith("55"):
+                clean = "55" + clean
+            name = lead.get("name") or "Visitante"
+            text = (
+                msg_text.replace("{{nome}}", name)
+                .replace("{{name}}", name)
+                .replace("{nome}", name)
+                .replace("{name}", name)
+            )
+            if media_file_data:
+                messages.append({"number": clean, "type": media_type, "file": media_file_data, "text": text})
+            else:
+                messages.append({"number": clean, "type": "text", "text": text})
+            moved_ids.append(lead["id"])
+
+        if not messages:
+            continue
+
+        result = uazapi_service.create_advanced_campaign(
+            token=token,
+            delay_min_sec=60,
+            delay_max_sec=120,
+            messages=messages,
+            info=f"Auto FU1 c{cid} send{send_id}",
+            scheduled_for=scheduled_ts,
+        )
+        if not result:
+            print(f"  ❌ [Uazapi Rollover] Campaign '{row['campaign_name']}': create_advanced_campaign FU1 falhou.")
+            continue
+
+        folder_id = result.get("folder_id") or result.get("folderId")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_leads
+                SET current_step = 2, cadence_status = 'snoozed', snooze_until = %s, status = 'sent'
+                WHERE id = ANY(%s)
+                """,
+                (target_dt, moved_ids),
+            )
+            cur.execute(
+                "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
+                (send_id,),
+            )
+        merge_fu1_into_campaign_db(conn, cid, str(folder_id), str(send_id))
+        conn.commit()
+        print(
+            f"  🔄 [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: {len(moved_ids)} leads → FU1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT"
+        )
 
 
 def process_rollover(campaign, conn):
@@ -1368,14 +1718,8 @@ def process_rollover(campaign, conn):
             """,
             (target_dt, lead_ids),
         )
-        if folder_id:
-            cur.execute(
-                """
-                UPDATE campaigns SET cadence_config = COALESCE(cadence_config, '{}')::jsonb || %s::jsonb
-                WHERE id = %s
-                """,
-                (json.dumps({'rollover_fu1_folder_id': str(folder_id)}), cid),
-            )
+    if folder_id:
+        merge_fu1_into_campaign_db(conn, cid, str(folder_id), "legacy_time_rollover")
     conn.commit()
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(lead_ids)} leads Inicial → Follow-up 1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT")
 

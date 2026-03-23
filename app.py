@@ -41,6 +41,7 @@ from utils.limits import (
     get_user_daily_limit,
     resolve_license_type,
 )
+from utils.cadence_uazapi import iter_fu1_folder_ids, merge_fu1_folder_into_config, parse_cadence_config
 
 
 load_dotenv()
@@ -660,6 +661,7 @@ def _init_db_body() -> None:
             ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_min_minutes INTEGER;
             ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
             ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS message_variations JSONB;
+            ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS fu_rollover_done BOOLEAN DEFAULT FALSE;
             CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_campaign_stage
                 ON campaign_stage_sends(campaign_id, stage);
             CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_folder_id
@@ -3511,7 +3513,23 @@ def pause_rollover(campaign_id, step):
             cfg = json.loads(cfg) if cfg else {}
         except json.JSONDecodeError:
             cfg = {}
-    key_map = {2: 'rollover_fu1_folder_id', 3: 'rollover_fu2_folder_id', 4: 'rollover_fu3_folder_id'}
+    if step == 2:
+        fu1_ids = iter_fu1_folder_ids(cfg)
+        if not fu1_ids:
+            return json.dumps({'error': 'Sub-campanha 2 (FU1) ainda não criada ou sem folder_id'}), 404
+        last_err = None
+        ok_any = False
+        for fid in fu1_ids:
+            success, err = _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
+            if success:
+                ok_any = True
+            else:
+                last_err = err
+        if ok_any:
+            return json.dumps({'success': True, 'action': action, 'folders_touched': len(fu1_ids)})
+        return json.dumps({'error': last_err or 'Erro ao controlar follow-up'}), 500
+
+    key_map = {3: 'rollover_fu2_folder_id', 4: 'rollover_fu3_folder_id'}
     folder_id = cfg.get(key_map.get(step, ''))
     if not folder_id:
         return json.dumps({'error': f'Sub-campanha {step} ainda não criada ou sem folder_id'}), 404
@@ -3616,7 +3634,9 @@ def toggle_campaign_pause(campaign_id):
                         cfg = json.loads(cfg) if cfg else {}
                     except json.JSONDecodeError:
                         cfg = {}
-                for key in ('rollover_fu1_folder_id', 'rollover_fu2_folder_id', 'rollover_fu3_folder_id'):
+                for fid in iter_fu1_folder_ids(cfg):
+                    _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
+                for key in ('rollover_fu2_folder_id', 'rollover_fu3_folder_id'):
                     fid = cfg.get(key)
                     if fid:
                         _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
@@ -3648,7 +3668,9 @@ def toggle_campaign_pause(campaign_id):
                     cfg = json.loads(cfg) if cfg else {}
                 except json.JSONDecodeError:
                     cfg = {}
-            for key in ('rollover_fu1_folder_id', 'rollover_fu2_folder_id', 'rollover_fu3_folder_id'):
+            for fid in iter_fu1_folder_ids(cfg):
+                _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
+            for key in ('rollover_fu2_folder_id', 'rollover_fu3_folder_id'):
                 fid = cfg.get(key)
                 if fid:
                     _uazapi_control_folder(campaign_id, current_user.id, str(fid), action)
@@ -3841,10 +3863,9 @@ def create_campaign():
     instance_ids = data.get('instance_ids', [])  # list of instance IDs
     rotation_mode = data.get('rotation_mode', 'single')  # 'single' or 'round_robin'
 
-    # Uazapi campaign API: use_uazapi_sender, delays (minutos)
-    use_uazapi_sender = bool(data.get('use_uazapi_sender', False))
-    delay_min_minutes = data.get('delay_min_minutes')  # None ou int
-    delay_max_minutes = data.get('delay_max_minutes')  # None ou int
+    # Uazapi: inferido pelas instâncias (sem toggle) — basta haver ao menos uma Uazapi selecionada
+    delay_min_minutes = data.get('delay_min_minutes')
+    delay_max_minutes = data.get('delay_max_minutes')
 
     # Horário comercial configurável (faixa de horários + sábado/domingo)
     send_hour_start = data.get('send_hour_start', 8)
@@ -3874,23 +3895,19 @@ def create_campaign():
     if not name or not job_id:
         return json.dumps({'error': 'Nome e Job são obrigatórios'}), 400
 
-    # Uazapi: quando use_uazapi_sender=true, instance_ids obrigatório e apenas instâncias Uazapi
-    if use_uazapi_sender:
-        if not instance_ids:
-            return json.dumps({'error': 'Selecione uma instância Uazapi para campanhas com envio em massa.'}), 400
-        conn_check = get_db_connection()
-        with conn_check.cursor() as cur:
-            cur.execute(
-                "SELECT id FROM instances WHERE user_id = %s AND id = ANY(%s) AND COALESCE(api_provider, 'megaapi') = 'uazapi'",
-                (current_user.id, instance_ids)
-            )
-            uazapi_ids = [r[0] for r in cur.fetchall()]
-        conn_check.close()
-        if len(uazapi_ids) != len(instance_ids):
-            return json.dumps({'error': 'Apenas instâncias Uazapi podem ser usadas com envio em massa. Verifique suas instâncias.'}), 400
-        # Multi-instância: usar todas as instâncias Uazapi selecionadas (chunk 30 por instância)
-        instance_ids = uazapi_ids
-        
+    if not instance_ids:
+        return json.dumps({'error': 'Selecione pelo menos uma instância de WhatsApp.'}), 400
+
+    conn_check = get_db_connection()
+    with conn_check.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM instances WHERE user_id = %s AND id = ANY(%s) AND COALESCE(api_provider, 'megaapi') = 'uazapi'",
+            (current_user.id, instance_ids),
+        )
+        uazapi_selected_count = cur.fetchone()[0]
+    conn_check.close()
+    use_uazapi_sender = uazapi_selected_count > 0
+
     try:
         # 1. Obter leads do Job
         conn = get_db_connection()
@@ -4057,20 +4074,21 @@ def create_campaign():
                 cadence_setup_mode = 'now'
 
             if enable_cadence:
-                # cadence_config: rollover_time (HH:MM), rollover_test_mode (modo teste),
-                # rollover_test_delay_minutes e cadence_setup_mode (Uazapi).
-                rollover_time = data.get('rollover_time', '23:00')
-                if rollover_time and not re.match(r'^\d{1,2}:\d{2}$', str(rollover_time)):
-                    rollover_time = '23:00'
-                rollover_test_mode = bool(data.get('rollover_test_mode', False))
-                rollover_test_delay = int(data.get('rollover_test_delay_minutes', 5))
-                rollover_test_delay = max(1, min(60, rollover_test_delay))
-                cadence_config = {
-                    'rollover_time': str(rollover_time),
-                    'rollover_test_mode': rollover_test_mode,
-                    'rollover_test_delay_minutes': rollover_test_delay,
-                    'cadence_setup_mode': cadence_setup_mode,
-                }
+                if use_uazapi_sender:
+                    cadence_config = {'cadence_setup_mode': cadence_setup_mode}
+                else:
+                    rollover_time = data.get('rollover_time', '23:00')
+                    if rollover_time and not re.match(r'^\d{1,2}:\d{2}$', str(rollover_time)):
+                        rollover_time = '23:00'
+                    rollover_test_mode = bool(data.get('rollover_test_mode', False))
+                    rollover_test_delay = int(data.get('rollover_test_delay_minutes', 5))
+                    rollover_test_delay = max(1, min(60, rollover_test_delay))
+                    cadence_config = {
+                        'rollover_time': str(rollover_time),
+                        'rollover_test_mode': rollover_test_mode,
+                        'rollover_test_delay_minutes': rollover_test_delay,
+                        'cadence_setup_mode': cadence_setup_mode,
+                    }
                 cadence_config_json = json.dumps(cadence_config)
                 cur.execute(
                     """UPDATE campaigns SET enable_cadence = TRUE, terms_accepted = %s,
@@ -4224,8 +4242,11 @@ def create_campaign():
                     return [lst[i:i + n] for i in range(0, len(lst), n)]
 
                 lead_chunks = _chunk(leads, per_instance_limit)
-                delay_min_sec = (delay_min_minutes or 5) * 60
-                delay_max_sec = (delay_max_minutes or 15) * 60
+                from utils.uazapi_pacing import default_inter_message_delay_range_minutes
+
+                d_lo, d_hi = default_inter_message_delay_range_minutes()
+                delay_min_sec = int(d_lo * 60)
+                delay_max_sec = int(d_hi * 60)
                 scheduled_for_param = None
                 if scheduled_start:
                     try:
@@ -5271,8 +5292,19 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 "body": {"error": "Já existe chunk em andamento para esta instância. Aguarde conclusão ou falha."},
             }
 
-        delay_min = int(campaign.get("delay_min_minutes") or 5)
-        delay_max = int(campaign.get("delay_max_minutes") or 15)
+        from utils.uazapi_pacing import default_inter_message_delay_range_minutes
+
+        delay_min, delay_max = default_inter_message_delay_range_minutes()
+        if campaign.get("delay_min_minutes") is not None:
+            try:
+                delay_min = int(campaign.get("delay_min_minutes"))
+            except (TypeError, ValueError):
+                pass
+        if campaign.get("delay_max_minutes") is not None:
+            try:
+                delay_max = int(campaign.get("delay_max_minutes"))
+            except (TypeError, ValueError):
+                pass
         if delay_max < delay_min:
             delay_max = delay_min
 
@@ -5965,12 +5997,16 @@ def _create_stage_campaign(campaign_id):
 
     conn = get_db_connection()
     with conn.cursor() as cur:
+        cfg = parse_cadence_config(campaign.get('cadence_config'))
+        key_fid = f'rollover_fu{step-1}_folder_id'
+        key_ids = f'rollover_fu{step-1}_lead_ids'
         for send in sends_created:
             cur.execute(
                 """INSERT INTO campaign_stage_sends
                    (campaign_id, stage, instance_id, instance_remote_jid, uazapi_folder_id, status, planned_count, lead_ids,
                     delay_min_minutes, delay_max_minutes, message_variations)
-                   VALUES (%s, %s, %s, %s, %s, 'running', %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, 'running', %s, %s, %s, %s, %s)
+                   RETURNING id""",
                 (
                     campaign_id,
                     stage,
@@ -5984,24 +6020,19 @@ def _create_stage_campaign(campaign_id):
                     json.dumps(step_msgs),
                 ),
             )
+            send_row = cur.fetchone()
+            send_db_id = send_row[0] if send_row else None
+            if step == 2 and send_db_id is not None:
+                cfg = merge_fu1_folder_into_config(cfg, str(send['folder_id']), str(send_db_id))
             cur.execute(
                 "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
                 (send['instance_id'], campaign_id),
             )
 
-        # Compatibilidade com painel atual (mantém último folder da etapa no cadence_config)
-        cfg = campaign.get('cadence_config') or {}
-        if isinstance(cfg, str):
-            try:
-                cfg = json.loads(cfg) if cfg else {}
-            except Exception:
-                cfg = {}
-        key_fid = f'rollover_fu{step-1}_folder_id'
-        key_ids = f'rollover_fu{step-1}_lead_ids'
         cfg[key_fid] = sends_created[-1]['folder_id']
         cfg[key_ids] = [lid for s in sends_created for lid in s['lead_ids']]
         cur.execute(
-            "UPDATE campaigns SET cadence_config = %s, status = 'running' WHERE id = %s",
+            "UPDATE campaigns SET cadence_config = %s::jsonb, status = 'running' WHERE id = %s",
             (json.dumps(cfg), campaign_id),
         )
     conn.commit()

@@ -328,43 +328,16 @@
                 </div>
 
                 <!-- ============================================ -->
-                <!-- UAZAPI ENVIO EM MASSA -->
+                <!-- UAZAPI / API 2.0 (automático ao escolher instância) -->
                 <!-- ============================================ -->
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
-                    <div class="flex justify-between items-center">
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-300">
-                                🚀 Envio em massa 2.0
-                            </label>
-                            <p class="text-xs text-gray-500 mt-1">Usar API 2.0 com delays configuraveis entre mensagens</p>
-                        </div>
-                        <label class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" id="use_uazapi_sender" class="sr-only peer">
-                            <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
-                                peer-checked:after:translate-x-full peer-checked:after:border-white 
-                                after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
-                                after:bg-white after:border-gray-300 after:border after:rounded-full 
-                                after:h-4 after:w-4 after:transition-all 
-                                peer-checked:bg-blue-600"></div>
-                        </label>
-                    </div>
-                    <div id="uazapiDelayFields" class="mt-4 grid grid-cols-2 gap-4" style="display: none;">
-                        <div>
-                            <label class="block text-xs font-medium text-gray-400 mb-1">Delay mínimo (min)</label>
-                            <input type="number" id="delay_min_minutes" min="1" max="60" value="5"
-                                placeholder="Recomendado: 5–15 min"
-                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-400 mb-1">Delay máximo (min)</label>
-                            <input type="number" id="delay_max_minutes" min="1" max="60" value="15"
-                                placeholder="Recomendado: 5–15 min"
-                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm">
-                        </div>
-                        <p class="text-xs text-blue-400 col-span-2">Recomendado: 5–15 min entre mensagens para evitar bloqueios.</p>
-                        <p class="text-xs text-amber-400/90 col-span-2">✓ A lista será validada automaticamente antes do envio (números sem WhatsApp removidos).</p>
-                    </div>
+                    <label class="block text-sm font-semibold text-gray-300">
+                        🚀 Envio em massa (API 2.0)
+                    </label>
+                    <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância <span class="text-blue-300">Uazapi</span> abaixo, o disparo usa a API 2.0 com ritmo humanizado automático (várias intensidades de pausa entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).</p>
+                    <p class="text-xs text-gray-500 mt-2">Os envios <strong class="text-gray-300">não rodam fora</strong> da faixa definida em <strong class="text-emerald-300">Horário de envio</strong>, nem em finais de semana, a menos que você ative os toggles de sábado/domingo.</p>
+                    <p class="text-xs text-amber-400/90 mt-3">✓ A lista será validada automaticamente antes do envio (números sem WhatsApp removidos).</p>
                 </div>
 
                 <!-- ============================================ -->
@@ -468,9 +441,9 @@
                                     <div class="flex-1">
                                         <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
                                             anterior:</label>
-                                        <input type="number" id="delay_step_2" value="0" min="0" max="30"
+                                        <input type="number" id="delay_step_2" value="3" min="0" max="30"
                                             class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center"
-                                            title="0 = ~2 min (teste). Marque Modo teste para rollover em todo ciclo.">
+                                            title="Dias após a etapa anterior antes de enviar este follow-up.">
                                     </div>
                                     <button type="button" onclick="generateCadenceCopy(2)"
                                         class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1 mt-4">
@@ -665,23 +638,8 @@
                                 placeholder="20">
                         </div>
                     </div>
-                    <div class="mb-4" id="rollover_time_block">
-                        <label class="block text-xs font-medium text-gray-400 mb-1">Horário de rollover (leads em Inicial → Follow-up 1)</label>
-                        <input type="time" id="rollover_time" value="23:00" step="1"
-                            class="neon-input w-32 px-4 py-2 rounded-lg text-white text-sm"
-                            title="Ex: 23:34, 9:01 para testes">
-                        <p class="text-xs text-gray-500 mt-1">Ao atingir este horário (BRT), leads em Inicial seguem para Follow-up 1 e campanha é agendada.</p>
-                        <label class="mt-2 flex items-center gap-2 cursor-pointer">
-                            <input type="checkbox" id="rollover_test_mode" class="rounded border-gray-600 bg-gray-700 text-green-500 focus:ring-green-500" onchange="toggleTestMode(this.checked)">
-                            <span class="text-sm text-amber-400/90">Modo teste: rollover e avanço automático em todo ciclo (~2 min entre etapas)</span>
-                        </label>
-                        <div id="rollover_test_delay_block" class="mt-2 hidden">
-                            <label class="block text-xs font-medium text-gray-400 mb-1">Atrasar rollover Inicial→FU1 (minutos)</label>
-                            <input type="number" id="rollover_test_delay_minutes" value="5" min="1" max="60"
-                                class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm"
-                                title="Tempo mínimo desde o envio mais antigo antes de mover leads para FU1">
-                            <p class="text-xs text-gray-500 mt-1">Da tempo para a API 2.0 finalizar envios e para mover cards para Convertido/Perdido.</p>
-                        </div>
+                    <div class="mb-4 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 hidden" id="rollover_auto_hint">
+                        <p class="text-xs text-emerald-200/90"><strong>Cadência + API 2.0:</strong> quando o envio inicial termina na Uazapi (todos os disparos daquele bloco confirmados), os leads avançam automaticamente para o Follow-up 1. Não é necessário definir horário de rollover.</p>
                     </div>
                     <div class="flex flex-wrap gap-6">
                         <label class="relative inline-flex items-center gap-3 cursor-pointer">
@@ -971,14 +929,11 @@
         }
     });
 
-    function toggleTestMode(checked) {
-        const defaults = { 2: 3, 3: 4, 4: 1 };
-        [2, 3, 4].forEach(s => {
-            const el = document.getElementById(`delay_step_${s}`);
-            if (el) el.value = checked ? 0 : defaults[s];
+    function hasUazapiInstanceSelected() {
+        return Array.from(document.querySelectorAll('input[name="instance_ids"]:checked')).some(cb => {
+            const label = cb.closest('.instance-checkbox-label');
+            return label && label.dataset.apiProvider === 'uazapi';
         });
-        const delayBlock = document.getElementById('rollover_test_delay_block');
-        if (delayBlock) delayBlock.classList.toggle('hidden', !checked);
     }
 
     // Carregar Jobs (Listas) ao iniciar
@@ -1123,6 +1078,16 @@
             return;
         }
 
+        const instanceCheckboxes = document.querySelectorAll('input[name="instance_ids"]:checked');
+        if (instanceCheckboxes.length === 0) {
+            alert('Selecione pelo menos uma instância de WhatsApp.');
+            return;
+        }
+        const useUazapiSender = Array.from(instanceCheckboxes).some(cb => {
+            const label = cb.closest('.instance-checkbox-label');
+            return label && label.dataset.apiProvider === 'uazapi';
+        });
+
         // Loading State
         btn.disabled = true;
         btn.innerHTML = `
@@ -1152,25 +1117,6 @@
             scheduledStartUTC = scheduledDate.toISOString();
         }
 
-        const useUazapiSender = document.getElementById('use_uazapi_sender').checked;
-        const delayMin = parseInt(document.getElementById('delay_min_minutes').value, 10) || 5;
-        const delayMax = parseInt(document.getElementById('delay_max_minutes').value, 10) || 15;
-
-        if (useUazapiSender) {
-            if (delayMin < 1 || delayMin > 60 || delayMax < 1 || delayMax > 60) {
-                alert('Delays devem estar entre 1 e 60 minutos.');
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-                return;
-            }
-            if (delayMin > delayMax) {
-                alert('Delay mínimo não pode ser maior que o máximo.');
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-                return;
-            }
-        }
-
         const sendHourStart = parseInt(document.getElementById('send_hour_start').value, 10) || 8;
         const sendHourEnd = parseInt(document.getElementById('send_hour_end').value, 10) || 20;
         if (sendHourStart < 0 || sendHourStart > 23 || sendHourEnd < 0 || sendHourEnd > 23) {
@@ -1192,8 +1138,8 @@
             message_templates: messageTemplates,
             scheduled_start: scheduledStartUTC,
             use_uazapi_sender: useUazapiSender,
-            delay_min_minutes: useUazapiSender ? delayMin : null,
-            delay_max_minutes: useUazapiSender ? delayMax : null,
+            delay_min_minutes: null,
+            delay_max_minutes: null,
             send_hour_start: sendHourStart,
             send_hour_end: sendHourEnd,
             send_saturday: document.getElementById('send_saturday').checked,
@@ -1216,12 +1162,11 @@
             data.cadence_setup_mode = cadenceSetupMode;
             data.enable_cadence = true;
             data.terms_accepted = true;
-            const rolloverEl = document.getElementById('rollover_time');
-            const testModeEl = document.getElementById('rollover_test_mode');
-            const delayEl = document.getElementById('rollover_test_delay_minutes');
-            data.rollover_time = rolloverEl ? rolloverEl.value || '23:00' : '23:00';
-            data.rollover_test_mode = testModeEl ? testModeEl.checked : false;
-            data.rollover_test_delay_minutes = (testModeEl?.checked && delayEl) ? Math.min(60, Math.max(1, parseInt(delayEl.value, 10) || 5)) : 5;
+            if (!useUazapiSender) {
+                data.rollover_time = '23:00';
+                data.rollover_test_mode = false;
+                data.rollover_test_delay_minutes = 5;
+            }
             data.steps = [];
 
             if (configureNow) {
@@ -1252,11 +1197,11 @@
 
                 // Steps 2-4: separate messages
                 const stepLabels = { 2: 'Follow-up 1', 3: 'Follow-up 2', 4: 'Break-up' };
-                const testMode = document.getElementById('rollover_test_mode')?.checked || false;
+                const defaultDelays = { 2: 3, 3: 4, 4: 1 };
                 for (let s = 2; s <= 4; s++) {
                     const msg = document.getElementById(`msg_step_${s}`).value.trim();
                     const raw = parseInt(document.getElementById(`delay_step_${s}`).value, 10);
-                    const delay = testMode ? 0 : (Number.isNaN(raw) ? 3 : raw);
+                    const delay = Number.isNaN(raw) ? defaultDelays[s] : raw;
                     const mediaB64 = document.getElementById(`mediaData_${s}`).value;
                     data.steps.push({
                         step_number: s,
@@ -1268,30 +1213,6 @@
                         media_type: document.getElementById(`mediaType_${s}`).value || null
                     });
                 }
-            }
-        }
-
-        // Multi-instance support (super admin only)
-        // Instance Validation (Required for everyone)
-        const instanceCheckboxes = document.querySelectorAll('input[name="instance_ids"]:checked');
-        if (instanceCheckboxes.length === 0) {
-            alert('Selecione pelo menos uma instância de WhatsApp.');
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            return;
-        }
-
-        // Uazapi: quando use_uazapi_sender=true, exige pelo menos uma instância Uazapi selecionada
-        if (useUazapiSender) {
-            const uazapiChecked = Array.from(instanceCheckboxes).filter(cb => {
-                const label = cb.closest('.instance-checkbox-label');
-                return label && label.dataset.apiProvider === 'uazapi';
-            });
-            if (uazapiChecked.length === 0) {
-                alert('Para envio em massa 2.0, selecione uma instância da API 2.0.');
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-                return;
             }
         }
 
@@ -1420,45 +1341,37 @@
     loadTemplates();
 
     // ============================================================
-    // UAZAPI ENVIO EM MASSA
+    // UAZAPI / instâncias
     // ============================================================
-    function toggleUazapiFields() {
-        const useUazapi = document.getElementById('use_uazapi_sender').checked;
-        const delayFields = document.getElementById('uazapiDelayFields');
+    function refreshUazapiUi() {
         const instanceLabels = document.querySelectorAll('.instance-checkbox-label');
         const uazapiHint = document.getElementById('uazapi-instance-hint');
         const uazapiNoInstances = document.getElementById('uazapi-no-instances');
-
-        delayFields.style.display = useUazapi ? 'grid' : 'none';
-
         const uazapiInstances = Array.from(instanceLabels).filter(l => l.dataset.apiProvider === 'uazapi');
         const hasUazapi = uazapiInstances.length > 0;
+        const useUazapi = hasUazapiInstanceSelected();
 
         instanceLabels.forEach(label => {
-            const isUazapi = label.dataset.apiProvider === 'uazapi';
-            if (useUazapi) {
-                label.style.display = isUazapi ? 'flex' : 'none';
-                if (!isUazapi) {
-                    const cb = label.querySelector('input[name="instance_ids"]');
-                    if (cb) cb.checked = false;
-                }
-            } else {
-                label.style.display = 'flex';
-            }
+            label.style.display = 'flex';
         });
 
         if (uazapiHint) {
             uazapiHint.classList.toggle('hidden', !useUazapi);
         }
         if (uazapiNoInstances) {
-            uazapiNoInstances.classList.toggle('hidden', !useUazapi || hasUazapi);
+            uazapiNoInstances.classList.toggle('hidden', hasUazapi);
         }
         updateUazapiCapacityPreview();
         updateCadenceSetupModeUI();
+        const rolloverHint = document.getElementById('rollover_auto_hint');
+        const cadenceOn = document.getElementById('enable_cadence')?.value === 'true';
+        if (rolloverHint) {
+            rolloverHint.classList.toggle('hidden', !(cadenceOn && useUazapi));
+        }
     }
 
     function updateUazapiCapacityPreview() {
-        const useUazapi = document.getElementById('use_uazapi_sender')?.checked;
+        const useUazapi = hasUazapiInstanceSelected();
         const preview = document.getElementById('uazapi-capacity-preview');
         if (!preview) return;
 
@@ -1482,7 +1395,7 @@
     }
 
     function updateCadenceSetupModeUI() {
-        const useUazapi = document.getElementById('use_uazapi_sender')?.checked;
+        const useUazapi = hasUazapiInstanceSelected();
         const cadenceEnabled = document.getElementById('enable_cadence')?.value === 'true';
         const modeBox = document.getElementById('cadenceSetupModeBox');
         const stepsContainer = document.getElementById('cadenceStepsContainer');
@@ -1504,19 +1417,13 @@
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-        const useUazapiCheckbox = document.getElementById('use_uazapi_sender');
-        if (useUazapiCheckbox) {
-            useUazapiCheckbox.addEventListener('change', toggleUazapiFields);
-            toggleUazapiFields(); // Initial state
-        }
         document.querySelectorAll('input[name="instance_ids"]').forEach(cb => {
-            cb.addEventListener('change', updateUazapiCapacityPreview);
+            cb.addEventListener('change', refreshUazapiUi);
         });
         document.querySelectorAll('input[name="cadence_setup_mode"]').forEach(rb => {
-            rb.addEventListener('change', updateCadenceSetupModeUI);
+            rb.addEventListener('change', refreshUazapiUi);
         });
-        updateUazapiCapacityPreview();
-        updateCadenceSetupModeUI();
+        refreshUazapiUi();
     });
 
     // ============================================================
@@ -1529,7 +1436,7 @@
         const hidden = document.getElementById('enable_cadence');
         const isOn = track.classList.toggle('on');
         hidden.value = isOn ? 'true' : 'false';
-        updateCadenceSetupModeUI();
+        refreshUazapiUi();
         // Terms card stays always visible — no toggle needed
     }
 
