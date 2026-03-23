@@ -11,14 +11,13 @@ from typing import List, Sequence, Tuple
 
 # (peso, min_min, min_max) — tempos entre mensagens dentro da sub-campanha
 _BUCKET_RANGES: Sequence[Tuple[float, int, int]] = (
-    (0.30, 5, 8),
-    (0.20, 8, 15),
-    (0.40, 10, 17),
+    (0.50, 1, 2),
+    (0.50, 2, 4),
 )
 
-# Pausa longa entre sub-campanhas (não é nova campanha sozinha: só atraso no agendamento)
-_LONG_GAP_MIN = 25
-_LONG_GAP_MAX = 45
+# Pausa longa entre sub-campanhas (“intervalo banheiro”) — minutos fixos quando aplicada
+_LONG_GAP_MIN = 5
+_LONG_GAP_MAX = 5
 _LONG_GAP_WEIGHT = 0.10  # chance aplicada a cada “entre segmentos”
 
 

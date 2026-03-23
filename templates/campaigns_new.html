@@ -328,14 +328,14 @@
                 </div>
 
                 <!-- ============================================ -->
-                <!-- UAZAPI / API 2.0 (automático ao escolher instância) -->
+                <!-- Envio inteligente (automático ao escolher instância compatível) -->
                 <!-- ============================================ -->
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
                     <label class="block text-sm font-semibold text-gray-300">
-                        🚀 Envio em massa (API 2.0)
+                        🚀 Envio Inteligente
                     </label>
-                    <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância <span class="text-blue-300">Uazapi</span> abaixo, o disparo usa a API 2.0 com ritmo humanizado automático (várias intensidades de pausa entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).</p>
+                    <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa ritmo humanizado automático (pausas variadas entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).</p>
                     <p class="text-xs text-gray-500 mt-2">Os envios <strong class="text-gray-300">não rodam fora</strong> da faixa definida em <strong class="text-emerald-300">Horário de envio</strong>, nem em finais de semana, a menos que você ative os toggles de sábado/domingo.</p>
                     <p class="text-xs text-amber-400/90 mt-3">✓ A lista será validada automaticamente antes do envio (números sem WhatsApp removidos).</p>
                 </div>
@@ -362,7 +362,7 @@
 
                 <div id="cadenceSetupModeBox" class="glass-panel p-4 rounded-xl hidden"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.2);">
-                    <label class="block text-sm font-semibold text-gray-300 mb-2">Configuração dos follow-ups (API 2.0)</label>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Configuração dos follow-ups (Envio Inteligente)</label>
                     <p class="text-xs text-gray-500 mb-3">Escolha se quer definir mensagens/dias agora ou configurar depois no botão de cada etapa do Kanban.</p>
                     <div class="flex flex-col gap-2">
                         <label class="flex items-center gap-2 cursor-pointer">
@@ -639,7 +639,7 @@
                         </div>
                     </div>
                     <div class="mb-4 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 hidden" id="rollover_auto_hint">
-                        <p class="text-xs text-emerald-200/90"><strong>Cadência + API 2.0:</strong> quando o envio inicial termina na Uazapi (todos os disparos daquele bloco confirmados), os leads avançam automaticamente para o Follow-up 1. Não é necessário definir horário de rollover.</p>
+                        <p class="text-xs text-emerald-200/90"><strong>Cadência + Envio Inteligente:</strong> quando o envio inicial termina (todos os disparos daquele bloco confirmados), os leads avançam automaticamente para o Follow-up 1. Não é necessário definir horário de rollover.</p>
                     </div>
                     <div class="flex flex-wrap gap-6">
                         <label class="relative inline-flex items-center gap-3 cursor-pointer">
@@ -732,10 +732,10 @@
                         {% endif %}
                     </p>
                     <p id="uazapi-instance-hint" class="text-xs text-blue-400 mt-2 hidden">
-                        Com envio em massa 2.0, apenas instâncias da API 2.0 são exibidas. Selecione uma.
+                        Com Envio Inteligente, apenas instâncias compatíveis são exibidas. Selecione uma.
                     </p>
                     <p id="uazapi-no-instances" class="text-xs text-amber-400 mt-2 hidden">
-                        Nenhuma instância da API 2.0 disponível. Crie uma em Configurações → WhatsApp para usar envio em massa.
+                        Nenhuma instância compatível disponível. Crie uma em Configurações → WhatsApp para usar o Envio Inteligente.
                     </p>
                     <p id="uazapi-capacity-preview" class="text-xs text-emerald-300 mt-2 hidden">
                         Capacidade diária prevista: 30 x 1 = 30 leads/dia.
@@ -746,7 +746,7 @@
                 <div id="initial-flow-summary" class="glass-panel p-4 rounded-xl border border-blue-500/20 bg-blue-500/5">
                     <p class="text-xs uppercase tracking-wider text-blue-300 mb-2">Resumo do disparo inicial</p>
                     <div class="text-xs text-gray-300 space-y-1">
-                        <p>• Multi-instância: selecione 1 ou mais instâncias da API 2.0 para escalar capacidade.</p>
+                        <p>• Multi-instância: selecione 1 ou mais instâncias compatíveis para escalar capacidade.</p>
                         <p>• Capacidade total: 30 por instância, por dia (ex.: 3 instâncias = 90/dia).</p>
                         <p>• Agendamento: "Início (opcional)" define quando a campanha começa.</p>
                         <p>• Variações + intervalo: até 5 mensagens com delay min/max entre envios.</p>

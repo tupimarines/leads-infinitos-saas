@@ -2456,6 +2456,28 @@ def update_instance_daily_limit(instance_id):
         conn.close()
 
 
+@app.route("/api/account/instances", methods=["GET"])
+@login_required
+def api_account_instances():
+    """Lista instâncias do usuário (automação / scripts). Sem apikey."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, status, COALESCE(api_provider, 'megaapi') AS api_provider
+                FROM instances
+                WHERE user_id = %s
+                ORDER BY id ASC
+                """,
+                (current_user.id,),
+            )
+            rows = cur.fetchall() or []
+    finally:
+        conn.close()
+    return json.dumps([dict(r) for r in rows])
+
+
 @app.route('/campaigns')
 @login_required
 def campaigns():
