@@ -5095,7 +5095,7 @@ def get_campaign_stats(campaign_id):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Verificar se a campanha pertence ao usuário e se usa Uazapi
             cur.execute(
-                "SELECT id, closed_deals, use_uazapi_sender, uazapi_folder_id, status FROM campaigns WHERE id = %s AND user_id = %s",
+                "SELECT id, closed_deals, use_uazapi_sender, uazapi_folder_id, status, enable_cadence FROM campaigns WHERE id = %s AND user_id = %s",
                 (campaign_id, current_user.id)
             )
             campaign = cur.fetchone()
@@ -5186,7 +5186,14 @@ def get_campaign_stats(campaign_id):
             except Exception as e:
                 uazapi_debug = {"uazapi_error": str(e)}
                 print(f"⚠️ [Stats] Erro ao buscar stats Uazapi para campanha {campaign_id}: {e}")
-        
+
+        # log_sucess da pasta Uazapi pode exceder o nº de leads; evita progresso > 100% e taxas distorcidas.
+        if total_leads > 0:
+            try:
+                sent = min(int(sent or 0), int(total_leads))
+            except (TypeError, ValueError):
+                pass
+
         conversion_rate = round((closed_deals / sent * 100), 1) if sent > 0 else 0
         
         has_scheduled_chunk = False
@@ -5217,13 +5224,21 @@ def get_campaign_stats(campaign_id):
             "closed_deals": closed_deals,
             "conversion_rate": conversion_rate,
             "started_at": stats['started_at'].isoformat() if stats['started_at'] else None,
-            "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None
+            "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None,
+            "enable_cadence": bool(campaign.get("enable_cadence")),
         }
         conn_stage = get_db_connection()
         try:
             stage_progress = _get_campaign_stage_progress(conn_stage, campaign_id)
             result["stage_progress"] = stage_progress
             result["last_sync_at"] = stage_progress.get("last_sync_at")
+            agg_p = agg_s = agg_f = 0
+            stages_payload = (stage_progress or {}).get("stages") or {}
+            for _sk, sv in stages_payload.items():
+                agg_p += int(sv.get("planned_count") or 0)
+                agg_s += int(sv.get("success_count") or 0)
+                agg_f += int(sv.get("failed_count") or 0)
+            result["cadence_aggregate"] = {"planned": agg_p, "success": agg_s, "failed": agg_f}
         finally:
             conn_stage.close()
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):

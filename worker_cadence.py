@@ -1808,6 +1808,7 @@ def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
     if not rollover_leads:
         return
 
+    # delay_days vem da etapa de destino (mesmo "Aguardar após etapa anterior" do formulário / campaign_steps).
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             "SELECT message_template, delay_days, media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = %s LIMIT 1",

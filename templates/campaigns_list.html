@@ -108,7 +108,7 @@
     {% if campaigns %}
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {% for campaign in campaigns %}
-        <div class="campaign-card p-6" data-campaign-id="{{ campaign.id }}" data-status="{{ campaign.status }}" data-use-uazapi="{{ '1' if campaign.use_uazapi_sender and campaign.uazapi_folder_id else '0' }}">
+        <div class="campaign-card p-6" data-campaign-id="{{ campaign.id }}" data-status="{{ campaign.status }}" data-use-uazapi="{{ '1' if campaign.use_uazapi_sender and campaign.uazapi_folder_id else '0' }}" data-enable-cadence="{{ '1' if campaign.enable_cadence else '0' }}">
             <!-- Campaign Header -->
             <div class="mb-4">
                 <h3 class="text-xl font-bold text-white truncate mb-1" title="{{ campaign.name }}">{{ campaign.name }}</h3>
@@ -202,17 +202,16 @@
                 </div>
             </div>
 
-            <!-- Stats Grid -->
-            <div class="grid grid-cols-2 gap-3 mb-4">
-                <div class="bg-white/5 rounded-lg p-3">
-                    <div class="text-xs text-gray-400">Total</div>
-                    <div class="text-2xl font-bold text-white" id="total-{{ campaign.id }}">-</div>
-                </div>
-                <div class="bg-white/5 rounded-lg p-3">
-                    <div class="text-xs text-gray-400">Enviados</div>
-                    <div class="text-2xl font-bold text-green-400" id="sent-{{ campaign.id }}">-</div>
-                </div>
+            {% if campaign.enable_cadence %}
+            <p class="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Cadência (sub-campanhas Uazapi)</p>
+            <div id="stage-progress-{{ campaign.id }}" class="text-[11px] text-gray-200 bg-white/5 rounded-lg border border-white/10 p-3 mb-3 space-y-1"></div>
+            <div id="stage-sync-{{ campaign.id }}" class="hidden text-[10px] text-gray-500 mb-2"></div>
+            {% else %}
+            <div class="flex flex-wrap items-baseline gap-4 mb-4 text-sm">
+                <span class="text-gray-400">Leads <span class="text-lg font-bold text-white tabular-nums" id="total-{{ campaign.id }}">-</span></span>
+                <span class="text-gray-400">Enviados <span class="text-lg font-bold text-green-400 tabular-nums" id="sent-{{ campaign.id }}">-</span></span>
             </div>
+            {% endif %}
 
             <!-- Progress Bar -->
             <div class="mb-4">
@@ -229,9 +228,6 @@
             <div class="text-sm text-gray-300 mb-3">
                 Taxa de Sucesso: <span class="font-bold text-green-400" id="success-rate-{{ campaign.id }}">-</span>
             </div>
-
-            <div id="stage-progress-{{ campaign.id }}" class="hidden text-[11px] text-gray-300 bg-white/5 rounded-lg border border-white/10 p-3 mb-3"></div>
-            <div id="stage-sync-{{ campaign.id }}" class="hidden text-[10px] text-gray-500 mb-2"></div>
 
             <!-- Deal Tracker -->
             <div class="deals-tracker">
@@ -278,7 +274,7 @@
     function renderStageProgressCard(campaignId, stageProgress, lastSyncAt) {
         const container = document.getElementById(`stage-progress-${campaignId}`);
         const syncEl = document.getElementById(`stage-sync-${campaignId}`);
-        if (!container || !syncEl || !stageProgress || !stageProgress.stages) {
+        if (!container || !stageProgress || !stageProgress.stages) {
             if (container) container.classList.add('hidden');
             if (syncEl) syncEl.classList.add('hidden');
             return;
@@ -304,18 +300,19 @@
         });
 
         if (rows.length === 0) {
-            container.classList.add('hidden');
-            syncEl.classList.add('hidden');
+            container.innerHTML = '<div class="text-[10px] text-gray-500">Nenhuma sub-campanha com contagem ainda (aguarde sync Uazapi).</div>';
+            container.classList.remove('hidden');
+            if (syncEl) syncEl.classList.add('hidden');
             return;
         }
 
         container.innerHTML = rows.join('');
         container.classList.remove('hidden');
-        if (lastSyncAt) {
+        if (lastSyncAt && syncEl) {
             const dt = new Date(lastSyncAt);
             syncEl.textContent = `Última sync por instância: ${dt.toLocaleDateString('pt-BR')} ${dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
             syncEl.classList.remove('hidden');
-        } else {
+        } else if (syncEl) {
             syncEl.classList.add('hidden');
         }
     }
@@ -331,22 +328,41 @@
                 return;
             }
 
-            // Atualizar números
-            document.getElementById(`total-${campaignId}`).textContent = data.total_leads || 0;
-            document.getElementById(`sent-${campaignId}`).textContent = data.sent || 0;
+            const card = document.querySelector(`[data-campaign-id="${campaignId}"]`);
+            const cadenceMode = !!(data.enable_cadence || (card && card.dataset.enableCadence === '1'));
+
+            const totalEl = document.getElementById(`total-${campaignId}`);
+            const sentEl = document.getElementById(`sent-${campaignId}`);
+            if (totalEl) totalEl.textContent = data.total_leads || 0;
+            if (sentEl) sentEl.textContent = data.sent || 0;
             document.getElementById(`deals-${campaignId}`).textContent = data.closed_deals || 0;
 
-            // Calcular e atualizar progresso
             const total = data.total_leads || 1;
             const sent = data.sent || 0;
-            const progress = Math.round((sent / total) * 100);
+            const agg = data.cadence_aggregate || {};
+            const aggP = agg.planned || 0;
+            const aggS = agg.success || 0;
+            const aggF = agg.failed || 0;
+
+            let progress;
+            let successRate;
+            if (cadenceMode && aggP > 0) {
+                progress = Math.min(100, Math.round((aggS / aggP) * 100));
+                const att = aggS + aggF;
+                successRate = att > 0 ? Math.round((aggS / att) * 100) : 0;
+            } else if (cadenceMode && (aggS > 0 || aggF > 0)) {
+                progress = Math.min(100, Math.round((aggS / Math.max(aggS + aggF, 1)) * 100));
+                const att = aggS + aggF;
+                successRate = att > 0 ? Math.round((aggS / att) * 100) : 0;
+            } else {
+                progress = Math.min(100, Math.round((sent / total) * 100));
+                const failed = (data.failed || 0) + (data.invalid || 0);
+                const attempted = sent + failed;
+                successRate = attempted > 0 ? Math.round((sent / attempted) * 100) : 0;
+            }
+
             document.getElementById(`progress-percent-${campaignId}`).textContent = `${progress}%`;
             document.getElementById(`progress-bar-${campaignId}`).style.width = `${progress}%`;
-
-            // Calcular taxa de sucesso
-            const failed = (data.failed || 0) + (data.invalid || 0);
-            const attempted = sent + failed;
-            const successRate = attempted > 0 ? Math.round((sent / attempted) * 100) : 0;
             document.getElementById(`success-rate-${campaignId}`).textContent = `${successRate}%`;
 
             // Atualizar conversão
