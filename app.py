@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash, abort, jsonify
+from flask import Flask, render_template, request, redirect, url_for, send_file, flash, abort, jsonify, Response
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -2709,6 +2709,94 @@ def campaign_kanban_data(campaign_id):
         "4": _is_previous_stage_fully_done(campaign_id, 4),
     }
     return json.dumps(out)
+
+
+@app.route("/api/campaigns/<int:campaign_id>/export-remanent-csv")
+@login_required
+def export_remanent_csv(campaign_id):
+    """
+    CSV de leads remanescentes no funil (exclui convertido/perdido/respondeu).
+    scope=funnel (default): todos os passos ativos.
+    scope=breakup: apenas current_step=4 (coluna Break-up).
+    """
+    scope = (request.args.get("scope") or "funnel").strip().lower()
+    if scope not in ("funnel", "breakup"):
+        scope = "funnel"
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        abort(404)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            base = """
+                SELECT id, phone, name, status, current_step, cadence_status,
+                       last_sent_stage, last_message_sent_at, whatsapp_link, notes
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                  AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                  AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost', 'replied')
+            """
+            if scope == "breakup":
+                cur.execute(
+                    base + " AND current_step = 4 ORDER BY COALESCE(csv_row_order, id), id",
+                    (campaign_id,),
+                )
+            else:
+                cur.execute(
+                    base + " ORDER BY current_step ASC, COALESCE(csv_row_order, id), id",
+                    (campaign_id,),
+                )
+            rows = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    def _cell(v):
+        if v is None:
+            return ""
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v)
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(
+        [
+            "id",
+            "phone",
+            "name",
+            "status",
+            "current_step",
+            "cadence_status",
+            "last_sent_stage",
+            "last_message_sent_at",
+            "whatsapp_link",
+            "notes",
+        ]
+    )
+    for r in rows:
+        w.writerow(
+            [
+                r.get("id"),
+                _cell(r.get("phone")),
+                _cell(r.get("name")),
+                _cell(r.get("status")),
+                r.get("current_step"),
+                _cell(r.get("cadence_status")),
+                _cell(r.get("last_sent_stage")),
+                _cell(r.get("last_message_sent_at")),
+                _cell(r.get("whatsapp_link")),
+                _cell(r.get("notes")),
+            ]
+        )
+
+    safe_name = re.sub(r"[^\w\-]+", "_", (campaign.name or "campanha"))[:80]
+    fname = f"{safe_name}_remanescentes_{scope}.csv"
+    return Response(
+        "\ufeff" + buf.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @app.route('/api/campaigns/<int:campaign_id>/leads/<int:lead_id>/move', methods=['POST'])
@@ -5756,6 +5844,8 @@ def _is_previous_stage_fully_done(campaign_id, step):
     """
     Regra fechada: próxima etapa só libera quando etapa anterior estiver done em todas as instâncias.
     Step 2 usa campanha inicial (folder principal); Step 3/4 usa campaign_stage_sends.
+    Step 4 (Break-up): libera também se não houver sends FU2, se todos estiverem done, ou se não
+    houver sub-campanha FU2 em scheduled/running (envio já concluído na API mas sync pendente).
     """
     if step <= 1:
         return True
@@ -5798,6 +5888,25 @@ def _is_previous_stage_fully_done(campaign_id, step):
             row = cur.fetchone() or {}
             total = int(row.get('total') or 0)
             done_count = int(row.get('done_count') or 0)
+            # Break-up (step 4): FU2 pode não ter linha em campaign_stage_sends (só rollover),
+            # ou já ter enviado na API mas sync ainda não marcou todos como done.
+            if step == 4:
+                if total == 0:
+                    return True
+                if total > 0 and total == done_count:
+                    return True
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM campaign_stage_sends
+                    WHERE campaign_id = %s AND stage = %s
+                      AND status IN ('scheduled', 'running')
+                    """,
+                    (campaign_id, prev_stage),
+                )
+                active = int((cur.fetchone() or {}).get('n') or 0)
+                if active == 0:
+                    return True
+                return False
             return total > 0 and total == done_count
     finally:
         conn.close()

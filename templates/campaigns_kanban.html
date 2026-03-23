@@ -183,7 +183,14 @@
                 </p>
             </div>
         </div>
-        <div class="flex items-center gap-3"></div>
+        <div class="flex items-center gap-2 flex-wrap justify-end">
+            <button type="button" onclick="downloadRemanentCsv('funnel')"
+                class="text-xs px-3 py-1.5 rounded-lg border border-gray-600/80 text-gray-300 hover:bg-white/5 hover:border-gray-500 transition-colors"
+                title="Leads ainda no funil (exceto convertido/perdido)">CSV remanescentes</button>
+            <button type="button" onclick="downloadRemanentCsv('breakup')"
+                class="text-xs px-3 py-1.5 rounded-lg border border-yellow-600/40 text-yellow-200/90 hover:bg-yellow-500/10 transition-colors"
+                title="Apenas coluna Break-up (passo 4)">CSV Break-up</button>
+        </div>
     </div>
 
     <!-- Sub-campanhas (Principal + Follow-ups) -->
@@ -739,6 +746,10 @@
         }
     }
     const CAMPAIGN_ID = {{ campaign.id }};
+    function downloadRemanentCsv(scope) {
+        const s = scope === 'breakup' ? 'breakup' : 'funnel';
+        window.location.href = `/api/campaigns/${CAMPAIGN_ID}/export-remanent-csv?scope=${encodeURIComponent(s)}`;
+    }
     const USE_UAZAPI = {{ campaign.use_uazapi_sender|tojson }};
     const STAGE_DEFAULT_DELAY_MIN = {{ (campaign.delay_min_minutes or 5)|int }};
     const STAGE_DEFAULT_DELAY_MAX = {{ (campaign.delay_max_minutes or 15)|int }};
@@ -1058,8 +1069,11 @@
         const lastSentStage = (lead.last_sent_stage || '').toLowerCase();
         const sentAtRaw = lead.last_message_sent_at || lead.sent_at;
         const sentAt = sentAtRaw ? new Date(sentAtRaw).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
-        const sentThisStage = !!(stageForColumn && lastSentStage && lastSentStage === stageForColumn);
+        const sentThisStage = !!(stageForColumn && lastSentStage && lastSentStage === stageForColumn)
+            || (stageForColumn === 'breakup' && lastSentStage === 'breakup');
         const hasPreviousSend = !!lastSentStage;
+        const showSnoozedWaiting = lead.cadence_status === 'snoozed'
+            && !(stageForColumn === 'breakup' && lastSentStage === 'breakup');
 
         div.innerHTML = `
             <div class="flex items-start justify-between">
@@ -1094,7 +1108,7 @@
                 </div>` : ''}
             </div>
 
-            ${lead.cadence_status === 'snoozed' ? '<span class="text-[10px] text-yellow-500 mt-1 inline-block">⏸ Em espera</span>' : ''}
+            ${showSnoozedWaiting ? '<span class="text-[10px] text-yellow-500 mt-1 inline-block">⏸ Em espera</span>' : ''}
             ${lead.cadence_status === 'stopped' ? `<div class="mt-1 flex items-center gap-1 text-[10px] text-red-400" title="${lead.log || 'Parado automaticamente'}"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg> <span>Parado (Interação)</span></div>` : ''}
         `;
 
