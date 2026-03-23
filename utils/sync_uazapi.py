@@ -35,6 +35,28 @@ def _lead_step_after_confirmed_send(stage: str) -> int:
     return {"follow1": 3, "follow2": 4, "breakup": 4}.get(stage, 4)
 
 
+def _cadence_stage_sql_guard(stage: str) -> str:
+    """
+    Pastas mantêm histórico em Sent; o sync não deve rebaixar current_step quando
+    o lead já avançou na cadência.
+
+    - initial: só step 1 (Inicial).
+    - follow1: só step 2 (FU1) — evita voltar quem já está em FU2+.
+    - follow2: só step 3 (FU2).
+    - breakup: step 3 ou 4 (transição / já na Despedida).
+    """
+    s = (stage or "").strip()
+    if s == "initial":
+        return " AND COALESCE(current_step, 1) = 1 "
+    if s == "follow1":
+        return " AND COALESCE(current_step, 1) = 2 "
+    if s == "follow2":
+        return " AND COALESCE(current_step, 1) = 3 "
+    if s == "breakup":
+        return " AND COALESCE(current_step, 1) IN (3, 4) "
+    return ""
+
+
 def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed_phones):
     """
     Reconcilia sucesso/falha por lead usando list_messages (Sent/Failed).
@@ -400,6 +422,7 @@ def _sync_folder_via_listfolders(
     ids_to_update = lead_ids[:n_take]
     if not ids_to_update:
         return 0
+    step_guard = _cadence_stage_sql_guard(stage_label or "")
     cur.execute(
         """UPDATE campaign_leads
            SET status = 'sent',
@@ -413,7 +436,8 @@ def _sync_folder_via_listfolders(
            WHERE id = ANY(%s)
              AND campaign_id = %s
              AND COALESCE(removed_from_funnel, FALSE) = FALSE
-             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+        + step_guard,
         (
             next_step,
             stage_label,
@@ -469,6 +493,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         fid = _normalize_folder_id(send.get("uazapi_folder_id"))
         if not send_token or not fid:
             continue
+
+        stage_guard = _cadence_stage_sql_guard(send.get("stage") or "")
 
         ctx = {"campaign_id": campaign_id, "instance_id": send.get("instance_id")}
         folders_list = uazapi_service.list_folders(send_token, context=ctx) or []
@@ -538,7 +564,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                            WHERE id = ANY(%s)
                              AND campaign_id = %s
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+                        + stage_guard,
                         (
                             _lead_step_after_confirmed_send(send.get("stage") or ""),
                             send.get("stage"),
@@ -564,7 +591,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                            WHERE id = ANY(%s)
                              AND campaign_id = %s
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+                        + stage_guard,
                         (
                             send.get("stage"),
                             send.get("instance_id"),
@@ -703,7 +731,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                            WHERE id = ANY(%s)
                              AND campaign_id = %s
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+                        + stage_guard,
                         (
                             _lead_step_after_confirmed_send(send.get("stage") or ""),
                             send.get("stage"),
@@ -729,7 +758,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                            WHERE id = ANY(%s)
                              AND campaign_id = %s
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+                        + stage_guard,
                         (
                             send.get("stage"),
                             send.get("instance_id"),
@@ -774,7 +804,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                            WHERE id = ANY(%s)
                              AND campaign_id = %s
                              AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+                        + stage_guard,
                         (
                             _lead_step_after_confirmed_send(send.get("stage") or ""),
                             send.get("stage"),
