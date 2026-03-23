@@ -203,8 +203,8 @@
             </div>
 
             {% if campaign.enable_cadence %}
-            <p class="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Cadência (sub-campanhas Uazapi)</p>
-            <div id="stage-progress-{{ campaign.id }}" class="text-[11px] text-gray-200 bg-white/5 rounded-lg border border-white/10 p-3 mb-3 space-y-1"></div>
+            <p class="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Cadência (sub-campanhas)</p>
+            <div id="stage-progress-{{ campaign.id }}" class="text-gray-200 bg-white/5 rounded-lg border border-white/10 p-3 mb-3 space-y-1.5 leading-snug"></div>
             <div id="stage-sync-{{ campaign.id }}" class="hidden text-[10px] text-gray-500 mb-2"></div>
             {% else %}
             <div class="flex flex-wrap items-baseline gap-4 mb-4 text-sm">
@@ -296,11 +296,11 @@
             const failed = payload.failed_count || 0;
             const inst = (payload.instances || []).length;
             if (planned <= 0 && success <= 0 && failed <= 0) return;
-            rows.push(`<div>${labels[stage]}: <span class="text-green-400">${success}</span>/<span class="text-blue-300">${planned}</span> • <span class="text-red-400">${failed} falhas</span> • <span class="text-gray-400">${inst} inst.</span></div>`);
+            rows.push(`<div class="text-sm">${labels[stage]}: <span class="text-green-400 font-medium">${success}</span>/<span class="text-blue-300 font-medium">${planned}</span> • <span class="text-red-400">${failed} falhas</span> • <span class="text-gray-400">${inst} inst.</span></div>`);
         });
 
         if (rows.length === 0) {
-            container.innerHTML = '<div class="text-[10px] text-gray-500">Nenhuma sub-campanha com contagem ainda (aguarde sync Uazapi).</div>';
+            container.innerHTML = '<div class="text-xs text-gray-500">Nenhuma sub-campanha com contagem ainda (aguarde sincronização).</div>';
             container.classList.remove('hidden');
             if (syncEl) syncEl.classList.add('hidden');
             return;
