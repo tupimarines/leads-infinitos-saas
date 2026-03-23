@@ -4,6 +4,7 @@ import pytest
 from utils.sync_uazapi import (
     normalize_phone_for_match,
     _extract_phones_from_message,
+    _message_matches_folder,
     _reconcile_send_by_messages,
     sync_campaign_leads_from_uazapi,
 )
@@ -63,6 +64,21 @@ class TestExtractPhonesFromMessage:
         assert _extract_phones_from_message({}) is None
         assert _extract_phones_from_message({"foo": "bar"}) is None
         assert _extract_phones_from_message({"number": "123"}) is None  # < 10 dígitos
+
+
+class TestMessageMatchesFolder:
+    def test_send_folder_id(self):
+        assert _message_matches_folder({"send_folder_id": "abc123"}, "abc123") is True
+        assert _message_matches_folder({"send_folder_id": "x"}, "y") is False
+
+    def test_sendFolderId_alias(self):
+        assert _message_matches_folder({"sendFolderId": "f1"}, "f1") is True
+
+    def test_empty_send_folder_id_no_match(self):
+        assert _message_matches_folder({"send_folder_id": ""}, "r373bae082f0849") is False
+
+    def test_case_insensitive(self):
+        assert _message_matches_folder({"send_folder_id": "r373bae082f0849"}, "R373BAE082F0849") is True
 
 
 class TestReconcileSendByMessages:

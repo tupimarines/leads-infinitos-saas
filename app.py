@@ -616,6 +616,23 @@ def _init_db_body() -> None:
             """
         )
 
+        cur.execute(
+            """
+            ALTER TABLE campaign_leads ADD COLUMN IF NOT EXISTS csv_row_order INTEGER;
+            """
+        )
+        cur.execute(
+            """
+            UPDATE campaign_leads cl
+            SET csv_row_order = s.rn
+            FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY id) AS rn
+                FROM campaign_leads
+            ) s
+            WHERE cl.id = s.id AND cl.csv_row_order IS NULL;
+            """
+        )
+
         # uazapi_last_send_lead_ids para sync via listfolders (F9)
         cur.execute(
             """
@@ -981,18 +998,19 @@ class CampaignLead:
         try:
             with conn.cursor() as cur:
                 # Incluir status='pending' explicitamente para garantir processamento pelo worker
-                # Novas colunas de enriquecimento
+                # Novas colunas de enriquecimento; csv_row_order = ordem da planilha (1..n)
                 args_str = ','.join(
-                    cur.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", 
+                    cur.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", 
                                (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending',
                                 l.get('address'), l.get('website'), l.get('category'), l.get('location'),
-                                l.get('reviews_count'), l.get('reviews_rating'), l.get('latitude'), l.get('longitude')
+                                l.get('reviews_count'), l.get('reviews_rating'), l.get('latitude'), l.get('longitude'),
+                                idx + 1,
                                )).decode('utf-8') 
-                    for l in leads
+                    for idx, l in enumerate(leads)
                 )
                 cur.execute("""
                     INSERT INTO campaign_leads 
-                    (campaign_id, phone, name, whatsapp_link, status, address, website, category, location, reviews_count, reviews_rating, latitude, longitude) 
+                    (campaign_id, phone, name, whatsapp_link, status, address, website, category, location, reviews_count, reviews_rating, latitude, longitude, csv_row_order) 
                     VALUES 
                 """ + args_str)
             conn.commit()
@@ -2628,7 +2646,7 @@ def campaign_kanban_data(campaign_id):
                        END as status_priority
             FROM campaign_leads 
             WHERE campaign_id = %s 
-            ORDER BY current_step ASC, status_priority ASC, last_message_sent_at DESC NULLS LAST, name ASC
+            ORDER BY current_step ASC, status_priority ASC, COALESCE(csv_row_order, id) ASC, id ASC
         """, (campaign_id,))
         leads = cur.fetchall()
     conn.close()
@@ -6534,7 +6552,7 @@ def get_campaign_leads(campaign_id):
         query = f"""
             SELECT id, phone, name, whatsapp_link, status, log, sent_at 
             {base_query}
-            ORDER BY id ASC
+            ORDER BY COALESCE(csv_row_order, id) ASC, id ASC
             LIMIT %s OFFSET %s
         """
         params.extend([per_page, offset])
@@ -6816,13 +6834,16 @@ def replace_leads(campaign_id):
             # Delete only pending to preserve history of sent leads
             cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s AND status = 'pending'", (campaign_id,))
             
-            # Insert new
+            # Insert new (csv_row_order = ordem das linhas no CSV)
             args_str = ','.join(
-                cur.mogrify("(%s, %s, %s, %s, %s)", 
-                           (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending')).decode('utf-8') 
-                for l in valid_leads
+                cur.mogrify("(%s, %s, %s, %s, %s, %s)", 
+                           (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending', idx + 1)).decode('utf-8') 
+                for idx, l in enumerate(valid_leads)
             )
-            cur.execute("INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link, status) VALUES " + args_str)
+            cur.execute(
+                "INSERT INTO campaign_leads (campaign_id, phone, name, whatsapp_link, status, csv_row_order) VALUES "
+                + args_str
+            )
             
         conn.commit()
         conn.close()

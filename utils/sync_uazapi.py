@@ -1,11 +1,19 @@
 """
-Sincroniza campaign_leads com a API Uazapi (list_messages / list_folders).
+Sincroniza campaign_leads com a API Uazapi (list_messages / list_folders / message/find).
+
+- list_folders: agregados log_success/log_failed (podem divergir do número de leads).
+- Quando a pasta está finalizada e há >= ~80% do planejado, ou log_success > planned_count,
+  aplica pente fino: POST /message/find por chat (chatid=55...@s.whatsapp.net) e confere
+  send_folder_id nas mensagens. Desligar: UAZAPI_MESSAGE_FIND=0
+- Contagens em campaign_stage_sends são limitadas a planned_count para evitar 10/9 no UI.
+
 Usado por app.py (rota sync-uazapi) e worker_cadence (antes do rollover).
 """
 
 import json
 import os
 import re
+import time
 
 from psycopg2.extras import RealDictCursor
 
@@ -262,6 +270,98 @@ def fetch_all_phones_by_status(uazapi_service, token, folder_id, message_status,
 _fetch_all_phones_by_status = fetch_all_phones_by_status
 
 
+def _message_matches_folder(m, folder_id):
+    """
+    Mensagem do disparo avançado (POST /message/find).
+    Exemplo real: send_folder_id='r373bae082f0849', fromMe=true, wasSentByApi=true, sendFunction=sendtext.
+    Ignora send_folder_id vazio (string vazia não casa com pasta).
+    Comparação case-insensitive — API pode devolver id em minúsculo.
+    """
+    if not isinstance(m, dict) or not folder_id:
+        return False
+    sf = m.get("send_folder_id") or m.get("sendFolderId")
+    if sf is None:
+        return False
+    s_clean = str(sf).strip()
+    if not s_clean:
+        return False
+    return s_clean.lower() == str(folder_id).strip().lower()
+
+
+def _should_reconcile_via_message_find(log_success, log_failed, planned_count, status):
+    """
+    Dispara POST /message/find por chat quando:
+    - API reporta mais sucessos que leads planejados (ex.: 10/9), ou
+    - Pasta em estado final e listfolders já indica >= ~80% do planejado (evita confiar só no agregado).
+    Desligar: UAZAPI_MESSAGE_FIND=0
+    """
+    if os.environ.get("UAZAPI_MESSAGE_FIND", "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    if planned_count <= 0:
+        return False
+    if log_success > planned_count:
+        return True
+    st = (status or "").lower()
+    if st not in ("done", "concluído", "completed", "concluido", "inconsistent"):
+        return False
+    thresh = max(1, (planned_count * 80 + 99) // 100)  # ceil 80% do planejado
+    return log_success >= thresh
+
+
+def reconcile_leads_via_message_find(
+    uazapi_service,
+    token,
+    folder_id,
+    campaign_id,
+    lead_ids,
+    conn,
+    context=None,
+):
+    """
+    Para cada lead do chunk, POST /message/find com chatid=55...@s.whatsapp.net
+    e confirma envio se existir mensagem com send_folder_id igual ao folder da campanha.
+    Retorna (sent_ids, failed_ids). failed_ids fica vazio (reservado).
+    """
+    if not uazapi_service or not token or not folder_id or not lead_ids:
+        return set(), set()
+    if isinstance(lead_ids, str):
+        try:
+            lead_ids = json.loads(lead_ids)
+        except Exception:
+            lead_ids = []
+    if not lead_ids:
+        return set(), set()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT id, phone, whatsapp_link
+               FROM campaign_leads
+               WHERE campaign_id = %s AND id = ANY(%s)""",
+            (campaign_id, list(lead_ids)),
+        )
+        rows = cur.fetchall() or []
+
+    sleep_s = float(os.environ.get("UAZAPI_MESSAGE_FIND_SLEEP_SEC", "0.05"))
+    sent_ids = set()
+    for row in rows:
+        raw = row.get("phone") or row.get("whatsapp_link")
+        phone = _normalize_phone_for_api(raw or "")
+        if not phone:
+            continue
+        chatid = f"{phone}@s.whatsapp.net"
+        resp = uazapi_service.message_find(
+            token, chatid, limit=50, offset=0, context=context
+        )
+        if resp:
+            msgs = resp.get("messages") or []
+            if any(_message_matches_folder(m, folder_id) for m in msgs):
+                sent_ids.add(int(row["id"]))
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+
+    return sent_ids, set()
+
+
 def _sync_folder_via_listfolders(
     conn,
     campaign_id,
@@ -294,7 +394,10 @@ def _sync_folder_via_listfolders(
     log_success = int(folder_info.get("log_sucess") or folder_info.get("log_success") or 0)
     if log_success <= 0:
         return 0
-    ids_to_update = lead_ids[: int(log_success)] if isinstance(lead_ids, list) else []
+    if not isinstance(lead_ids, list) or not lead_ids:
+        return 0
+    n_take = min(int(log_success), len(lead_ids))
+    ids_to_update = lead_ids[:n_take]
     if not ids_to_update:
         return 0
     cur.execute(
@@ -356,7 +459,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                JOIN instances i ON i.id = css.instance_id
                WHERE css.campaign_id = %s
                  AND css.uazapi_folder_id IS NOT NULL
-                 AND css.status IN ('scheduled', 'running', 'partial')""",
+                 AND css.status IN ('scheduled', 'running', 'partial', 'done')""",
             (campaign_id,),
         )
         stage_sends = cur.fetchall() or []
@@ -638,8 +741,58 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     )
                     updated_failed += cur.rowcount
 
+        # Pente fino: /message/find por chat (send_folder_id) quando agregado listfolders diverge ou ≥80% em pasta final.
+        if (
+            lead_ids
+            and planned_count > 0
+            and folder_info
+            and _should_reconcile_via_message_find(log_success, log_failed, planned_count, status)
+        ):
+            mf_sent_ids, mf_failed_ids = reconcile_leads_via_message_find(
+                uazapi_service,
+                send_token,
+                fid,
+                campaign_id,
+                lead_ids,
+                conn,
+                context=ctx,
+            )
+            reconciled_success = len(mf_sent_ids)
+            reconciled_failed = len(mf_failed_ids) if mf_failed_ids else 0
+            if mf_sent_ids:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE campaign_leads
+                           SET status = 'sent',
+                               sent_at = NOW(),
+                               current_step = %s,
+                               last_message_sent_at = NOW(),
+                               last_sent_stage = COALESCE(%s, last_sent_stage),
+                               last_sent_instance_id = COALESCE(%s, last_sent_instance_id),
+                               last_sent_instance_remote_jid = COALESCE(%s, last_sent_instance_remote_jid),
+                               last_sent_folder_id = COALESCE(%s, last_sent_folder_id)
+                           WHERE id = ANY(%s)
+                             AND campaign_id = %s
+                             AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')""",
+                        (
+                            _lead_step_after_confirmed_send(send.get("stage") or ""),
+                            send.get("stage"),
+                            send.get("instance_id"),
+                            send.get("instance_remote_jid"),
+                            fid,
+                            list(mf_sent_ids),
+                            campaign_id,
+                        ),
+                    )
+                    updated_sent += cur.rowcount
+
         effective_success = max(log_success, reconciled_success)
         effective_failed = max(log_failed, reconciled_failed)
+        if planned_count > 0:
+            effective_success = min(effective_success, planned_count)
+            _tail = planned_count - effective_success
+            effective_failed = min(effective_failed, max(0, _tail))
 
         # list_folders é fonte de verdade: quando status=done, marcar done no DB.
         # Não depende de list_messages (que pode falhar com 401/400 em pastas archived).

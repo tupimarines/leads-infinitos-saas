@@ -946,7 +946,12 @@ def process_cadence():
             # --- PART A: SAFETY BUFFER CHECK (Monitoring Phase) ---
             check_monitoring_leads(conn)
 
-            # 1. Find active cadence campaigns (para rollover e envio)
+            # Rollover Inicial → FU1: consulta própria em process_uazapi_initial_stage_rollovers (não usa a lista abaixo).
+            # Deve rodar mesmo quando não há campanhas em "running/pending/completed" (ex.: campanha pausada) ou lista vazia por outro motivo;
+            # caso contrário os cards nunca saem da Inicial após o envio.
+            process_uazapi_initial_stage_rollovers(conn)
+
+            # 1. Find active cadence campaigns (para rollover legado, chunks e envio)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
@@ -964,8 +969,6 @@ def process_cadence():
                 conn.close()
                 time.sleep(CADENCE_POLL_INTERVAL)
                 continue
-
-            process_uazapi_initial_stage_rollovers(conn)
 
             for campaign in campaigns:
                 if not campaign.get('use_uazapi_sender'):

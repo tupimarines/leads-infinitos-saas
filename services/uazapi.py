@@ -490,3 +490,69 @@ class UazapiService:
             if resp is not None:
                 print(f"❌ [Uazapi] Response: {resp.text}")
             return None
+
+    def message_find(
+        self,
+        token: str,
+        chatid: str,
+        limit: int = 30,
+        offset: int = 0,
+        context: Optional[dict] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Busca mensagens de um chat via POST /message/find.
+        chatid: ex. 5511999999999@s.whatsapp.net
+        """
+        url = f"{self.base_url}/message/find"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "chatid": chatid,
+            "limit": max(1, min(int(limit), 200)),
+            "offset": max(0, int(offset)),
+        }
+        ctx_str = f" {context}" if context else ""
+
+        def _should_silent_return(resp) -> bool:
+            if resp is None:
+                return False
+            if resp.status_code == 401:
+                body = (getattr(resp, "text", None) or "").lower()
+                if "invalid token" in body:
+                    return True
+            return False
+
+        def _maybe_log_401(resp, ctx: Optional[dict], endpoint: str) -> None:
+            if resp is None or resp.status_code != 401:
+                return
+            inst_id = (ctx or {}).get("instance_id")
+            key = ("inst", inst_id) if inst_id is not None else ("legacy", (ctx or {}).get("campaign_id"))
+            now = time.monotonic()
+            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
+                _401_log_last[key] = now
+                msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={key[1]}" if key[1] is not None else "instância"
+                print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=20
+            )
+            if _should_silent_return(response):
+                _maybe_log_401(response, context, "message_find")
+                return None
+            if response.status_code != 200:
+                if response.status_code != 400:
+                    print(f"❌ [Uazapi] message_find Status: {response.status_code}{ctx_str}")
+                return None
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            resp = getattr(e, "response", None)
+            if _should_silent_return(resp):
+                _maybe_log_401(resp, context, "message_find")
+                return None
+            if os.environ.get("UAZAPI_DEBUG", "").strip().lower() in ("1", "true", "yes"):
+                print(f"❌ [Uazapi] message_find error: {e}{ctx_str}")
+            return None
