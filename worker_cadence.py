@@ -1298,8 +1298,9 @@ def schedule_next_initial_chunk(campaign, conn):
 
 def process_uazapi_initial_stage_rollovers(conn):
     """
-    Rollover automático (cadência + Uazapi): quando log_success da sub-campanha inicial
-    atinge o número planejado, move leads para FU1 (step 1 → 2), com snooze na janela configurada.
+    Rollover automático (cadência + Uazapi): quando a pasta inicial contabilizou todos os slots
+    (success_count + failed_count >= planned_count), move para FU1 os leads ainda em step 1 com
+    status sent (falhas parciais na API não bloqueiam mais o avanço dos enviados).
     Se houver texto/mídia em campaign_steps step 2 e credenciais Uazapi, cria também a
     campanha agendada na API; caso contrário apenas atualiza o banco (Gerar no Kanban depois).
     Um registro em campaign_stage_sends = um folder Uazapi; cada um faz rollover independente.
@@ -1318,7 +1319,7 @@ def process_uazapi_initial_stage_rollovers(conn):
             JOIN campaigns c ON c.id = css.campaign_id
             JOIN instances i ON i.id = css.instance_id
             WHERE css.stage = 'initial'
-              AND css.status = 'done'
+              AND css.status IN ('done', 'partial')
               AND COALESCE(css.fu_rollover_done, FALSE) = FALSE
               AND c.enable_cadence = TRUE
               AND c.use_uazapi_sender = TRUE
@@ -1330,22 +1331,24 @@ def process_uazapi_initial_stage_rollovers(conn):
     for row in pending:
         cid = row["campaign_id"]
         send_id = row["send_id"]
-        planned = int(row.get("planned_count") or 0)
-        succ = int(row.get("success_count") or 0)
-        fail = int(row.get("failed_count") or 0)
-        if planned <= 0:
-            continue
-        if succ + fail < planned:
-            continue
-        if succ < planned:
-            continue
-
         lids_raw = row.get("lead_ids") or []
         if isinstance(lids_raw, str):
             try:
                 lids_raw = json.loads(lids_raw)
             except Exception:
                 lids_raw = []
+        planned = int(row.get("planned_count") or 0)
+        if planned <= 0 and lids_raw:
+            planned = len(lids_raw)
+        succ = int(row.get("success_count") or 0)
+        fail = int(row.get("failed_count") or 0)
+        if planned <= 0:
+            continue
+        # Pasta processou todos os slots (API); falhas parciais não bloqueiam mais o rollover:
+        # leads com status=sent seguem para FU1; falhos permanecem na Inicial.
+        if succ + fail < planned:
+            continue
+
         if not lids_raw:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1370,6 +1373,19 @@ def process_uazapi_initial_stage_rollovers(conn):
             )
             rollover_leads = cur.fetchall() or []
         if not rollover_leads:
+            # Evita loop infinito: pasta já contabilizada (succ+fail>=planned) mas ninguém em step1/sent
+            # (ex.: todos falharam, ids desalinhados ou já movidos).
+            if succ + fail >= planned:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
+                        (send_id,),
+                    )
+                conn.commit()
+                print(
+                    f"  ⏭️ [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: "
+                    f"sem leads em Inicial+Enviado para mover; rollover marcado concluído."
+                )
             continue
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
