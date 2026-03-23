@@ -2551,13 +2551,48 @@ def campaign_kanban(campaign_id):
             (campaign_id,),
         )
         campaign_instances = cur.fetchall() or []
+        step_generate_templates = {2: [], 3: [], 4: []}
+        cur.execute(
+            """
+            SELECT step_number, message_template FROM campaign_steps
+            WHERE campaign_id = %s AND step_number IN (2, 3, 4)
+            """,
+            (campaign_id,),
+        )
+        for r in cur.fetchall() or []:
+            sn = int(r.get("step_number") or 0)
+            if sn not in step_generate_templates:
+                continue
+            try:
+                p = json.loads(r.get("message_template") or "[]")
+                if isinstance(p, list):
+                    step_generate_templates[sn] = [str(x).strip() for x in p if str(x).strip()]
+                elif isinstance(p, str) and p.strip():
+                    step_generate_templates[sn] = [p.strip()]
+            except Exception:
+                pass
     conn.close()
+
+    try:
+        base_var = json.loads(getattr(campaign, "message_template", None) or "[]")
+        if isinstance(base_var, str):
+            base_list = [base_var.strip()] if base_var.strip() else []
+        elif isinstance(base_var, list):
+            base_list = [str(x).strip() for x in base_var if str(x).strip()]
+        else:
+            base_list = []
+    except Exception:
+        base_list = []
+    for sn in (2, 3, 4):
+        if not step_generate_templates[sn] and base_list:
+            step_generate_templates[sn] = list(base_list)
 
     return render_template(
         'campaigns_kanban.html',
         campaign=campaign,
         total_leads=total_leads,
         campaign_instances=campaign_instances,
+        step_generate_templates=step_generate_templates,
     )
 
 

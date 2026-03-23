@@ -742,6 +742,7 @@
     const USE_UAZAPI = {{ campaign.use_uazapi_sender|tojson }};
     const STAGE_DEFAULT_DELAY_MIN = {{ (campaign.delay_min_minutes or 5)|int }};
     const STAGE_DEFAULT_DELAY_MAX = {{ (campaign.delay_max_minutes or 15)|int }};
+    const STEP_GENERATE_TEMPLATES = {{ (step_generate_templates or {2:[],3:[],4:[]})|tojson }};
     const CAMPAIGN_INSTANCES = {{ (campaign_instances or [])|tojson }};
     const UAZAPI_INSTANCES = CAMPAIGN_INSTANCES.filter(i => (i.api_provider || 'megaapi') === 'uazapi');
     let ALL_LEADS = {};
@@ -855,8 +856,13 @@
         renderStageInstanceOptions();
         const variationsContainer = document.getElementById('stageVariationsContainer');
         variationsContainer.innerHTML = '';
-        addStageVariation();
-        addStageVariation();
+        const preset = (STEP_GENERATE_TEMPLATES && (STEP_GENERATE_TEMPLATES[step] || STEP_GENERATE_TEMPLATES[String(step)])) || [];
+        if (preset.length > 0) {
+            preset.slice(0, 5).forEach((v) => addStageVariation(v));
+        } else {
+            addStageVariation();
+            addStageVariation();
+        }
         document.getElementById('stageCampaignModal').classList.remove('hidden');
         updateModalBodyLock();
     }

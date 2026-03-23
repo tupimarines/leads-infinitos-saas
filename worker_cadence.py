@@ -1299,7 +1299,9 @@ def schedule_next_initial_chunk(campaign, conn):
 def process_uazapi_initial_stage_rollovers(conn):
     """
     Rollover automático (cadência + Uazapi): quando log_success da sub-campanha inicial
-    atinge o número planejado, cria FU1 na API e move os leads (step 1 → 2).
+    atinge o número planejado, move leads para FU1 (step 1 → 2), com snooze na janela configurada.
+    Se houver texto/mídia em campaign_steps step 2 e credenciais Uazapi, cria também a
+    campanha agendada na API; caso contrário apenas atualiza o banco (Gerar no Kanban depois).
     Um registro em campaign_stage_sends = um folder Uazapi; cada um faz rollover independente.
     """
     if not uazapi_service:
@@ -1353,10 +1355,6 @@ def process_uazapi_initial_stage_rollovers(conn):
             conn.commit()
             continue
 
-        token = (row.get("apikey") or "").strip()
-        if not token or not row.get("uazapi_folder_id"):
-            continue
-
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -1380,15 +1378,15 @@ def process_uazapi_initial_stage_rollovers(conn):
                 (cid,),
             )
             step2 = cur.fetchone()
-        if not step2:
-            print(f"  ⏭️ [Uazapi Rollover] Campaign '{row['campaign_name']}': step 2 não configurado.")
-            continue
 
         send_hour = int(row.get("send_hour_start") or 8)
         send_sat = bool(row.get("send_saturday"))
         send_sun = bool(row.get("send_sunday"))
-        delay_days = step2.get("delay_days")
-        delay_days = 1 if delay_days is None else int(delay_days)
+        if step2 is not None:
+            delay_days = step2.get("delay_days")
+            delay_days = 1 if delay_days is None else int(delay_days)
+        else:
+            delay_days = 3
         now_brazil = datetime.now(BRAZIL_TZ)
         target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
         scheduled_ts = int(target_dt.timestamp() * 1000)
@@ -1401,7 +1399,7 @@ def process_uazapi_initial_stage_rollovers(conn):
 
         media_file_data = None
         media_type = "image"
-        if is_sa and step2.get("media_path"):
+        if step2 and is_sa and step2.get("media_path"):
             mp = step2["media_path"]
             if mp and _is_media_path_safe(mp, user_id) and os.path.exists(mp):
                 try:
@@ -1422,12 +1420,22 @@ def process_uazapi_initial_stage_rollovers(conn):
                 except Exception as e:
                     print(f"  ⚠️ [Uazapi Rollover] Erro mídia step2: {e}")
 
-        raw_tpl = step2.get("message_template") or "[]"
-        try:
-            parsed = json.loads(raw_tpl)
-            msg_text = random.choice(parsed) if isinstance(parsed, list) else str(parsed)
-        except Exception:
-            msg_text = str(raw_tpl)
+        msg_text = ""
+        if step2:
+            raw_tpl = step2.get("message_template") or "[]"
+            try:
+                parsed = json.loads(raw_tpl)
+                if isinstance(parsed, list):
+                    msg_text = random.choice(parsed) if parsed else ""
+                else:
+                    msg_text = str(parsed) if parsed else ""
+            except Exception:
+                msg_text = str(raw_tpl)
+
+        token = (row.get("apikey") or "").strip()
+        can_api = bool(token and row.get("uazapi_folder_id"))
+        has_body = bool((msg_text or "").strip()) or bool(media_file_data)
+        want_api = can_api and has_body
 
         messages = []
         moved_ids = []
@@ -1443,6 +1451,9 @@ def process_uazapi_initial_stage_rollovers(conn):
             if len(clean) <= 11 and not clean.startswith("55"):
                 clean = "55" + clean
             name = lead.get("name") or "Visitante"
+            moved_ids.append(lead["id"])
+            if not want_api:
+                continue
             text = (
                 msg_text.replace("{{nome}}", name)
                 .replace("{{name}}", name)
@@ -1453,24 +1464,29 @@ def process_uazapi_initial_stage_rollovers(conn):
                 messages.append({"number": clean, "type": media_type, "file": media_file_data, "text": text})
             else:
                 messages.append({"number": clean, "type": "text", "text": text})
-            moved_ids.append(lead["id"])
 
-        if not messages:
+        if not moved_ids:
             continue
 
-        result = uazapi_service.create_advanced_campaign(
-            token=token,
-            delay_min_sec=60,
-            delay_max_sec=120,
-            messages=messages,
-            info=f"Auto FU1 c{cid} send{send_id}",
-            scheduled_for=scheduled_ts,
-        )
-        if not result:
-            print(f"  ❌ [Uazapi Rollover] Campaign '{row['campaign_name']}': create_advanced_campaign FU1 falhou.")
-            continue
-
-        folder_id = result.get("folder_id") or result.get("folderId")
+        api_ok = False
+        if want_api and messages:
+            result = uazapi_service.create_advanced_campaign(
+                token=token,
+                delay_min_sec=60,
+                delay_max_sec=120,
+                messages=messages,
+                info=f"Auto FU1 c{cid} send{send_id}",
+                scheduled_for=scheduled_ts,
+            )
+            if result:
+                folder_id = result.get("folder_id") or result.get("folderId")
+                if folder_id:
+                    merge_fu1_into_campaign_db(conn, cid, str(folder_id), str(send_id))
+                    api_ok = True
+                else:
+                    print(f"  ⚠️ [Uazapi Rollover] Campaign '{row['campaign_name']}': API sem folder_id; leads ainda movidos para FU1 no banco.")
+            else:
+                print(f"  ❌ [Uazapi Rollover] Campaign '{row['campaign_name']}': create_advanced_campaign FU1 falhou; leads movidos só no banco.")
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1484,11 +1500,15 @@ def process_uazapi_initial_stage_rollovers(conn):
                 "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
                 (send_id,),
             )
-        merge_fu1_into_campaign_db(conn, cid, str(folder_id), str(send_id))
         conn.commit()
-        print(
-            f"  🔄 [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: {len(moved_ids)} leads → FU1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT"
-        )
+        if api_ok:
+            print(
+                f"  🔄 [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: {len(moved_ids)} leads → FU1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT"
+            )
+        else:
+            print(
+                f"  🔄 [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: {len(moved_ids)} leads → coluna FU1 (snooze {target_dt.strftime('%d/%m %H:%M')} BRT); use Gerar no Kanban para criar envio Uazapi"
+            )
 
 
 def process_rollover(campaign, conn):
