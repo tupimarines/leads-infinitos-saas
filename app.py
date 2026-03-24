@@ -3338,57 +3338,12 @@ def admin_check_whatsapp_status(instance_apikey):
         conn.close()
         print(f"Admin Checked Status for {instance_apikey}: {new_status} (Uazapi)")
         return {"status": new_status, "result": result, "remote_jid": remote_jid}
-    
-    service = WhatsappService()
-    result = service.get_status(instance_apikey)
-    
-    if not result:
-        return {"error": "Failed to verify status"}, 400
-        
-    # Logic similar to get_whatsapp_status but for admin
-    # MegaAPI Structure variations:
-    # 1. { "instance_data": { "phone_connected": true, ... } }
-    # 2. { "phone_connected": true, ... } (sometimes top-level in some versions)
-    # 3. [ { ... } ] (Array if looking up by key)
-    
-    is_connected = False
-    
-    if isinstance(result, list) and len(result) > 0:
-        result = result[0]
-        
-    if result.get('instance_data'):
-        is_connected = result['instance_data'].get('phone_connected', False)
-    elif 'phone_connected' in result:
-        is_connected = result.get('phone_connected', False)
-    elif result.get('status') == 'CONNECTED': # Alternative API behavior
-        is_connected = True
-        
-    if result.get('error'):
-         is_connected = False
-         
-    new_status = 'connected' if is_connected else 'disconnected'
-    
-    # Extract Remote JID / Phone
-    remote_jid = None
-    if isinstance(result, dict):
-        # Variant 1: top level 'id' or 'jid'
-        remote_jid = result.get('id') or result.get('me')
-        
-        # Variant 2: instance_data
-        if not remote_jid and result.get('instance_data'):
-             remote_jid = result['instance_data'].get('phone') or result['instance_data'].get('user') or result['instance_data'].get('jid')
 
-    # Update DB
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("UPDATE instances SET status = %s WHERE apikey = %s", (new_status, instance_apikey))
-    conn.commit()
-    conn.close()
-    
-    # Debug print
-    print(f"Admin Checked Status for {instance_apikey}: {new_status} (JID: {remote_jid})")
-    
-    return {"status": new_status, "result": result, "remote_jid": remote_jid}
+    return (
+        json.dumps({"error": "Instância legada. Crie uma nova instância Uazapi."}),
+        400,
+        {"Content-Type": "application/json"},
+    )
 
 
 @app.route('/admin/users/create', methods=['POST'])
@@ -4069,7 +4024,11 @@ def create_campaign():
         )
         uazapi_selected_count = cur.fetchone()[0]
     conn_check.close()
-    use_uazapi_sender = uazapi_selected_count > 0
+    if uazapi_selected_count == 0:
+        return json.dumps({'error': 'Selecione pelo menos uma instância Uazapi.'}), 400
+    if uazapi_selected_count != len(instance_ids):
+        return json.dumps({'error': 'Apenas instâncias Uazapi são permitidas na campanha.'}), 400
+    use_uazapi_sender = True
 
     try:
         # 1. Obter leads do Job
@@ -4631,144 +4590,6 @@ def download_file():
     return send_file(path, as_attachment=True)
 
 
-class WhatsappService:
-    def __init__(self):
-        self.base_url = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
-        self.token = os.environ.get('MEGA_API_TOKEN', '')
-        self.headers = {
-            'Authorization': self.token,
-            'Content-Type': 'application/json'
-        }
-
-    def create_instance(self, instance_name: str = None) -> dict:
-        """Creates a new WhatsApp instance on Mega API"""
-        url = f"{self.base_url}/rest/instance/init"
-        params = {}
-        if instance_name:
-            params['instance_key'] = instance_name
-        
-        # Payload from user validation
-        payload = {
-            "messageData": {
-                "webhookUrl": "",
-                "webhookEnabled": True
-            }
-        }
-
-        print(f"🆕 [WhatsappService] Creating instance {instance_name} via {url}")
-        
-        try:
-            response = requests.post(url, params=params, json=payload, headers=self.headers, timeout=15)
-            # Log response body if error or just debug
-            if response.status_code != 200:
-                print(f"❌ Create API Status: {response.status_code}")
-                print(f"❌ Create API Body: {response.text}")
-                
-            response.raise_for_status()
-            
-            print(f"✅ Create API Response: {response.text[:200]}") # Truncate for sanity
-            
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error creating instance: {e}")
-            if e.response:
-                print(f"❌ Response: {e.response.text}")
-            return None
-
-    def get_qr_code(self, instance_key: str) -> dict:
-        """Gets QR Code for the instance"""
-        url = f"{self.base_url}/rest/instance/qrcode/{instance_key}"
-        print(f"📷 [WhatsappService] Getting QR for {instance_key} via {url}")
-        try:
-            response = requests.get(url, headers=self.headers, timeout=15)
-            if response.status_code != 200:
-                 print(f"❌ QR API Status: {response.status_code}")
-                 print(f"❌ QR API Body: {response.text}")
-            
-            response.raise_for_status()
-            try:
-                return response.json()
-            except requests.exceptions.JSONDecodeError:
-                # Some endpoints return raw strings or HTML
-                return {"data": response.text}
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error getting QR code: {e}")
-            return None
-
-    def get_status(self, instance_key: str) -> dict:
-        """Gets instance connection status"""
-        url = f"{self.base_url}/rest/instance/{instance_key}"
-        # print(f"🔍 [WhatsappService] Checking status for {instance_key}") # Too spammy if polling?
-        # Let's log only errors or significant events
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            if response.status_code != 200:
-                 print(f"❌ Status API Error: {response.status_code} - {response.text}")
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            # DEBUG: Log status payload to understand structure
-            print(f"🔍 [WhatsappService] Status Payload: {data}")
-
-            # API might return a list [ {InstanceObject} ]
-            if isinstance(data, list) and len(data) > 0:
-                return data[0]
-            return data
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error getting status: {e}")
-            return None
-
-    def logout_instance(self, instance_key: str) -> dict:
-        """Logs out WhatsApp instance"""
-        url = f"{self.base_url}/rest/instance/{instance_key}/logout"
-        print(f"🚪 [WhatsappService] Logging out {instance_key} via DELETE {url}")
-        
-        try:
-            response = requests.delete(url, headers=self.headers, timeout=15)
-            print(f"🚪 Logout API Status: {response.status_code}")
-            
-            if response.status_code == 404:
-                return {"message": "Instance already logged out or not found"}
-            
-            if response.status_code != 200:
-                print(f"🚪 Logout API Error Body: {response.text}")
-                
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error logging out instance: {e}")
-            return {"error": str(e)}
-
-    def delete_instance(self, instance_key: str) -> dict:
-        """Deletes WhatsApp instance"""
-        # Doc: DELETE /rest/instance/{instance_key}/delete
-        url = f"{self.base_url}/rest/instance/{instance_key}/delete"
-        print(f"🗑️ [WhatsappService] Deleting {instance_key} via DELETE {url}")
-        
-        try:
-            response = requests.delete(url, headers=self.headers, timeout=15)
-            print(f"🗑️ Delete API Status: {response.status_code}")
-            print(f"🗑️ Delete API Body: {response.text}")
-            
-            if response.status_code == 404:
-                # CRITICAL FIX: Distinguish between "Instance validation failed" 404 and "Endpoint not found" 404
-                # If API returns HTML, it's likely a bad URL/Proxy error.
-                if 'text/html' in response.headers.get('Content-Type', ''):
-                    print("❌ Error: Received HTML 404 from API - Endpoint likely incorrect.")
-                    return {"error": "API Endpoint not found (404 HTML)"}
-                
-                return {"message": "Instance already deleted or not found"}
-                
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error deleting instance: {e}")
-            if e.response:
-                 print(f"❌ Response: {e.response.text}")
-            return {"error": str(e)}
-
-
 @app.route("/whatsapp")
 @login_required
 def whatsapp_config():
@@ -4889,52 +4710,12 @@ def get_whatsapp_qr(instance_key):
         if qrcode_val and isinstance(qrcode_val, str) and len(qrcode_val) > 50:
             return {"base64": qrcode_val}
         return {"error": "QR Code não disponível. Tente novamente em alguns segundos."}, 500
-        
-    service = WhatsappService()
-    result = service.get_qr_code(instance_key)
-    
-    if result:
-        print(f"📷 QR API raw response keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
-        print(f"📷 QR API raw response: {str(result)[:500]}")
-        
-        # Try multiple known response formats from Mega API
-        
-        # Format 1: Direct base64 field with actual base64 string
-        base64_val = result.get('base64')
-        if base64_val and isinstance(base64_val, str) and len(base64_val) > 50:
-            return {"base64": base64_val}
-        
-        # Format 2: qrcode field
-        qrcode_val = result.get('qrcode')
-        if qrcode_val and isinstance(qrcode_val, str) and len(qrcode_val) > 50:
-            return {"base64": qrcode_val}
-        
-        # Format 3: Nested under 'data' key
-        data_val = result.get('data')
-        if data_val and isinstance(data_val, str):
-            # Could be HTML with embedded img
-            if '<img' in data_val:
-                match = re.search(r'src=["\']data:image/png;base64,([^"\']+)["\']', data_val)
-                if match:
-                    return {"base64": match.group(1)}
-            # Could be raw base64 string
-            elif len(data_val) > 50:
-                return {"base64": data_val}
-        
-        # Format 4: Check if response itself has a 'code' or 'pairingCode' (some API versions)
-        pairing_code = result.get('pairingCode') or result.get('code')
-        if pairing_code and isinstance(pairing_code, str):
-            return {"pairingCode": pairing_code, "error": f"Use o código de pareamento: {pairing_code}"}
-        
-        # Format 5: Instance might already be connected
-        instance_data = result.get('instance', {})
-        if isinstance(instance_data, dict) and instance_data.get('status') in ('connected', 'open'):
-            return {"error": "Instância já está conectada! Não é necessário escanear QR Code."}, 200
-        
-        # If nothing matched, return descriptive error
-        print(f"⚠️ QR response format not recognized: {result}")
-        return {"error": "QR Code não disponível. Tente novamente em alguns segundos."}, 500
-    return {"error": "Falha ao obter QR code da API"}, 500
+
+    return (
+        json.dumps({"error": "Instância legada. Crie uma nova instância Uazapi."}),
+        400,
+        {"Content-Type": "application/json"},
+    )
 
 
 @app.route("/api/whatsapp/status/<instance_key>")
@@ -4968,58 +4749,12 @@ def get_whatsapp_status(instance_key):
         conn.close()
         print(f"Status checked for instance {instance_key} (User {current_user.id}): {new_status} (Uazapi)")
         return result
-    
-    service = WhatsappService()
-    result = service.get_status(instance_key)
-    
-    if result:
-        # Comprehensive status detection logic (matching admin_check_whatsapp_status)
-        # Mega API Structure variations:
-        # 1. { "instance_data": { "phone_connected": true, ... } }
-        # 2. { "phone_connected": true, ... } (sometimes top-level)
-        # 3. { "status": "CONNECTED" or "open" }
-        # 4. [ { ... } ] (Array if looking up by key)
-        
-        is_connected = False
-        
-        # Handle array response
-        if isinstance(result, list) and len(result) > 0:
-            result = result[0]
-            
-        # Check various possible status indicators
-        if result.get('instance_data'):
-            is_connected = result['instance_data'].get('phone_connected', False)
-        elif 'phone_connected' in result:
-            is_connected = result.get('phone_connected', False)
-        elif result.get('status') == 'CONNECTED':
-            is_connected = True
-        elif result.get('status') == 'open':
-            is_connected = True
-        # NEW: Handle nested instance object from payload: {'instance': {'status': 'connected'}}
-        elif isinstance(result.get('instance'), dict):
-             status_val = result['instance'].get('status')
-             if status_val in ['connected', 'CONNECTED', 'open']:
-                 is_connected = True
 
-            
-        # If there's an error flag, override to disconnected
-        if result.get('error'):
-            is_connected = False
-        
-        new_status = 'connected' if is_connected else 'disconnected'
-        
-        # Update DB with new status
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("UPDATE instances SET status = %s, updated_at = NOW() WHERE id = %s", (new_status, row[0]))
-        conn.commit()
-        conn.close()
-        
-        # Debug logging
-        print(f"Status checked for instance {instance_key} (User {current_user.id}): {new_status} (Connected: {is_connected})")
-        
-        return result
-    return {"error": "Failed to get status"}, 500
+    return (
+        json.dumps({"error": "Instância legada. Crie uma nova instância Uazapi."}),
+        400,
+        {"Content-Type": "application/json"},
+    )
 
 
 @app.route("/api/whatsapp/delete/<instance_key>", methods=["POST"])
@@ -5054,34 +4789,12 @@ def delete_whatsapp_instance(instance_key):
         conn.commit()
         conn.close()
         return {"status": "success", "message": "Instance deleted"}
-    
-    service = WhatsappService()
-    
-    # 0. Try Logout first (ensure session is killed)
-    try:
-        service.logout_instance(instance_key)
-    except:
-        pass # Continue to delete
 
-    # 1. Delete from Mega API
-    result = service.delete_instance(instance_key)
-    print(f"🗑️ Mega API Delete Result: {result}")
-    
-    # Check if Result implies a failure (e.g. valid JSON error)
-    if result and result.get('error') and 'Endpoint not found' in str(result.get('error')):
-         return {"error": "Falha na API: Endpoint de deleção não encontrado. Contate o suporte."}, 500
-
-    # 2. Delete from DB (Only if API didn't critically fail)
-    # We proceed even if API says "not found" (idempotency)
-    
-    print(f"🗑️ Removing from database...")
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM instances WHERE id = %s", (row[0],))
-    conn.commit()
-    conn.close()
-    
-    return {"status": "success", "message": "Instance deleted"}
+    return (
+        json.dumps({"error": "Instância legada. Crie uma nova instância Uazapi."}),
+        400,
+        {"Content-Type": "application/json"},
+    )
 
 
 

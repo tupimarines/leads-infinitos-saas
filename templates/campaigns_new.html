@@ -1083,10 +1083,15 @@
             alert('Selecione pelo menos uma instância de WhatsApp.');
             return;
         }
-        const useUazapiSender = Array.from(instanceCheckboxes).some(cb => {
+        const allUazapi = Array.from(instanceCheckboxes).every(cb => {
             const label = cb.closest('.instance-checkbox-label');
             return label && label.dataset.apiProvider === 'uazapi';
         });
+        if (!allUazapi) {
+            alert('Selecione apenas instâncias Uazapi. Instâncias legadas não são mais suportadas.');
+            return;
+        }
+        const useUazapiSender = true;
 
         // Loading State
         btn.disabled = true;

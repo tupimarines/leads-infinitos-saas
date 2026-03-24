@@ -5,7 +5,7 @@ Runs as a separate process alongside worker_sender.py.
 For each cadence-enabled campaign:
   1. Finds leads ready for the next step.
   2. DECISION MATRIX: Checks Chatwoot Labels & Status before sending.
-  3. Sends the step's message via Mega API.
+  3. Sends the step's message via Uazapi.
   4. POST-SEND MONITORING: Puts lead in 'monitoring' state for 5 mins to check for immediate replies.
   5. Finally snoozes or stops based on the outcome.
 """
@@ -31,10 +31,7 @@ BUSINESS_HOUR_START = 8
 BUSINESS_HOUR_END = 20
 BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 
-MEGA_API_URL = os.environ.get('MEGA_API_URL', 'https://ruker.megaapi.com.br')
-MEGA_API_TOKEN = os.environ.get('MEGA_API_TOKEN')
-
-# Uazapi (prioridade sobre MegaAPI)
+# Uazapi
 try:
     from services.uazapi import UazapiService
     uazapi_service = UazapiService()
@@ -113,7 +110,7 @@ def is_business_hours():
 def is_campaign_send_window(campaign: dict, now_brazil=None) -> bool:
     """
     Janela por campanha: hora do dia + opcional sábado/domingo.
-    Fora da janela ou em fim de semana bloqueado: não dispara envios Mega/process_campaign_sends.
+    Fora da janela ou em fim de semana bloqueado: não dispara envios / process_campaign_sends.
     """
     now_brazil = now_brazil or datetime.now(BRAZIL_TZ)
     wd = now_brazil.weekday()
@@ -300,54 +297,8 @@ def discover_chatwoot_conversation(phone, name=None):
     return None
 
 
-# --- MEGA API HELPERS ---
-
-def send_text_message(instance_name, phone_jid, message):
-    if os.environ.get('MOCK_SENDER'):
-        print(f"[MOCK-CADENCE] Text to {phone_jid}: {message[:40]}...")
-        time.sleep(0.5)
-        return True
-
-    url = f"{MEGA_API_URL}/rest/sendMessage/{instance_name}/text"
-    headers = {"Authorization": MEGA_API_TOKEN, "Content-Type": "application/json"}
-    payload = {"messageData": {"to": phone_jid, "text": message, "linkPreview": False}}
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"  ❌ Text exception: {e}")
-        return False
-
-def send_media_message(instance_name, phone_jid, media_path, media_type, caption=""):
-    if os.environ.get('MOCK_SENDER'): return True
-    if not os.path.exists(media_path): return False
-
-    with open(media_path, 'rb') as f:
-        file_data = base64.b64encode(f.read()).decode('utf-8')
-
-    ext = os.path.splitext(media_path)[1].lower()
-    mime_map = {'.jpg': 'image/jpeg', '.png': 'image/png', '.mp4': 'video/mp4'}
-    mime = mime_map.get(ext, 'application/octet-stream')
-    
-    endpoint_type = 'imageMessage' if media_type == 'image' else 'videoMessage'
-    url = f"{MEGA_API_URL}/rest/sendMessage/{instance_name}/{endpoint_type}"
-    headers = {"Authorization": MEGA_API_TOKEN, "Content-Type": "application/json"}
-    payload = {
-        "messageData": {
-            "to": phone_jid,
-            "media": f"data:{mime};base64,{file_data}",
-            "caption": caption,
-            "fileName": os.path.basename(media_path)
-        }
-    }
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        return response.status_code == 200
-    except:
-        return False
-
 def get_campaign_instance(campaign_id, conn):
-    """Retorna instância para a campanha. Prioriza Uazapi sobre MegaAPI."""
+    """Retorna instância conectada para a campanha (prioriza Uazapi)."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT i.name, i.apikey, COALESCE(i.api_provider, 'megaapi') as api_provider
@@ -2047,6 +1998,12 @@ def process_campaign_sends(campaign, conn):
     instance = get_campaign_instance(cid, conn)
     if not instance:
         return
+    if instance.get('api_provider') != 'uazapi':
+        print(
+            f"  ⏭️ Campaign '{campaign['name']}': instância legada ({instance.get('api_provider')!r}); "
+            "apenas Uazapi. Pulando follow-ups."
+        )
+        return
 
     # Gate superadmin (mídia Uazapi apenas para superadmin)
     is_sa = False
@@ -2204,7 +2161,7 @@ def process_campaign_sends(campaign, conn):
         # Uazapi + superadmin + media: enviar APENAS mídia com caption (não enviar texto separado)
         sent_ok = False
         sent_via_uazapi_media = False
-        if step_config.get('media_path') and api_provider == 'uazapi' and is_sa and uazapi_service and instance.get('apikey'):
+        if step_config.get('media_path') and is_sa and uazapi_service and instance.get('apikey'):
             if _is_media_path_safe(step_config['media_path'], user_id) and os.path.exists(step_config['media_path']):
                 result = uazapi_service.send_media(
                     instance['apikey'], phone_num,
@@ -2214,18 +2171,11 @@ def process_campaign_sends(campaign, conn):
                 )
                 sent_ok = bool(result)
                 sent_via_uazapi_media = True
-        # MegaAPI + media: enviar mídia (comportamento existente; texto enviado em seguida)
-        elif step_config.get('media_path') and api_provider != 'uazapi':
-            send_media_message(instance_name, phone_jid, step_config['media_path'], step_config.get('media_type', 'image'))
-            time.sleep(1)
 
         # Send Text (quando não enviou via mídia Uazapi)
         if not sent_via_uazapi_media:
-            if api_provider == 'uazapi' and uazapi_service and instance.get('apikey'):
-                result = uazapi_service.send_text(instance['apikey'], phone_num, message)
-                sent_ok = bool(result)
-            else:
-                sent_ok = send_text_message(instance_name, phone_jid, message)
+            result = uazapi_service.send_text(instance['apikey'], phone_num, message)
+            sent_ok = bool(result)
 
         if sent_ok:
             # SUCCESS: Enter MONITORING state (Safety Buffer)

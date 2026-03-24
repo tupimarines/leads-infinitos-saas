@@ -1,14 +1,14 @@
 import unittest
 from unittest.mock import MagicMock, patch
-import datetime
 import importlib.util
 import sys
 
-# Import helper to load worker_sender as a module
-spec = importlib.util.spec_from_file_location("worker_sender", "worker_sender.py")
-worker_sender = importlib.util.module_from_spec(spec)
-sys.modules["worker_sender"] = worker_sender
-spec.loader.exec_module(worker_sender)
+# Import helper to load worker_sender as a module (evita falha se .env local estiver corrompido)
+with patch("dotenv.load_dotenv", lambda *a, **k: None):
+    spec = importlib.util.spec_from_file_location("worker_sender", "worker_sender.py")
+    worker_sender = importlib.util.module_from_spec(spec)
+    sys.modules["worker_sender"] = worker_sender
+    spec.loader.exec_module(worker_sender)
 
 from utils import limits as limits_module
 
@@ -22,28 +22,34 @@ class TestSenderWorker(unittest.TestCase):
         # Case 3: Landline (10 digits) -> +55
         self.assertEqual(worker_sender.format_jid("4133334444"), "554133334444@s.whatsapp.net")
 
-    @patch('worker_sender.requests.get')
-    def test_check_phone_exists(self, mock_get):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"exists": True}
-        
-        exists = worker_sender.check_phone_on_whatsapp("inst1", "5541999@s.wh")
+    @patch.object(worker_sender, "uazapi_service")
+    def test_check_phone_exists(self, mock_svc):
+        mock_svc.check_phone.return_value = [
+            {"isInWhatsapp": True, "jid": "5541999988888@s.whatsapp.net", "query": "5541999988888"}
+        ]
+        exists, correct_jid, is_inst_err = worker_sender.check_phone_on_whatsapp(
+            "inst1",
+            "5541999@s.wh",
+            apikey="fake-token",
+            api_provider="uazapi",
+        )
         self.assertTrue(exists)
-        
-        # Test headers
-        args, kwargs = mock_get.call_args
-        self.assertIn("Authorization", kwargs['headers'])
-        self.assertIn("jid", kwargs['params'])
+        self.assertFalse(is_inst_err)
+        mock_svc.check_phone.assert_called_once()
 
-    @patch('worker_sender.requests.post')
-    def test_send_message(self, mock_post):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"key": "123"}
-        
-        success, resp = worker_sender.send_message("inst1", "5541@s.w", "Hello")
+    @patch.object(worker_sender, "uazapi_service")
+    def test_send_message(self, mock_svc):
+        mock_svc.send_text.return_value = {"key": "123"}
+        success, resp = worker_sender.send_message(
+            "inst1",
+            "5541999988888@s.wh",
+            "Hello",
+            apikey="fake-token",
+            api_provider="uazapi",
+        )
         self.assertTrue(success)
-        args, kwargs = mock_post.call_args
-        self.assertEqual(kwargs['json']['messageData']['text'], "Hello")
+        args, _kwargs = mock_svc.send_text.call_args
+        self.assertEqual(args[2], "Hello")
 
     @patch('worker_sender.get_user_daily_limit', return_value=30)
     @patch('worker_sender.get_db_connection')
