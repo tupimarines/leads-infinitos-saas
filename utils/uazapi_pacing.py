@@ -9,16 +9,18 @@ import random
 from typing import List, Sequence, Tuple
 
 
-# (peso, min_min, min_max) — tempos entre mensagens dentro da sub-campanha
+# (peso, min_min, min_max) — tempos entre mensagens dentro da sub-campanha (create_advanced_campaign).
+# Pesos relativos 20 / 30 / 40 (normalizados para somar 1).
 _BUCKET_RANGES: Sequence[Tuple[float, int, int]] = (
-    (0.50, 1, 2),
-    (0.50, 2, 4),
+    (20 / 90, 4, 8),
+    (30 / 90, 8, 12),
+    (40 / 90, 10, 15),
 )
 
-# Pausa longa entre sub-campanhas (“intervalo banheiro”) — minutos fixos quando aplicada
-_LONG_GAP_MIN = 5
-_LONG_GAP_MAX = 5
-_LONG_GAP_WEIGHT = 0.10  # chance aplicada a cada “entre segmentos”
+# Pausa longa entre sub-campanhas: só atrasa o agendamento da próxima linha (sem folder/campanha Uazapi só de pausa).
+_LONG_GAP_MIN = 25
+_LONG_GAP_MAX = 45
+_LONG_GAP_WEIGHT = 0.10  # chance entre cada par de segmentos consecutivos
 
 
 def _pick_bucket_delay_minutes() -> Tuple[int, int]:
@@ -76,7 +78,7 @@ def estimate_segment_span_minutes(count: int, delay_min: int, delay_max: int) ->
 
 
 def maybe_long_gap_minutes() -> int:
-    """Pausa longa entre sub-campanhas (ex.: ~10% de chance)."""
+    """~10% de chance de pausa longa (minutos) antes do próximo segmento; não cria campanha/disparo extra."""
     if random.random() < _LONG_GAP_WEIGHT:
         return random.randint(_LONG_GAP_MIN, _LONG_GAP_MAX)
     return 0
