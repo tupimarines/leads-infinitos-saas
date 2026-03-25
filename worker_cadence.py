@@ -902,16 +902,23 @@ def process_cadence():
             # caso contrário os cards nunca saem da Inicial após o envio.
             process_uazapi_initial_stage_rollovers(conn)
 
-            # 1. Find active cadence campaigns (para rollover legado, chunks e envio)
+            # 1. Campanhas ativas: cadência completa OU Uazapi "só inicial" (enable_cadence=false).
+            # Neste último caso só rodamos schedule_next_initial_chunk (chunks etapa initial); sem FU/rollover/send legado.
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT c.id, c.name, c.user_id, c.cadence_config, c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
+                    SELECT c.id, c.name, c.user_id, c.cadence_config, c.enable_cadence, c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                            c.use_uazapi_sender, c.uazapi_folder_id, c.delay_min_minutes, c.delay_max_minutes,
                            c.scheduled_start
                     FROM campaigns c
-                    WHERE c.enable_cadence = TRUE
-                      AND c.status IN ('running', 'pending', 'completed')
+                    WHERE c.status IN ('running', 'pending', 'completed')
                       AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
+                      AND (
+                          c.enable_cadence = TRUE
+                          OR (
+                              COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+                              AND COALESCE(c.enable_cadence, FALSE) = FALSE
+                          )
+                      )
                 """)
                 campaigns = cur.fetchall()
             conn.commit()  # Libera locks antes do loop longo (evita deadlock com worker_sender/sync)
@@ -921,11 +928,16 @@ def process_cadence():
                 time.sleep(CADENCE_POLL_INTERVAL)
                 continue
 
+            first_with_cadence = next((c for c in campaigns if c.get("enable_cadence")), None)
+
             for campaign in campaigns:
                 if not campaign.get('use_uazapi_sender'):
                     process_rollover(campaign, conn)
                 else:
                     schedule_next_initial_chunk(campaign, conn)
+
+                if not campaign.get('enable_cadence'):
+                    continue
 
                 process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
                 process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
@@ -935,7 +947,7 @@ def process_cadence():
                     bootstrap_pending_leads(campaign, conn)
                 else:
                     now_brazil = datetime.now(BRAZIL_TZ)
-                    if campaign == campaigns[0]:  # log uma vez por ciclo
+                    if first_with_cadence and campaign.get("id") == first_with_cadence.get("id"):
                         print(
                             f"⏰ [Cadence] Fora da janela da campanha ({now_brazil.strftime('%H:%M')} BRT). Envio Mega/cadência pausado."
                         )
@@ -1183,7 +1195,10 @@ def schedule_next_initial_chunk(campaign, conn):
         else:
             sched_start = sched_start.astimezone(BRAZIL_TZ)
         delta_sec = (now_brazil - sched_start).total_seconds()
-        if 0 <= delta_sec <= 90:  # passou há 0–90s: disparo imediato
+        # Antes: só 0–90s após o horário gerava "agora+30s"; editar início para há minutos/horas
+        # caía em _next_initial_send_slot (ex.: só no dia seguinte) e parecia que "começar agora" não funcionava.
+        if delta_sec >= 0:
+            # Horário alvo já passou (ou é agora): próximo chunk o quanto antes, não o próximo dia útil.
             use_immediate = True
             target_dt = now_brazil + timedelta(seconds=30)
         else:
