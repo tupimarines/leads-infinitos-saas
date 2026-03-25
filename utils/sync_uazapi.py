@@ -456,7 +456,10 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     Sincroniza status de campaign_leads com Uazapi.
     Primeiro tenta list_folders (sem status) e usa log_sucess + lead_ids armazenados (F8, F9).
     Fallback: list_messages para Sent/Failed.
-    Atualiza current_step conforme etapa (step 1→2, 2→3, 3→4, 4→4).
+    Atualiza current_step conforme etapa (via campaign_stage_sends e _lead_step_after_confirmed_send).
+
+    O bloco legado (folder único em campaigns + uazapi_last_send_lead_ids e fallback list_messages
+    com current_step+1) só roda em campanhas antigas **sem** use_uazapi_sender e **sem** stage_sends.
     """
     if not uazapi_service or not token:
         return {"sent": 0, "failed": 0, "updated_sent": 0, "updated_failed": 0}
@@ -467,7 +470,8 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence
+            """SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence,
+                      use_uazapi_sender
                FROM campaigns WHERE id = %s""",
             (campaign_id,),
         )
@@ -849,13 +853,17 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 (effective_success, effective_failed, normalized_status, send["id"]),
             )
 
-    # Regra para cadências: sincronizar exclusivamente via campaign_stage_sends.
-    # Evita regressão de etapa por fallback legado (folder principal / payload antigo).
-    if campaign_row.get("enable_cadence"):
+    # Campanhas com cadência, Uazapi sender ou qualquer campaign_stage_sends: só sync por stage_sends.
+    # Não usar folder único + uazapi_last_send_lead_ids (incompatível com multi-instância / next_step=2 forçado).
+    if (
+        campaign_row.get("enable_cadence")
+        or campaign_row.get("use_uazapi_sender")
+        or stage_sends
+    ):
         conn.commit()
         return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
 
-    # 2) Compat legado (campanhas antigas sem stage_sends)
+    # 2) Compat legado (campanhas antigas sem use_uazapi_sender e sem campaign_stage_sends)
     lead_ids_by_step = {}
     lid = campaign_row.get("uazapi_last_send_lead_ids")
     if lid:

@@ -145,8 +145,8 @@ class TestSyncCampaignLeadsFromUazapi:
                 self._fetchall = []
                 self._fetchone = {}
 
-                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence FROM campaigns" in compact:
-                    self._fetchone = {"enable_cadence": True, "uazapi_folder_id": "main-folder"}
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "main-folder"}
                 elif "FROM campaign_stage_sends css" in compact:
                     self._fetchall = [{
                         "id": 1,
