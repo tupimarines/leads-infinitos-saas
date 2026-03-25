@@ -652,6 +652,9 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
 
             t_chain = now_utc_naive
             prev_sub, prev_dmin, prev_dmax, prev_gap = None, None, None, 0
+            _n_pacing = len(pacing_plan)
+            _verbose_pacing = os.environ.get("MATERIALIZE_VERBOSE_SEGMENTS") == "1"
+            _pacing_tail_logged = False
 
             for seg_i, (sub_chunk_t, dmin, dmax, gap_after) in enumerate(pacing_plan):
                 sub_chunk = list(sub_chunk_t)
@@ -690,10 +693,17 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                             ),
                         )
                     conn.commit()
-                    print(
-                        f"  📎 [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: "
-                        f"sub-campanha agendada seg={seg_i} em {t_chain} UTC ({len(lead_ids)} leads) delay {dmin}-{dmax} min"
-                    )
+                    if _verbose_pacing or seg_i == 1:
+                        print(
+                            f"  📎 [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: "
+                            f"sub-campanha agendada seg={seg_i} em {t_chain} UTC ({len(lead_ids)} leads) delay {dmin}-{dmax} min"
+                        )
+                    elif seg_i == 2 and _n_pacing > 2 and not _pacing_tail_logged:
+                        print(
+                            f"  📎 [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: "
+                            f"pacing em {_n_pacing} segmentos (+{_n_pacing - 2} agendados; MATERIALIZE_VERBOSE_SEGMENTS=1 para listar todos)"
+                        )
+                        _pacing_tail_logged = True
                     prev_sub, prev_dmin, prev_dmax, prev_gap = sub_chunk, dmin, dmax, gap_after
                     continue
 

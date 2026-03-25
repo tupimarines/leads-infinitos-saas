@@ -643,7 +643,14 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         if planned_count <= 0 and lead_ids:
             planned_count = len(lead_ids)
 
-        if debug or status in ("done", "failed", "error", "cancelled", "canceled", "inconsistent"):
+        # Evita poluir logs: status=done sem falhas repete a cada sync (~10 min) por send.
+        # DEBUG_SYNC_UAZAPI=1: linha completa sempre. Caso contrário: só estados problemáticos ou done com failed>0.
+        _show_sync_line = (
+            debug
+            or status in ("failed", "error", "cancelled", "canceled", "inconsistent", "partial")
+            or (status == "done" and log_failed > 0)
+        )
+        if _show_sync_line:
             print(
                 f"ℹ️ [Uazapi Sync] campaign={campaign_id} send_id={send.get('id')} stage={send.get('stage')} "
                 f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
