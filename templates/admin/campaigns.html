@@ -43,7 +43,11 @@
     <!-- Grid de Cards -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {% for campaign in campaigns %}
-        <div class="card p-6 relative">
+        <div class="card p-6 relative cursor-pointer hover:ring-1 hover:ring-blue-500/25 transition-shadow"
+            role="button"
+            tabindex="0"
+            onclick="openCampaignDetail({{ campaign.id }})"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openCampaignDetail({{ campaign.id }});}">
             <!-- Status Badge -->
             <div class="absolute top-4 right-4">
                 {% if campaign.status == 'running' %}
@@ -98,7 +102,11 @@
 
             <!-- Actions -->
             <div class="flex gap-2">
-                <button onclick="deleteCampaign({{ campaign.id }}, '{{ campaign.name }}')"
+                <button type="button" onclick="event.stopPropagation(); openCampaignDetail({{ campaign.id }})"
+                    class="flex-1 px-3 py-2 rounded text-sm font-medium bg-blue-600/20 text-blue-300 border border-blue-500/30 hover:bg-blue-600/40 transition-colors">
+                    📋 Detalhes
+                </button>
+                <button type="button" onclick="event.stopPropagation(); deleteCampaign({{ campaign.id }}, {{ campaign.name|tojson }})"
                     class="flex-1 px-3 py-2 rounded text-sm font-medium bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/40 transition-colors">
                     🗑️ Excluir
                 </button>
@@ -112,8 +120,149 @@
     </div>
 </div>
 
+<!-- Modal detalhes (superadmin) -->
+<div id="campaign-detail-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/70"
+    onclick="if(event.target===this) closeCampaignDetail()">
+    <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl"
+        onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+            <h2 class="text-lg font-semibold text-white">Detalhes da campanha</h2>
+            <button type="button" onclick="closeCampaignDetail()"
+                class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+        </div>
+        <div id="campaign-detail-body" class="px-5 py-4 overflow-y-auto text-sm text-gray-300 space-y-6">
+            <p class="text-gray-500">Carregando…</p>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
+    function esc(s) {
+        if (s === null || s === undefined) return '';
+        const d = document.createElement('div');
+        d.textContent = String(s);
+        return d.innerHTML;
+    }
+
+    function closeCampaignDetail() {
+        const m = document.getElementById('campaign-detail-modal');
+        m.classList.add('hidden');
+        m.classList.remove('flex');
+    }
+
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        const m = document.getElementById('campaign-detail-modal');
+        if (!m || m.classList.contains('hidden')) return;
+        closeCampaignDetail();
+    });
+
+    async function openCampaignDetail(id) {
+        const m = document.getElementById('campaign-detail-modal');
+        const body = document.getElementById('campaign-detail-body');
+        m.classList.remove('hidden');
+        m.classList.add('flex');
+        body.innerHTML = '<p class="text-gray-500">Carregando…</p>';
+        try {
+            const res = await fetch(`/api/admin/campaigns/${id}/detail`);
+            const data = await res.json();
+            if (!res.ok) {
+                body.innerHTML = '<p class="text-red-400">' + esc(data.error || 'Erro ao carregar') + '</p>';
+                return;
+            }
+            body.innerHTML = renderCampaignDetail(data);
+        } catch (err) {
+            body.innerHTML = '<p class="text-red-400">' + esc(err.message) + '</p>';
+        }
+    }
+
+    function renderCampaignDetail(data) {
+        const c = data.campaign || {};
+        const counts = data.counts || {};
+        const inst = data.instances || [];
+        const stages = data.stage_sends || [];
+        const steps = data.steps || [];
+        const leadSt = data.lead_status_counts || [];
+
+        const rows = [
+            ['ID', c.id],
+            ['Usuário', c.user_email],
+            ['Nome', c.name],
+            ['Status', c.status],
+            ['Criada em', c.created_at],
+            ['Início agendado (scheduled_start)', c.scheduled_start || '—'],
+            ['Uazapi sender', c.use_uazapi_sender ? 'sim' : 'não'],
+            ['Pasta Uazapi (campanha)', c.uazapi_folder_id || '—'],
+            ['Cadência', c.enable_cadence ? 'sim' : 'não'],
+            ['Delay min/max (min)', [c.delay_min_minutes, c.delay_max_minutes].join(' / ')],
+            ['Horário envio', `${c.send_hour_start ?? '—'}–${c.send_hour_end ?? '—'} (sáb ${c.send_saturday ? 'sim' : 'não'}, dom ${c.send_sunday ? 'sim' : 'não'})`],
+            ['Rotação', c.rotation_mode || '—'],
+            ['Total leads', counts.total_leads],
+            ['Enviados (sent)', counts.sent_count],
+            ['Pendentes (pending)', counts.pending_count],
+        ];
+
+        let html = '<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">';
+        for (const [k, v] of rows) {
+            html += `<div class="text-gray-500">${esc(k)}</div><div class="text-white font-medium break-all">${esc(v)}</div>`;
+        }
+        html += '</div>';
+
+        if (c.message_template) {
+            html += '<div><h3 class="text-white font-semibold mb-2 mt-4">Modelo de mensagem</h3><pre class="bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words max-h-48 overflow-y-auto">' + esc(c.message_template) + '</pre></div>';
+        }
+        if (c.cadence_config && Object.keys(c.cadence_config).length) {
+            html += '<div><h3 class="text-white font-semibold mb-2">Config. cadência (JSON)</h3><pre class="bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words">' + esc(JSON.stringify(c.cadence_config, null, 2)) + '</pre></div>';
+        }
+
+        html += '<div><h3 class="text-white font-semibold mb-2">Leads por status</h3>';
+        if (!leadSt.length) html += '<p class="text-gray-500">Nenhum lead nesta campanha.</p>';
+        else {
+            html += '<table class="w-full text-left border border-gray-700 rounded overflow-hidden"><thead class="bg-gray-800"><tr><th class="px-3 py-2">Status</th><th class="px-3 py-2">Qtd</th></tr></thead><tbody>';
+            for (const r of leadSt) {
+                html += `<tr class="border-t border-gray-700"><td class="px-3 py-1">${esc(r.status)}</td><td class="px-3 py-1">${esc(r.n)}</td></tr>`;
+            }
+            html += '</tbody></table>';
+        }
+        html += '</div>';
+
+        html += '<div><h3 class="text-white font-semibold mb-2">Instâncias</h3>';
+        if (!inst.length) html += '<p class="text-gray-500">Nenhuma instância vinculada.</p>';
+        else {
+            html += '<table class="w-full text-left border border-gray-700 rounded overflow-hidden"><thead class="bg-gray-800"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Nome</th><th class="px-3 py-2">Provider</th></tr></thead><tbody>';
+            for (const r of inst) {
+                html += `<tr class="border-t border-gray-700"><td class="px-3 py-1">${esc(r.id)}</td><td class="px-3 py-1">${esc(r.name)}</td><td class="px-3 py-1">${esc(r.api_provider)}</td></tr>`;
+            }
+            html += '</tbody></table>';
+        }
+        html += '</div>';
+
+        html += '<div><h3 class="text-white font-semibold mb-2">Etapas (cadência)</h3>';
+        if (!steps.length) html += '<p class="text-gray-500">Nenhuma etapa cadastrada.</p>';
+        else {
+            html += '<table class="w-full text-left border border-gray-700 rounded overflow-hidden text-xs"><thead class="bg-gray-800"><tr><th class="px-2 py-2">#</th><th class="px-2 py-2">Rótulo</th><th class="px-2 py-2">Dias</th><th class="px-2 py-2">Criada</th></tr></thead><tbody>';
+            for (const r of steps) {
+                html += `<tr class="border-t border-gray-700"><td class="px-2 py-1">${esc(r.step_number)}</td><td class="px-2 py-1">${esc(r.step_label)}</td><td class="px-2 py-1">${esc(r.delay_days)}</td><td class="px-2 py-1">${esc(r.created_at)}</td></tr>`;
+            }
+            html += '</tbody></table>';
+        }
+        html += '</div>';
+
+        html += '<div><h3 class="text-white font-semibold mb-2">Chunks Uazapi (campaign_stage_sends, até 200)</h3>';
+        if (!stages.length) html += '<p class="text-gray-500">Nenhum registro (campanha sem disparo por etapa ou legado).</p>';
+        else {
+            html += '<div class="overflow-x-auto"><table class="w-full text-left border border-gray-700 rounded overflow-hidden text-xs"><thead class="bg-gray-800"><tr><th class="px-2 py-2">Etapa</th><th class="px-2 py-2">Inst.</th><th class="px-2 py-2">Agendado</th><th class="px-2 py-2">Status</th><th class="px-2 py-2">Plano</th><th class="px-2 py-2">OK</th><th class="px-2 py-2">Falha</th><th class="px-2 py-2">Folder</th></tr></thead><tbody>';
+            for (const r of stages) {
+                html += `<tr class="border-t border-gray-700"><td class="px-2 py-1">${esc(r.stage)}</td><td class="px-2 py-1">${esc(r.instance_id)}</td><td class="px-2 py-1">${esc(r.scheduled_for)}</td><td class="px-2 py-1">${esc(r.status)}</td><td class="px-2 py-1">${esc(r.planned_count)}</td><td class="px-2 py-1">${esc(r.success_count)}</td><td class="px-2 py-1">${esc(r.failed_count)}</td><td class="px-2 py-1 break-all">${esc(r.uazapi_folder_id)}</td></tr>`;
+            }
+            html += '</tbody></table></div>';
+        }
+        html += '</div>';
+
+        return html;
+    }
+
     async function deleteCampaign(id, name) {
         if (!confirm(`Tem certeza que deseja excluir a campanha "${name}"?\n\nEsta ação não pode ser desfeita.`)) {
             return;

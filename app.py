@@ -2960,6 +2960,121 @@ def admin_campaigns():
                          status_filter=status_filter,
                          counts=counts)
 
+
+@app.route('/api/admin/campaigns/<int:campaign_id>/detail', methods=['GET'])
+@login_required
+@admin_required
+def admin_campaign_detail_api(campaign_id):
+    """Superadmin: agregação de campanha + fila + instâncias + chunks Uazapi (equivale às queries manuais)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.*, u.email AS user_email
+                FROM campaigns c
+                JOIN users u ON u.id = c.user_id
+                WHERE c.id = %s
+                """,
+                (campaign_id,),
+            )
+            campaign = cur.fetchone()
+            if not campaign:
+                return jsonify({"error": "Campanha não encontrada"}), 404
+
+            cur.execute(
+                """
+                SELECT status, COUNT(*)::int AS n
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                GROUP BY status
+                ORDER BY status
+                """,
+                (campaign_id,),
+            )
+            lead_status_counts = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT i.id, i.name, COALESCE(i.api_provider, '') AS api_provider
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                ORDER BY i.id
+                """,
+                (campaign_id,),
+            )
+            instances = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, stage, instance_id, scheduled_for, status, planned_count,
+                       success_count, failed_count, uazapi_folder_id,
+                       created_at, updated_at
+                FROM campaign_stage_sends
+                WHERE campaign_id = %s
+                ORDER BY scheduled_for NULLS LAST, id
+                LIMIT 200
+                """,
+                (campaign_id,),
+            )
+            stage_sends = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT step_number, step_label, delay_days, created_at
+                FROM campaign_steps
+                WHERE campaign_id = %s
+                ORDER BY step_number
+                """,
+                (campaign_id,),
+            )
+            steps = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT COUNT(*)::int AS total_leads,
+                       COUNT(*) FILTER (WHERE status = 'sent')::int AS sent_count,
+                       COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_count
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                """,
+                (campaign_id,),
+            )
+            counts = cur.fetchone()
+    finally:
+        conn.close()
+
+    def fmt_dt(dt):
+        if dt is None:
+            return None
+        brt = to_brt(dt)
+        return brt.strftime('%d/%m/%Y %H:%M') + ' BRT' if brt else None
+
+    def serialize_row(r):
+        out = dict(r)
+        for k, v in list(out.items()):
+            if isinstance(v, datetime):
+                out[k] = fmt_dt(v)
+        return out
+
+    c = serialize_row(campaign)
+    mt = c.get('message_template')
+    if isinstance(mt, str) and len(mt) > 1200:
+        c['message_template'] = mt[:1200] + '… (truncado no painel; ver DB para o texto completo)'
+
+    return jsonify(
+        {
+            "campaign": c,
+            "lead_status_counts": [dict(r) for r in lead_status_counts],
+            "counts": dict(counts) if counts else {},
+            "instances": [dict(r) for r in instances],
+            "stage_sends": [serialize_row(dict(r)) for r in stage_sends],
+            "steps": [serialize_row(dict(r)) for r in steps],
+        }
+    )
+
+
 @app.route('/api/admin/campaigns/<int:campaign_id>', methods=['DELETE'])
 @login_required
 @admin_required
