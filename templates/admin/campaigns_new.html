@@ -1,0 +1,835 @@
+{% extends "base.html" %}
+
+{% block title %}Nova Campanha (Admin) - Leads Infinitos{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    bg: '#0b1020',
+                    card: '#0f1630',
+                    primary: '#4f7cff',
+                    accent: '#8b5cf6',
+                }
+            }
+        }
+    }
+</script>
+<style>
+    .glass-panel {
+        background: rgba(15, 22, 48, 0.7);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .neon-input {
+        background: rgba(12, 20, 48, 0.8);
+        border: 1px solid rgba(79, 124, 255, 0.3);
+        box-shadow: 0 0 10px rgba(79, 124, 255, 0.05);
+        transition: all 0.3s ease;
+    }
+
+    .neon-input:focus {
+        border-color: #4f7cff;
+        box-shadow: 0 0 15px rgba(79, 124, 255, 0.3);
+        outline: none;
+    }
+
+    .btn-cyber {
+        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        position: relative;
+        overflow: hidden;
+        transition: all 0.3s ease;
+        letter-spacing: 1px;
+        font-weight: 700;
+        border: none;
+    }
+
+    .btn-cyber::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+        transition: 0.5s;
+    }
+
+    .btn-cyber:hover::before { left: 100%; }
+
+    .btn-cyber:hover {
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.6);
+        transform: translateY(-2px);
+    }
+
+    h1, h2, h3 { color: #e8ecf6; }
+
+    .cadence-step {
+        border: 1px solid rgba(79, 124, 255, 0.15);
+        background: rgba(12, 20, 48, 0.5);
+        border-radius: 12px;
+        overflow: hidden;
+        transition: all 0.3s ease;
+    }
+
+    .cadence-step.active {
+        border-color: rgba(79, 124, 255, 0.4);
+        box-shadow: 0 0 20px rgba(79, 124, 255, 0.08);
+    }
+
+    .cadence-step-header {
+        cursor: pointer;
+        padding: 14px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        transition: background 0.2s;
+    }
+
+    .cadence-step-header:hover { background: rgba(79, 124, 255, 0.05); }
+
+    .cadence-step-body {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.35s ease;
+    }
+
+    .cadence-step-body.open { max-height: 600px; }
+
+    .cadence-step-body-inner { padding: 0 16px 16px; }
+
+    .step-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.75rem;
+        padding: 2px 10px;
+        border-radius: 9999px;
+        font-weight: 600;
+    }
+
+    .cadence-toggle-track {
+        width: 44px;
+        height: 24px;
+        background: #374151;
+        border-radius: 9999px;
+        position: relative;
+        cursor: pointer;
+        transition: background 0.3s;
+    }
+
+    .cadence-toggle-track.on { background: linear-gradient(90deg, #4f7cff, #8b5cf6); }
+
+    .cadence-toggle-thumb {
+        width: 20px;
+        height: 20px;
+        background: white;
+        border-radius: 50%;
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        transition: transform 0.3s;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+
+    .cadence-toggle-track.on .cadence-toggle-thumb { transform: translateX(20px); }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="container mx-auto px-4 py-12">
+    <div class="max-w-3xl mx-auto">
+
+        <div class="mb-6 flex items-center justify-between">
+            <div>
+                <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 mb-1">
+                    Nova Campanha (Admin)
+                </h1>
+                <p class="text-gray-400 text-sm">Criar campanha para qualquer usuário do sistema</p>
+            </div>
+            <a href="{{ url_for('admin_campaigns') }}"
+               class="text-gray-400 hover:text-white flex items-center gap-2 text-sm border border-gray-600/40 px-3 py-2 rounded-lg hover:bg-white/5 transition-colors">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                </svg>
+                Voltar
+            </a>
+        </div>
+
+        <div class="glass-panel p-8 rounded-2xl relative overflow-hidden">
+            <div class="absolute -top-20 -right-20 w-64 h-64 bg-purple-600 rounded-full mix-blend-multiply filter blur-3xl opacity-10 animate-blob"></div>
+
+            <form id="campaignForm" class="space-y-6 relative z-10">
+
+                <!-- [1] Seleção de Usuário -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Usuário</label>
+                    <div class="relative">
+                        <select id="user_id" required class="neon-input w-full px-4 py-3 rounded-xl text-white appearance-none cursor-pointer">
+                            <option value="" disabled selected>Carregando usuários...</option>
+                        </select>
+                        <div class="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-gray-400">
+                            <svg class="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                                <path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- [2] Seleção de Instância(s) -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">📱 Instâncias de WhatsApp</label>
+                    <div id="instances-container" class="space-y-2">
+                        <p class="text-xs text-gray-500">Selecione um usuário primeiro.</p>
+                    </div>
+                </div>
+
+                <!-- [3] Seleção de Job OU Upload CSV -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Lista de Leads (Job ou CSV)</label>
+                    <div class="relative">
+                        <select id="job_id" required class="neon-input w-full px-4 py-3 rounded-xl text-white appearance-none cursor-pointer">
+                            <option value="" disabled selected>Selecione um usuário primeiro</option>
+                        </select>
+                        <div class="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-gray-400">
+                            <svg class="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                                <path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
+                            </svg>
+                        </div>
+                    </div>
+                    <p id="jobStats" class="text-xs text-blue-400 mt-2 hidden"></p>
+
+                    <div class="mt-3 flex justify-end items-center gap-2">
+                        <input type="file" id="csvUpload" accept=".csv" class="hidden">
+                        <button type="button" id="uploadCsvBtn"
+                            class="text-xs flex items-center gap-1 text-purple-400 hover:text-purple-300 transition-colors border border-purple-500/30 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                            </svg>
+                            Envie sua própria lista (CSV)
+                        </button>
+                    </div>
+                    <p id="uploadProgressMsg" class="text-xs text-amber-400 mt-2 hidden"></p>
+                </div>
+
+                <!-- [4] Nome da Campanha -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Nome da Campanha</label>
+                    <input type="text" id="name" placeholder="Ex: Prospecção Dentistas SP" required
+                        class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600">
+                </div>
+
+                <!-- [5] Mensagens (variações) -->
+                <div>
+                    <div class="flex justify-between items-center mb-2">
+                        <label class="block text-sm font-semibold text-gray-300">
+                            Mensagem <span class="text-xs font-normal text-gray-500 ml-2">(Use {nome} para personalizar)</span>
+                        </label>
+                    </div>
+                    <div id="templates-container" class="space-y-3">
+                        <textarea name="message_template" rows="4" required
+                            placeholder="Olá {nome}, vi sua empresa no Google Maps e..."
+                            class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 template-input"></textarea>
+                    </div>
+                    <div class="mt-2">
+                        <button type="button" id="addTemplateBtn"
+                            class="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+                            </svg>
+                            Adicionar variação (Spin)
+                        </button>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">Até 5 variações para rotacionar.</p>
+                </div>
+
+                <!-- [6] Horário de envio -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(34, 197, 94, 0.04); border: 1px solid rgba(34, 197, 94, 0.2);">
+                    <label class="block text-sm font-semibold text-gray-300 mb-3">⏰ Horário de envio</label>
+                    <p class="text-xs text-gray-500 mb-4">Define em quais horários e dias as mensagens serão enviadas</p>
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Das</label>
+                            <input type="number" id="send_hour_start" min="0" max="23" value="8"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Até (hora)</label>
+                            <input type="number" id="send_hour_end" min="0" max="23" value="20"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm">
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap gap-6">
+                        <label class="relative inline-flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" id="send_saturday" class="sr-only peer">
+                            <div class="relative w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer
+                                peer-checked:after:translate-x-full peer-checked:after:border-white
+                                after:content-[''] after:absolute after:top-[2px] after:left-[2px]
+                                after:bg-white after:border-gray-300 after:border after:rounded-full
+                                after:h-4 after:w-4 after:transition-all
+                                peer-checked:bg-green-600"></div>
+                            <span class="text-sm text-gray-300">Enviar aos sábados</span>
+                        </label>
+                        <label class="relative inline-flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" id="send_sunday" class="sr-only peer">
+                            <div class="relative w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer
+                                peer-checked:after:translate-x-full peer-checked:after:border-white
+                                after:content-[''] after:absolute after:top-[2px] after:left-[2px]
+                                after:bg-white after:border-gray-300 after:border after:rounded-full
+                                after:h-4 after:w-4 after:transition-all
+                                peer-checked:bg-green-600"></div>
+                            <span class="text-sm text-gray-300">Enviar aos domingos</span>
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Padrão: 8h às 20h, apenas dias úteis (seg-sex)</p>
+                </div>
+
+                <!-- [7] Delay min/max (opcional) -->
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">Delay mín. (min)</label>
+                        <input type="number" id="delay_min_minutes" min="0"
+                            class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm" placeholder="Automático">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">Delay máx. (min)</label>
+                        <input type="number" id="delay_max_minutes" min="0"
+                            class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm" placeholder="Automático">
+                    </div>
+                </div>
+
+                <!-- [8] Agendar início (opcional) -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-300 mb-2">Início agendado (opcional)</label>
+                    <input type="datetime-local" id="scheduled_start"
+                        class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm">
+                    <p class="text-xs text-gray-500 mt-1">Deixe vazio para iniciar imediatamente</p>
+                </div>
+
+                <!-- [9] Cadência Toggle + Follow-ups -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(139, 92, 246, 0.04); border: 1px solid rgba(139, 92, 246, 0.2);">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300">🔄 Cadência de Follow-up</label>
+                            <p class="text-xs text-gray-500 mt-1">Ative para enviar mensagens de acompanhamento automaticamente</p>
+                        </div>
+                        <div class="cadence-toggle-track" id="cadenceToggle" onclick="toggleCadence()">
+                            <div class="cadence-toggle-thumb"></div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="enable_cadence" value="false">
+                </div>
+
+                <!-- Cadence Steps (hidden by default) -->
+                <div id="cadenceStepsContainer" class="space-y-3" style="display: none;">
+
+                    <!-- Step 1: Mensagem Inicial (info only) -->
+                    <div class="cadence-step active" data-step="1">
+                        <div class="cadence-step-header" onclick="toggleStep(1)">
+                            <div class="flex items-center gap-3">
+                                <span class="step-badge bg-blue-500/20 text-blue-400 border border-blue-500/30">Etapa 1</span>
+                                <span class="text-sm font-semibold text-gray-200">Mensagem Inicial</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 0</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="1" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body open" data-step-body="1">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <p class="text-xs text-gray-500">Usa os templates configurados acima.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Follow-up 1 -->
+                    <div class="cadence-step" data-step="2">
+                        <div class="cadence-step-header" onclick="toggleStep(2)">
+                            <div class="flex items-center gap-3">
+                                <span class="step-badge bg-purple-500/20 text-purple-400 border border-purple-500/30">Etapa 2</span>
+                                <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 3</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="2" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body" data-step-body="2">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa anterior:</label>
+                                        <input type="number" id="delay_step_2" value="3" min="0" max="30"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                    </div>
+                                </div>
+                                <textarea id="msg_step_2" rows="3"
+                                    placeholder="Olá {nome}, te mandei uma mensagem outro dia sobre..."
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Follow-up 2 -->
+                    <div class="cadence-step" data-step="3">
+                        <div class="cadence-step-header" onclick="toggleStep(3)">
+                            <div class="flex items-center gap-3">
+                                <span class="step-badge bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">Etapa 3</span>
+                                <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 7</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="3" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body" data-step-body="3">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa anterior:</label>
+                                        <input type="number" id="delay_step_3" value="4" min="0" max="30"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                    </div>
+                                </div>
+                                <textarea id="msg_step_3" rows="3"
+                                    placeholder="{nome}, tudo bem? Notei que ainda não respondeu..."
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: Break-up -->
+                    <div class="cadence-step" data-step="4">
+                        <div class="cadence-step-header" onclick="toggleStep(4)">
+                            <div class="flex items-center gap-3">
+                                <span class="step-badge bg-red-500/20 text-red-400 border border-red-500/30">Etapa 4</span>
+                                <span class="text-sm font-semibold text-gray-200">Break-up</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500">Dia 8</span>
+                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="4" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="cadence-step-body" data-step-body="4">
+                            <div class="cadence-step-body-inner space-y-3">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa anterior:</label>
+                                        <input type="number" id="delay_step_4" value="1" min="0" max="30"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                    </div>
+                                </div>
+                                <textarea id="msg_step_4" rows="3"
+                                    placeholder="{nome}, como não tive retorno, entendo que talvez não seja o momento..."
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                <p class="text-xs text-yellow-500/80">⚠️ Última tentativa. Após 24h sem resposta, o lead será marcado como "Perdido".</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Submit Button -->
+                <div class="pt-4">
+                    <button type="submit" id="submitBtn"
+                        class="btn-cyber w-full py-4 rounded-xl text-white shadow-lg text-lg flex justify-center items-center gap-2">
+                        <span>CRIAR CAMPANHA</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                    </button>
+                    <p id="feedback" class="text-center mt-4 text-sm font-medium hidden"></p>
+                </div>
+
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+    const maxTemplates = 5;
+    const container = document.getElementById('templates-container');
+    const addBtn = document.getElementById('addTemplateBtn');
+
+    // ============================================================
+    // CASCATA DE DROPDOWNS
+    // ============================================================
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        try {
+            const res = await fetch('/api/admin/users/list');
+            const users = await res.json();
+            const select = document.getElementById('user_id');
+            select.innerHTML = '<option value="" disabled selected>Selecione um usuário...</option>';
+            users.forEach(u => {
+                const opt = document.createElement('option');
+                opt.value = u.id;
+                opt.textContent = `${u.email} (ID: ${u.id})`;
+                select.appendChild(opt);
+            });
+        } catch (err) {
+            console.error('Erro ao carregar usuários:', err);
+        }
+    });
+
+    document.getElementById('user_id').addEventListener('change', async function() {
+        const userId = this.value;
+        if (!userId) return;
+
+        const instancesContainer = document.getElementById('instances-container');
+        const jobSelect = document.getElementById('job_id');
+        instancesContainer.innerHTML = '<p class="text-xs text-gray-400">Carregando instâncias...</p>';
+        jobSelect.innerHTML = '<option value="" disabled selected>Carregando jobs...</option>';
+
+        try {
+            const [instRes, jobsRes] = await Promise.all([
+                fetch(`/api/admin/users/${userId}/instances`),
+                fetch(`/api/admin/users/${userId}/scraping-jobs`)
+            ]);
+
+            const instances = await instRes.json();
+            const jobs = await jobsRes.json();
+
+            // Instâncias
+            if (instances.length === 0) {
+                instancesContainer.innerHTML = '<p class="text-xs text-amber-400">Nenhuma instância encontrada para este usuário.</p>';
+            } else {
+                instancesContainer.innerHTML = '';
+                instances.forEach(inst => {
+                    const label = document.createElement('label');
+                    label.className = 'flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors hover:bg-white/5 border border-transparent';
+                    label.innerHTML = `
+                        <input type="checkbox" name="instance_ids" value="${inst.id}"
+                            class="instance-checkbox rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
+                            ${instances.length === 1 ? 'checked' : ''}>
+                        <div class="flex-1 flex items-center justify-between">
+                            <span class="text-sm text-gray-200">${inst.name}</span>
+                            <span class="text-xs px-2 py-0.5 rounded-full
+                                ${inst.status === 'connected' ? 'bg-green-500/10 text-green-400 border border-green-500/30' : 'bg-red-500/10 text-red-400 border border-red-500/30'}">
+                                ${inst.status === 'connected' ? '● Conectado' : '○ Desconectado'}
+                            </span>
+                        </div>
+                    `;
+                    instancesContainer.appendChild(label);
+                });
+            }
+
+            // Jobs
+            jobSelect.innerHTML = '<option value="" disabled selected>Selecione uma lista de leads...</option>';
+            if (jobs.length === 0) {
+                jobSelect.innerHTML += '<option value="" disabled>Nenhum job encontrado para este usuário.</option>';
+            }
+            jobs.forEach(job => {
+                const date = new Date(job.created_at).toLocaleDateString('pt-BR');
+                const count = job.lead_count || job.total_results || 0;
+                const opt = document.createElement('option');
+                opt.value = job.id;
+                opt.textContent = `${job.keyword || 'Upload'} - ${job.locations || ''} (${count} leads) - ${date}`;
+                opt.dataset.count = count;
+                jobSelect.appendChild(opt);
+            });
+        } catch (err) {
+            console.error('Erro ao carregar dados do usuário:', err);
+            instancesContainer.innerHTML = '<p class="text-xs text-red-400">Erro ao carregar instâncias.</p>';
+            jobSelect.innerHTML = '<option value="" disabled>Erro ao carregar jobs.</option>';
+        }
+    });
+
+    document.getElementById('job_id').addEventListener('change', function() {
+        const opt = this.selectedOptions[0];
+        const count = opt?.dataset?.count;
+        const stats = document.getElementById('jobStats');
+        if (count) {
+            stats.textContent = `Aproximadamente ${count} contatos disponíveis nesta lista.`;
+            stats.classList.remove('hidden');
+        }
+    });
+
+    // ============================================================
+    // UPLOAD CSV COM POPUP DE VALIDAÇÃO
+    // ============================================================
+
+    const uploadBtn = document.getElementById('uploadCsvBtn');
+    const fileInput = document.getElementById('csvUpload');
+
+    uploadBtn.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', async function() {
+        const file = this.files[0];
+        if (!file) return;
+
+        const userId = document.getElementById('user_id').value;
+        if (!userId) {
+            alert('Selecione um usuário antes de enviar um CSV.');
+            this.value = '';
+            return;
+        }
+
+        if (!file.name.endsWith('.csv')) {
+            alert('Por favor, selecione um arquivo CSV válido.');
+            this.value = '';
+            return;
+        }
+
+        const doValidate = confirm('Gostaria de validar se todos os números da lista são WhatsApp válido?\n\nIsso pode levar alguns minutos.');
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('user_id', userId);
+        formData.append('validate_whatsapp', doValidate ? 'true' : 'false');
+
+        const progressMsg = document.getElementById('uploadProgressMsg');
+        const originalText = uploadBtn.innerHTML;
+        uploadBtn.disabled = true;
+        uploadBtn.innerHTML = `
+            <svg class="animate-spin w-3 h-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Enviando...
+        `;
+        progressMsg.textContent = doValidate
+            ? 'Validando números no WhatsApp... Isso pode levar alguns minutos.'
+            : 'Processando lista...';
+        progressMsg.classList.remove('hidden');
+
+        try {
+            const res = await fetch('/api/admin/campaigns/validate-csv', {method: 'POST', body: formData});
+            const data = await res.json();
+
+            if (data.error) { alert(data.error); progressMsg.classList.add('hidden'); return; }
+
+            const count = data.valid || data.total_leads || 0;
+            progressMsg.textContent = `✅ ${count} números válidos${data.invalid ? ` (${data.invalid} removidos)` : ''}. Job ID: ${data.job_id}`;
+
+            const jobSelect = document.getElementById('job_id');
+            const placeholder = jobSelect.querySelector('option[disabled][selected]');
+            if (placeholder) placeholder.remove();
+            const opt = document.createElement('option');
+            opt.value = data.job_id;
+            opt.textContent = `[Upload CSV] ${file.name} (${count} leads)`;
+            opt.dataset.count = count;
+            opt.selected = true;
+            jobSelect.appendChild(opt);
+            jobSelect.dispatchEvent(new Event('change'));
+        } catch (err) {
+            alert('Erro no upload: ' + err.message);
+            progressMsg.classList.add('hidden');
+        } finally {
+            uploadBtn.disabled = false;
+            uploadBtn.innerHTML = originalText;
+            fileInput.value = '';
+        }
+    });
+
+    // ============================================================
+    // TEMPLATE VARIATIONS
+    // ============================================================
+
+    addBtn.addEventListener('click', () => {
+        const currentCount = container.querySelectorAll('textarea').length;
+        if (currentCount >= maxTemplates) {
+            alert('Máximo de 5 variações atingido.');
+            return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'relative';
+
+        const newTextarea = document.createElement('textarea');
+        newTextarea.rows = 4;
+        newTextarea.placeholder = `Variação de mensagem ${currentCount + 1}...`;
+        newTextarea.className = 'neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 template-input';
+        newTextarea.name = 'message_template';
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'absolute top-2 right-2 text-xs bg-red-600/20 text-red-300 px-2 py-1 rounded border border-red-500/30 hover:bg-red-600/40 transition-colors';
+        deleteBtn.innerHTML = '✕';
+        deleteBtn.addEventListener('click', () => wrapper.remove());
+
+        wrapper.appendChild(newTextarea);
+        wrapper.appendChild(deleteBtn);
+        container.appendChild(wrapper);
+    });
+
+    // ============================================================
+    // CADENCE FUNCTIONS
+    // ============================================================
+
+    function toggleCadence() {
+        const track = document.getElementById('cadenceToggle');
+        const hidden = document.getElementById('enable_cadence');
+        const stepsContainer = document.getElementById('cadenceStepsContainer');
+        const isOn = track.classList.toggle('on');
+        hidden.value = isOn ? 'true' : 'false';
+        stepsContainer.style.display = isOn ? 'block' : 'none';
+    }
+
+    function toggleStep(stepNum) {
+        const body = document.querySelector(`[data-step-body="${stepNum}"]`);
+        const chevron = document.querySelector(`.step-chevron[data-step="${stepNum}"]`);
+        const isOpen = body.classList.toggle('open');
+        if (chevron) chevron.style.transform = isOpen ? 'rotate(180deg)' : '';
+    }
+
+    // ============================================================
+    // SUBMIT
+    // ============================================================
+
+    document.getElementById('campaignForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const btn = document.getElementById('submitBtn');
+        const feedback = document.getElementById('feedback');
+        const originalText = btn.innerHTML;
+
+        const userSelect = document.getElementById('user_id');
+        const userId = userSelect.value;
+        if (!userId) { alert('Selecione um usuário.'); return; }
+
+        const userName = userSelect.options[userSelect.selectedIndex].text;
+        const campaignName = document.getElementById('name').value;
+
+        const templateInputs = document.querySelectorAll('.template-input');
+        const messageTemplates = Array.from(templateInputs).map(i => i.value).filter(v => v.trim());
+        if (messageTemplates.length === 0) { alert('Digite ao menos uma mensagem.'); return; }
+
+        const instanceCheckboxes = document.querySelectorAll('input[name="instance_ids"]:checked');
+        if (instanceCheckboxes.length === 0) { alert('Selecione pelo menos uma instância de WhatsApp.'); return; }
+
+        if (!confirm(`Criar campanha "${campaignName}" para ${userName}?`)) return;
+
+        btn.disabled = true;
+        btn.innerHTML = `
+            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Criando campanha...
+        `;
+        feedback.classList.add('hidden');
+
+        const sendHourStart = parseInt(document.getElementById('send_hour_start').value, 10) || 8;
+        const sendHourEnd = parseInt(document.getElementById('send_hour_end').value, 10) || 20;
+        if (sendHourStart >= sendHourEnd) {
+            alert('O horário de início deve ser menor que o horário de término.');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            return;
+        }
+
+        let scheduledStartUTC = null;
+        const scheduledInput = document.getElementById('scheduled_start');
+        if (scheduledInput.value) {
+            const scheduledDate = new Date(scheduledInput.value);
+            if (scheduledDate <= new Date()) {
+                alert('Data de início deve ser futura.');
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
+            scheduledStartUTC = scheduledDate.toISOString();
+        }
+
+        const delayMinRaw = document.getElementById('delay_min_minutes').value;
+        const delayMaxRaw = document.getElementById('delay_max_minutes').value;
+
+        const data = {
+            user_id: parseInt(userId),
+            name: campaignName,
+            job_id: document.getElementById('job_id').value,
+            message_templates: messageTemplates,
+            instance_ids: Array.from(instanceCheckboxes).map(cb => parseInt(cb.value)),
+            use_uazapi_sender: true,
+            rotation_mode: instanceCheckboxes.length > 1 ? 'round_robin' : 'single',
+            scheduled_start: scheduledStartUTC,
+            delay_min_minutes: delayMinRaw ? parseInt(delayMinRaw) : null,
+            delay_max_minutes: delayMaxRaw ? parseInt(delayMaxRaw) : null,
+            send_hour_start: sendHourStart,
+            send_hour_end: sendHourEnd,
+            send_saturday: document.getElementById('send_saturday').checked,
+            send_sunday: document.getElementById('send_sunday').checked
+        };
+
+        const cadenceEnabled = document.getElementById('enable_cadence').value === 'true';
+        if (cadenceEnabled) {
+            data.enable_cadence = true;
+            data.steps = [];
+
+            data.steps.push({
+                step_number: 1,
+                step_label: 'Mensagem Inicial',
+                message_templates: messageTemplates,
+                delay_days: 0
+            });
+
+            const stepLabels = { 2: 'Follow-up 1', 3: 'Follow-up 2', 4: 'Break-up' };
+            const defaultDelays = { 2: 3, 3: 4, 4: 1 };
+            let missingSteps = [];
+            for (let s = 2; s <= 4; s++) {
+                const ta = document.getElementById(`msg_step_${s}`);
+                if (!ta || !ta.value.trim()) missingSteps.push(s);
+            }
+            if (missingSteps.length > 0) {
+                alert(`Preencha a mensagem das etapas: ${missingSteps.join(', ')}`);
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                return;
+            }
+
+            for (let s = 2; s <= 4; s++) {
+                const msg = document.getElementById(`msg_step_${s}`).value.trim();
+                const raw = parseInt(document.getElementById(`delay_step_${s}`).value, 10);
+                const delay = Number.isNaN(raw) ? defaultDelays[s] : raw;
+                data.steps.push({
+                    step_number: s,
+                    step_label: stepLabels[s],
+                    message_templates: [msg],
+                    delay_days: delay
+                });
+            }
+        }
+
+        try {
+            const res = await fetch('/api/admin/campaigns', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            const json = await res.json();
+
+            if (res.ok) {
+                feedback.textContent = `✅ Campanha criada com sucesso! ${json.leads_count || ''} leads.`;
+                feedback.className = 'text-center mt-4 text-sm font-medium text-green-400';
+                feedback.classList.remove('hidden');
+                setTimeout(() => { window.location.href = '/admin/campaigns'; }, 1500);
+            } else {
+                throw new Error(json.error || 'Erro desconhecido');
+            }
+        } catch (err) {
+            feedback.textContent = `Erro: ${err.message}`;
+            feedback.className = 'text-center mt-4 text-sm font-medium text-red-400';
+            feedback.classList.remove('hidden');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    });
+</script>
+{% endblock %}

@@ -3112,6 +3112,481 @@ def admin_delete_campaign(campaign_id):
         print(f"Erro ao excluir campanha: {e}")
         return {"error": str(e)}, 500
 
+
+@app.route('/api/admin/campaigns', methods=['POST'])
+@login_required
+@admin_required
+def admin_create_campaign():
+    data = request.get_json(silent=True)
+    if not data:
+        return json.dumps({'error': 'JSON body é obrigatório'}), 400
+    target_user_id = data.get('user_id')
+    if not target_user_id:
+        return json.dumps({'error': 'user_id é obrigatório'}), 400
+    try:
+        target_user_id = int(target_user_id)
+    except (ValueError, TypeError):
+        return json.dumps({'error': 'user_id inválido'}), 400
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE id = %s", (target_user_id,))
+        if not cur.fetchone():
+            conn.close()
+            return json.dumps({'error': 'Usuário não encontrado'}), 404
+    conn.close()
+    return _create_campaign_core(target_user_id, data, admin_id=current_user.id)
+
+
+@app.route('/api/admin/campaigns/validate-csv', methods=['POST'])
+@login_required
+@admin_required
+def admin_validate_csv():
+    """Upload CSV com validação opcional de WhatsApp para criação de campanha admin."""
+    from utils.validate_job_csv import (
+        _check_phone_with_retry,
+        _get_connected_uazapi_token_for_user,
+        _normalize_phone_for_api,
+    )
+
+    if 'file' not in request.files:
+        return json.dumps({'error': 'Nenhum arquivo enviado'}), 400
+    file = request.files['file']
+    if not file.filename or not file.filename.endswith('.csv'):
+        return json.dumps({'error': 'Apenas arquivos .csv são permitidos'}), 400
+
+    target_user_id = request.form.get('user_id')
+    if not target_user_id:
+        return json.dumps({'error': 'user_id é obrigatório'}), 400
+    try:
+        target_user_id = int(target_user_id)
+    except (ValueError, TypeError):
+        return json.dumps({'error': 'user_id inválido'}), 400
+
+    validate_whatsapp = request.form.get('validate_whatsapp', 'false').lower() == 'true'
+
+    try:
+        try:
+            df = pd.read_csv(file, dtype=str, encoding='utf-8', encoding_errors='replace')
+        except TypeError:
+            file.seek(0)
+            df = pd.read_csv(file, dtype=str, encoding='utf-8')
+
+        cols = [c.lower() for c in df.columns]
+        df.columns = cols
+
+        phone_col = next((c for c in cols if 'phone' in c or 'tel' in c or 'cel' in c), None)
+        whatsapp_link_col = next((c for c in cols if c == 'whatsapp_link'), None)
+        name_col = next((c for c in cols if 'name' in c or 'nome' in c), None)
+        status_col = next((c for c in cols if c == 'status'), None)
+
+        if not phone_col and not whatsapp_link_col:
+            return json.dumps({'error': 'Nenhuma coluna de telefone encontrada no CSV'}), 400
+
+        if status_col:
+            df_filtered = df[df[status_col].astype(str).str.strip() == '1']
+        else:
+            df_filtered = df
+
+        rows = []
+        for df_idx, row in df_filtered.iterrows():
+            raw_phone = None
+            if whatsapp_link_col and pd.notna(row.get(whatsapp_link_col)):
+                from utils.validate_job_csv import _extract_phone_from_link
+                raw_phone = _extract_phone_from_link(row[whatsapp_link_col])
+            if not raw_phone and phone_col and pd.notna(row.get(phone_col)):
+                digits = re.sub(r'\D', '', str(row[phone_col]))
+                if len(digits) >= 10:
+                    raw_phone = digits
+            phone = _normalize_phone_for_api(raw_phone) if raw_phone else None
+            if phone:
+                rows.append((df_idx, phone))
+
+        seen = set()
+        unique_rows = []
+        for df_idx, phone in rows:
+            if phone not in seen:
+                seen.add(phone)
+                unique_rows.append((df_idx, phone))
+        rows = unique_rows
+
+        if not rows:
+            return json.dumps({'error': 'Nenhum número válido encontrado no CSV'}), 400
+
+        indices_drop = set()
+        batches_skipped = 0
+
+        if validate_whatsapp:
+            conn = get_db_connection()
+            token = _get_connected_uazapi_token_for_user(conn, target_user_id)
+            conn.close()
+            if not token:
+                return json.dumps({'error': 'Nenhuma instância Uazapi conectada para validar'}), 400
+
+            uazapi = UazapiService()
+            BATCH_SIZE = 5
+            for i in range(0, len(rows), BATCH_SIZE):
+                batch = rows[i:i + BATCH_SIZE]
+                numbers = [phone for _, phone in batch]
+                result, err = _check_phone_with_retry(uazapi, token, numbers, timeout=30)
+                if result is None:
+                    batches_skipped += 1
+                    print(f"[admin_validate_csv] batch {i//BATCH_SIZE+1} FALHOU ({err})")
+                else:
+                    for j, item in enumerate(result):
+                        if j < len(batch) and not item.get('isInWhatsapp', True):
+                            indices_drop.add(batch[j][0])
+                if i + BATCH_SIZE < len(rows):
+                    time.sleep(2)
+
+        valid_indices = set(idx for idx, _ in rows) - indices_drop
+        df_valid = df_filtered[df_filtered.index.isin(valid_indices)]
+
+        if 'status' not in cols:
+            df_valid = df_valid.copy()
+            df_valid['status'] = 1
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        user_dir = os.path.join(os.environ.get("STORAGE_DIR", "storage"), str(target_user_id), "uploads")
+        os.makedirs(user_dir, exist_ok=True)
+        save_path = os.path.join(user_dir, f"admin_upload_{timestamp}.csv")
+        df_valid.to_csv(save_path, index=False, encoding='utf-8')
+
+        valid_count = len(df_valid)
+        invalid_count = len(indices_drop)
+
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO scraping_jobs (user_id, keyword, locations, total_results, lead_count, status, results_path, progress, completed_at)
+                VALUES (%s, 'Upload Admin', 'Upload', %s, %s, 'completed', %s, 100, NOW())
+                RETURNING id
+                """,
+                (target_user_id, valid_count, valid_count, save_path)
+            )
+            job_id = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        return json.dumps({
+            'success': True,
+            'valid': valid_count,
+            'invalid': invalid_count,
+            'total': len(rows),
+            'job_id': job_id,
+            'batches_skipped': batches_skipped,
+            'partial': batches_skipped > 0,
+        })
+
+    except Exception as e:
+        print(f"[admin_validate_csv] Erro: {e}")
+        return json.dumps({'error': str(e)}), 500
+
+
+@app.route('/admin/campaigns/new')
+@login_required
+@admin_required
+def admin_new_campaign():
+    return render_template('admin/campaigns_new.html')
+
+
+@app.route('/admin/campaigns/<int:campaign_id>/edit')
+@login_required
+@admin_required
+def admin_edit_campaign(campaign_id):
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT c.*, u.email as user_email
+            FROM campaigns c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = %s
+        """, (campaign_id,))
+        campaign = cur.fetchone()
+        if not campaign:
+            conn.close()
+            flash("Campanha não encontrada.", "error")
+            return redirect(url_for('admin_campaigns'))
+
+        cur.execute("""
+            SELECT step_number, step_label, message_template, delay_days, media_type
+            FROM campaign_steps WHERE campaign_id = %s ORDER BY step_number
+        """, (campaign_id,))
+        steps = cur.fetchall()
+
+        cur.execute("""
+            SELECT i.id, i.name, i.status
+            FROM campaign_instances ci
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE ci.campaign_id = %s
+        """, (campaign_id,))
+        instances = cur.fetchall()
+    conn.close()
+
+    return render_template('admin/campaigns_edit.html',
+                           campaign=campaign,
+                           steps=steps,
+                           instances=instances)
+
+
+@app.route('/api/admin/campaigns/sync', methods=['GET'])
+@login_required
+@admin_required
+def admin_sync_campaigns():
+    """Sync contadores Uazapi para campanhas running. Agrupa por instância para reduzir chamadas API."""
+    SYNC_TTL_SECONDS = 300  # 5 minutos
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT DISTINCT c.id FROM campaigns c WHERE c.status = 'running' AND c.use_uazapi_sender = TRUE"
+            )
+            campaign_ids = [r['id'] for r in cur.fetchall()]
+
+        if not campaign_ids:
+            return json.dumps({'campaigns': []})
+
+        sends_by_token = {}
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT css.id, css.campaign_id, css.uazapi_folder_id, css.last_sync_at,
+                       css.instance_id, i.apikey
+                FROM campaign_stage_sends css
+                JOIN instances i ON i.id = css.instance_id
+                WHERE css.campaign_id = ANY(%s)
+                  AND css.status IN ('running', 'partial', 'scheduled', 'queued')
+                  AND css.uazapi_folder_id IS NOT NULL
+            """, (campaign_ids,))
+            sends = cur.fetchall()
+
+        now = datetime.now()
+        for send in sends:
+            if send.get('last_sync_at'):
+                elapsed = (now - send['last_sync_at']).total_seconds()
+                if elapsed < SYNC_TTL_SECONDS:
+                    continue
+            token = send.get('apikey')
+            if not token:
+                continue
+            sends_by_token.setdefault(token, []).append(send)
+
+        uazapi = UazapiService()
+        synced_campaign_ids = set()
+
+        for token, token_sends in sends_by_token.items():
+            try:
+                folders_list = uazapi.list_folders(token)
+                if not folders_list:
+                    continue
+                folders_by_id = {}
+                for f in folders_list:
+                    fid = str(f.get("id") or f.get("folder_id") or f.get("folderId") or "")
+                    if fid:
+                        folders_by_id[fid] = f
+
+                for send in token_sends:
+                    fid = str(send['uazapi_folder_id'])
+                    folder_info = folders_by_id.get(fid)
+                    if not folder_info:
+                        continue
+                    log_success = int(folder_info.get("log_sucess") or folder_info.get("log_success") or 0)
+                    log_failed = int(folder_info.get("log_failed") or 0)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE campaign_stage_sends SET success_count = %s, failed_count = %s, last_sync_at = NOW() WHERE id = %s",
+                            (log_success, log_failed, send['id'])
+                        )
+                    synced_campaign_ids.add(send['campaign_id'])
+            except Exception as e:
+                print(f"[admin_sync] Erro ao sincronizar token: {e}")
+                continue
+
+        conn.commit()
+
+        result = []
+        if synced_campaign_ids:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT campaign_id,
+                           COUNT(*) as total_leads,
+                           COUNT(*) FILTER (WHERE status = 'sent') as sent_count,
+                           COUNT(*) FILTER (WHERE status = 'pending') as pending_count
+                    FROM campaign_leads
+                    WHERE campaign_id = ANY(%s)
+                    GROUP BY campaign_id
+                """, (list(synced_campaign_ids),))
+                for r in cur.fetchall():
+                    result.append({
+                        'id': r['campaign_id'],
+                        'total_leads': r['total_leads'],
+                        'sent_count': r['sent_count'],
+                        'pending_count': r['pending_count'],
+                        'last_sync': now.isoformat(),
+                    })
+
+        return json.dumps({'campaigns': result})
+    except Exception as e:
+        print(f"[admin_sync] Erro: {e}")
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/campaigns/<int:campaign_id>/update', methods=['POST'])
+@login_required
+@admin_required
+def admin_update_campaign(campaign_id):
+    """Edição admin com regras ADR-5 por status."""
+    data = request.get_json(silent=True)
+    if not data:
+        return json.dumps({'error': 'JSON body é obrigatório'}), 400
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM campaigns WHERE id = %s", (campaign_id,))
+            campaign = cur.fetchone()
+        if not campaign:
+            return json.dumps({'error': 'Campanha não encontrada'}), 404
+
+        status = campaign['status']
+        if status == 'completed':
+            return json.dumps({'error': 'Campanha concluída não pode ser editada'}), 400
+
+        always_fields = {'name'}
+        paused_fields = always_fields | {'send_hour_start', 'send_hour_end', 'send_saturday', 'send_sunday', 'delay_min_minutes', 'delay_max_minutes'}
+        pending_fields = paused_fields | {'message_templates', 'scheduled_start', 'enable_cadence', 'steps'}
+
+        if status == 'running':
+            allowed = always_fields
+        elif status == 'paused':
+            allowed = paused_fields
+        else:
+            allowed = pending_fields
+
+        blocked = set(data.keys()) - allowed - {'user_id'}
+        if blocked:
+            if status == 'running':
+                return json.dumps({'error': f'Pause a campanha para editar: {", ".join(sorted(blocked))}'}), 400
+            return json.dumps({'error': f'Campos não permitidos para status {status}: {", ".join(sorted(blocked))}'}), 400
+
+        with conn.cursor() as cur:
+            if 'name' in data:
+                cur.execute("UPDATE campaigns SET name = %s WHERE id = %s", (data['name'], campaign_id))
+            if 'send_hour_start' in data and 'send_hour_start' in allowed:
+                cur.execute("UPDATE campaigns SET send_hour_start = %s WHERE id = %s", (int(data['send_hour_start']), campaign_id))
+            if 'send_hour_end' in data and 'send_hour_end' in allowed:
+                cur.execute("UPDATE campaigns SET send_hour_end = %s WHERE id = %s", (int(data['send_hour_end']), campaign_id))
+            if 'send_saturday' in data and 'send_saturday' in allowed:
+                cur.execute("UPDATE campaigns SET send_saturday = %s WHERE id = %s", (bool(data['send_saturday']), campaign_id))
+            if 'send_sunday' in data and 'send_sunday' in allowed:
+                cur.execute("UPDATE campaigns SET send_sunday = %s WHERE id = %s", (bool(data['send_sunday']), campaign_id))
+            if 'delay_min_minutes' in data and 'delay_min_minutes' in allowed:
+                cur.execute("UPDATE campaigns SET delay_min_minutes = %s WHERE id = %s", (data['delay_min_minutes'], campaign_id))
+            if 'delay_max_minutes' in data and 'delay_max_minutes' in allowed:
+                cur.execute("UPDATE campaigns SET delay_max_minutes = %s WHERE id = %s", (data['delay_max_minutes'], campaign_id))
+            if 'message_templates' in data and 'message_templates' in allowed:
+                templates = json.dumps(data['message_templates'])
+                cur.execute("UPDATE campaigns SET message_template = %s WHERE id = %s", (templates, campaign_id))
+            if 'scheduled_start' in data and 'scheduled_start' in allowed:
+                val = data['scheduled_start']
+                if val:
+                    try:
+                        parsed = datetime.fromisoformat(val.replace('Z', '+00:00'))
+                        if parsed.tzinfo is None:
+                            parsed = pytz.timezone('America/Sao_Paulo').localize(parsed)
+                        val = parsed.astimezone(pytz.UTC).replace(tzinfo=None)
+                    except Exception:
+                        return json.dumps({'error': f'Data scheduled_start inválida: {data["scheduled_start"]}'}), 400
+                cur.execute("UPDATE campaigns SET scheduled_start = %s WHERE id = %s", (val, campaign_id))
+            if 'enable_cadence' in data and 'enable_cadence' in allowed:
+                cur.execute("UPDATE campaigns SET enable_cadence = %s WHERE id = %s", (bool(data['enable_cadence']), campaign_id))
+
+            if 'steps' in data and 'steps' in allowed:
+                for step in data['steps']:
+                    step_number = step.get('step_number', 1)
+                    step_label = step.get('step_label', '')
+                    step_messages = step.get('message_templates', [])
+                    delay_days = step.get('delay_days', 0)
+                    step_template_json = json.dumps(step_messages)
+                    cur.execute("""
+                        INSERT INTO campaign_steps (campaign_id, step_number, step_label, message_template, delay_days)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (campaign_id, step_number) DO UPDATE SET
+                            step_label = EXCLUDED.step_label,
+                            message_template = EXCLUDED.message_template,
+                            delay_days = EXCLUDED.delay_days
+                    """, (campaign_id, step_number, step_label, step_template_json, delay_days))
+
+        conn.commit()
+        return json.dumps({'success': True})
+    except Exception as e:
+        conn.rollback()
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/campaigns/<int:campaign_id>/leads', methods=['GET'])
+@login_required
+@admin_required
+def admin_get_campaign_leads(campaign_id):
+    """Leads paginados de qualquer campanha (admin, sem filtro user_id)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM campaigns WHERE id = %s", (campaign_id,))
+            if not cur.fetchone():
+                return json.dumps({'error': 'Campanha não encontrada'}), 404
+
+        page = request.args.get('page', 1, type=int)
+        per_page = 50
+        offset = (page - 1) * per_page
+
+        name_filter = request.args.get('name', '')
+        phone_filter = request.args.get('phone', '')
+        status_filter = request.args.get('status', '')
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            base_query = "FROM campaign_leads WHERE campaign_id = %s"
+            params = [campaign_id]
+
+            if name_filter:
+                base_query += " AND name ILIKE %s"
+                params.append(f"%{name_filter}%")
+            if phone_filter:
+                base_query += " AND phone ILIKE %s"
+                params.append(f"%{phone_filter}%")
+            if status_filter:
+                base_query += " AND status = %s"
+                params.append(status_filter)
+
+            cur.execute(f"SELECT COUNT(*) as count {base_query}", tuple(params))
+            total = cur.fetchone()['count']
+
+            query = f"""
+                SELECT id, phone, name, whatsapp_link, status, log, sent_at
+                {base_query}
+                ORDER BY COALESCE(csv_row_order, id) ASC, id ASC
+                LIMIT %s OFFSET %s
+            """
+            params.extend([per_page, offset])
+            cur.execute(query, tuple(params))
+            leads = cur.fetchall()
+
+        return json.dumps({
+            'leads': [dict(l, sent_at=l['sent_at'].isoformat() if l['sent_at'] else None) for l in leads],
+            'total': total,
+            'page': page,
+            'pages': (total + per_page - 1) // per_page
+        }, default=str)
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/admin/users')
 @login_required
 @admin_required
@@ -4134,9 +4609,8 @@ def upload_csv_leads():
         print(f"Erro no upload: {e}")
         return json.dumps({'error': str(e)}), 500
 
-@app.route('/api/campaigns', methods=['POST'])
-@login_required
-def create_campaign():
+def _create_campaign_core(user_id, data, admin_id=None):
+    """Helper reutilizável: cria campanha para user_id. admin_id se criado pelo superadmin."""
     def extract_phone_from_whatsapp_link(link):
         """Helper to extract phone from whatsapp link"""
         if not link: return None
@@ -4151,7 +4625,6 @@ def create_campaign():
         if len(digits) >= 10: return digits
         return None
 
-    data = request.json
     name = data.get('name')
     job_id = data.get('job_id')
     # Pode receber 'message_template' (string única) ou 'message_templates' (lista)
@@ -4210,7 +4683,7 @@ def create_campaign():
     with conn_check.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM instances WHERE user_id = %s AND id = ANY(%s) AND COALESCE(api_provider, 'megaapi') = 'uazapi'",
-            (current_user.id, instance_ids),
+            (user_id, instance_ids),
         )
         uazapi_selected_count = cur.fetchone()[0]
     conn_check.close()
@@ -4224,7 +4697,7 @@ def create_campaign():
         # 1. Obter leads do Job
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT results_path FROM scraping_jobs WHERE id = %s AND user_id = %s", (job_id, current_user.id))
+            cur.execute("SELECT results_path FROM scraping_jobs WHERE id = %s AND user_id = %s", (job_id, user_id))
             job = cur.fetchone()
         conn.close()
         
@@ -4337,12 +4810,13 @@ def create_campaign():
             # use_uazapi_sender: Uazapi gerencia envio; status 'running' após API call
             initial_status = 'pending' if scheduled_start else 'running'
             
+            daily_limit = get_user_daily_limit(user_id)
             cur.execute(
                 """
-                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday, created_by_admin_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
                 """,
-                (current_user.id, name, message_template_json, 100, scheduled_start, initial_status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday)
+                (user_id, name, message_template_json, daily_limit, scheduled_start, initial_status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday, admin_id)
             )
             row = cur.fetchone()
             campaign_id = row[0]
@@ -4352,7 +4826,7 @@ def create_campaign():
             if instance_ids:
                 # Validate that all instance_ids belong to this user
                 cur.execute("SELECT id FROM instances WHERE user_id = %s AND id = ANY(%s)", 
-                           (current_user.id, instance_ids))
+                           (user_id, instance_ids))
                 valid_ids = [r[0] for r in cur.fetchall()]
                 for inst_id in valid_ids:
                     cur.execute(
@@ -4362,7 +4836,7 @@ def create_campaign():
             else:
                 # Backward compatible: auto-associate user's default instance
                 cur.execute("SELECT id FROM instances WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1", 
-                           (current_user.id,))
+                           (user_id,))
                 default_inst = cur.fetchone()
                 if default_inst:
                     cur.execute(
@@ -4411,7 +4885,7 @@ def create_campaign():
 
             if enable_cadence and steps:
                 # Media storage directory
-                media_dir = os.path.join('storage', str(current_user.id), 'campaign_media')
+                media_dir = os.path.join('storage', str(user_id), 'campaign_media')
                 os.makedirs(media_dir, exist_ok=True)
                 
                 for step in steps:
@@ -4487,7 +4961,7 @@ def create_campaign():
             from utils.limits import can_create_campaign_today
             from utils.sync_uazapi import _normalize_phone_for_api
 
-            instances = _get_uazapi_instances_for_campaign(campaign_id, current_user.id)
+            instances = _get_uazapi_instances_for_campaign(campaign_id, user_id)
             allowed_instances = [inst for inst in instances if can_create_campaign_today(inst['instance_id'])]
             if not allowed_instances:
                 print(f"⚠️ [Uazapi] Campanha {campaign_id}: nenhuma instância disponível (limite diário ou sem Uazapi).")
@@ -4500,7 +4974,7 @@ def create_campaign():
                     # Step 1 media (superadmin only) para envio com mídia
                     step1_media_path = None
                     step1_media_type = 'image'
-                    if is_super_admin() and enable_cadence:
+                    if admin_id is not None and enable_cadence:
                         cur.execute(
                             "SELECT media_path, media_type FROM campaign_steps WHERE campaign_id = %s AND step_number = 1 LIMIT 1",
                             (campaign_id,)
@@ -4508,7 +4982,7 @@ def create_campaign():
                         step1 = cur.fetchone()
                         if step1 and step1.get('media_path'):
                             mp = step1['media_path']
-                            user_storage = os.path.abspath(os.path.join('storage', str(current_user.id)))
+                            user_storage = os.path.abspath(os.path.join('storage', str(user_id)))
                             if mp and os.path.isfile(mp) and os.path.abspath(mp).startswith(user_storage):
                                 step1_media_path = mp
                                 step1_media_type = step1.get('media_type') or 'image'
@@ -4670,6 +5144,13 @@ def create_campaign():
     except Exception as e:
         print(f"Erro ao criar campanha: {e}")
         return json.dumps({'error': str(e)}), 500
+
+
+@app.route('/api/campaigns', methods=['POST'])
+@login_required
+def create_campaign():
+    return _create_campaign_core(current_user.id, request.json)
+
 
 @app.route("/campaigns")
 @login_required
