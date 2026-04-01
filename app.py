@@ -721,6 +721,13 @@ def _init_db_body() -> None:
             """
         )
 
+        # Auditoria: quem criou a campanha pelo superadmin
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS created_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL DEFAULT NULL;
+            """
+        )
+
         # ============================================================
         # END UAZAPI CAMPAIGN API MIGRATIONS
         # ============================================================
@@ -3133,6 +3140,74 @@ def admin_users():
         users = cur.fetchall()
     conn.close()
     return render_template('admin/users.html', users=users)
+
+
+@app.route('/api/admin/users/list')
+@login_required
+@admin_required
+def admin_users_list_api():
+    """Superadmin: lista usuários com licença ativa ou instância vinculada (dropdown cascata)."""
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT u.id, u.email
+                FROM users u
+                WHERE EXISTS (
+                    SELECT 1 FROM licenses l WHERE l.user_id = u.id AND l.status = 'active' AND (l.expires_at IS NULL OR l.expires_at > NOW())
+                ) OR EXISTS (
+                    SELECT 1 FROM instances i WHERE i.user_id = u.id
+                )
+                ORDER BY u.email ASC
+            """)
+            users = cur.fetchall()
+        conn.close()
+        return json.dumps([{'id': u['id'], 'email': u['email']} for u in users], default=str)
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500
+
+
+@app.route('/api/admin/users/<int:user_id>/instances')
+@login_required
+@admin_required
+def admin_user_instances_api(user_id):
+    """Superadmin: instâncias Uazapi de um usuário (dropdown cascata)."""
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, status, COALESCE(api_provider, 'megaapi') as api_provider
+                FROM instances
+                WHERE user_id = %s AND COALESCE(api_provider, 'megaapi') = 'uazapi'
+                ORDER BY id ASC
+            """, (user_id,))
+            instances = cur.fetchall()
+        conn.close()
+        return json.dumps([dict(i) for i in instances], default=str)
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500
+
+
+@app.route('/api/admin/users/<int:user_id>/scraping-jobs')
+@login_required
+@admin_required
+def admin_user_scraping_jobs_api(user_id):
+    """Superadmin: scraping jobs completados de um usuário (dropdown cascata)."""
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, keyword, locations, total_results, lead_count, created_at
+                FROM scraping_jobs
+                WHERE user_id = %s AND status = 'completed'
+                ORDER BY created_at DESC
+            """, (user_id,))
+            jobs = cur.fetchall()
+        conn.close()
+        return json.dumps([dict(j, created_at=j['created_at'].isoformat()) for j in jobs], default=str)
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500
+
 
 @app.route('/admin/users/<int:user_id>/toggle_admin', methods=['POST'])
 @login_required
