@@ -189,6 +189,28 @@
                     </div>
                 </div>
 
+                <!-- ============================================ -->
+                <!-- Limite diário de mensagens -->
+                <!-- ============================================ -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
+                    <label class="block text-sm font-semibold text-gray-300 mb-1">
+                        📨 Mensagens por dia
+                    </label>
+                    <p class="text-xs text-gray-500 mb-3">Quantas mensagens serão enviadas por dia. Limite máximo: <strong class="text-blue-400">{{ plan_daily_limit }}</strong> (validado pelo plano do usuário).</p>
+                    <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ plan_daily_limit }}" data-step="5">
+                        <button type="button" id="dailyLimitDec"
+                            class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                            onclick="adjustDailyLimit(-1)">−</button>
+                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-white w-10 text-center">{{ plan_daily_limit }}</span>
+                        <button type="button" id="dailyLimitInc"
+                            class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                            onclick="adjustDailyLimit(1)">+</button>
+                        <span class="text-xs text-gray-500">msgs/dia</span>
+                    </div>
+                    <input type="hidden" id="daily_limit_value" value="{{ plan_daily_limit }}">
+                </div>
+
                 <!-- [3] Seleção de Job OU Upload CSV -->
                 <div>
                     <label class="block text-sm font-semibold text-gray-300 mb-2">Lista de Leads (Job ou CSV)</label>
@@ -480,6 +502,15 @@
         } catch (err) {
             console.error('Erro ao carregar usuários:', err);
         }
+
+        const dlCounter = document.getElementById('dailyLimitCounter');
+        if (dlCounter) {
+            const min = parseInt(dlCounter.dataset.min, 10);
+            const max = parseInt(dlCounter.dataset.max, 10);
+            const current = parseInt(document.getElementById('daily_limit_value').value, 10);
+            document.getElementById('dailyLimitDec').disabled = current <= min;
+            document.getElementById('dailyLimitInc').disabled = current >= max;
+        }
     });
 
     document.getElementById('user_id').addEventListener('change', async function() {
@@ -697,6 +728,26 @@
     });
 
     // ============================================================
+    // DAILY LIMIT COUNTER
+    // ============================================================
+
+    function adjustDailyLimit(direction) {
+        const counter = document.getElementById('dailyLimitCounter');
+        const display = document.getElementById('dailyLimitDisplay');
+        const hidden = document.getElementById('daily_limit_value');
+        const min = parseInt(counter.dataset.min, 10);
+        const max = parseInt(counter.dataset.max, 10);
+        const step = parseInt(counter.dataset.step, 10);
+        let current = parseInt(hidden.value, 10);
+        if (isNaN(current)) current = max;
+        current = Math.min(max, Math.max(min, current + direction * step));
+        hidden.value = current;
+        display.textContent = current;
+        document.getElementById('dailyLimitDec').disabled = current <= min;
+        document.getElementById('dailyLimitInc').disabled = current >= max;
+    }
+
+    // ============================================================
     // CADENCE FUNCTIONS
     // ============================================================
 
@@ -787,7 +838,8 @@
             send_hour_start: sendHourStart,
             send_hour_end: sendHourEnd,
             send_saturday: document.getElementById('send_saturday').checked,
-            send_sunday: document.getElementById('send_sunday').checked
+            send_sunday: document.getElementById('send_sunday').checked,
+            daily_limit: parseInt(document.getElementById('daily_limit_value').value, 10)
         };
 
         const cadenceEnabled = document.getElementById('enable_cadence').value === 'true';

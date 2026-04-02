@@ -3351,7 +3351,7 @@ def admin_validate_csv():
 @login_required
 @admin_required
 def admin_new_campaign():
-    return render_template('admin/campaigns_new.html')
+    return render_template('admin/campaigns_new.html', plan_daily_limit=30)
 
 
 @app.route('/admin/campaigns/<int:campaign_id>/edit')
@@ -4243,9 +4243,12 @@ def new_campaign():
         user_instances = cur.fetchall()
     conn.close()
     
+    plan_daily_limit = get_user_daily_limit(current_user.id)
+    
     return render_template('campaigns_new.html', 
                            instances=user_instances,
-                           is_super_admin=is_super_admin())
+                           is_super_admin=is_super_admin(),
+                           plan_daily_limit=plan_daily_limit)
 
 @app.route('/api/scraping-jobs')
 @login_required
@@ -4934,7 +4937,12 @@ def _create_campaign_core(user_id, data, admin_id=None):
             # use_uazapi_sender: Uazapi gerencia envio; status 'running' após API call
             initial_status = 'pending' if scheduled_start else 'running'
             
-            daily_limit = get_user_daily_limit(user_id)
+            plan_limit = get_user_daily_limit(user_id)
+            _submitted = data.get('daily_limit')
+            try:
+                daily_limit = max(5, min(int(_submitted), plan_limit)) if _submitted is not None else plan_limit
+            except (ValueError, TypeError):
+                daily_limit = plan_limit
             cur.execute(
                 """
                 INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday, created_by_admin_id)
