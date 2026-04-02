@@ -2624,7 +2624,7 @@ def campaign_kanban_data(campaign_id):
                 """, (campaign_id,))
                 inst = cur.fetchone()
             if inst and inst.get('apikey'):
-                from utils.sync_uazapi import sync_campaign_leads_from_uazapi, get_uazapi_campaign_counts, is_initial_campaign_finished
+                from utils.sync_uazapi import sync_campaign_leads_from_uazapi
                 uazapi = UazapiService()
                 with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
@@ -2649,14 +2649,22 @@ def campaign_kanban_data(campaign_id):
                         should_sync = (now_utc - last_sync_at).total_seconds() >= (UAZAPI_SYNC_WEB_INTERVAL_MINUTES * 60)
                     if should_sync:
                         sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
-                    if campaign.uazapi_folder_id:
-                        counts = get_uazapi_campaign_counts(uazapi, inst['apikey'], campaign.uazapi_folder_id)
-                        stats = {
-                            "sent": counts.get("sent", 0),
-                            "failed": counts.get("failed", 0),
-                            "scheduled": counts.get("scheduled", 0),
-                            "initial_campaign_finished": is_initial_campaign_finished(counts),
-                        }
+                    # Usar campaign_stage_sends (initial) para stats — cobre multi-instância e chunks fragmentados.
+                    with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute(
+                            """SELECT COALESCE(SUM(success_count), 0)::int AS sent,
+                                      COALESCE(SUM(failed_count), 0)::int AS failed,
+                                      COALESCE(SUM(GREATEST(0, planned_count - success_count - failed_count)), 0)::int AS scheduled
+                               FROM campaign_stage_sends WHERE campaign_id = %s AND stage = 'initial'""",
+                            (campaign_id,),
+                        )
+                        row = cur.fetchone() or {}
+                    stats = {
+                        "sent": int(row.get("sent", 0)),
+                        "failed": int(row.get("failed", 0)),
+                        "scheduled": int(row.get("scheduled", 0)),
+                        "initial_campaign_finished": int(row.get("scheduled", 0)) == 0,
+                    }
                 elif campaign.uazapi_folder_id:
                     with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute(
@@ -2952,8 +2960,41 @@ def admin_campaigns():
             """)
         
         campaigns = cur.fetchall()
+
+        # Para campanhas com cadência + Uazapi: sobrescrever sent/pending com stage initial.
+        cadence_ids = [c['id'] for c in campaigns if c.get('enable_cadence') and c.get('use_uazapi_sender')]
+        initial_agg = {}
+        if cadence_ids:
+            cur.execute(
+                """
+                SELECT campaign_id,
+                       COALESCE(SUM(success_count), 0)::int AS initial_sent,
+                       COALESCE(SUM(failed_count), 0)::int AS initial_failed
+                FROM campaign_stage_sends
+                WHERE campaign_id = ANY(%s) AND stage = 'initial'
+                GROUP BY campaign_id
+                """,
+                (cadence_ids,),
+            )
+            for r in cur.fetchall():
+                initial_agg[r['campaign_id']] = r
+
     conn.close()
-    
+
+    if initial_agg:
+        campaigns_out = []
+        for c in campaigns:
+            c = dict(c)
+            agg = initial_agg.get(c['id'])
+            if agg:
+                total = int(c.get('total_leads') or 0)
+                init_sent = int(agg['initial_sent'] or 0)
+                init_failed = int(agg['initial_failed'] or 0)
+                c['sent_count'] = init_sent
+                c['pending_count'] = max(0, total - init_sent - init_failed)
+            campaigns_out.append(c)
+        campaigns = campaigns_out
+
     counts = {
         'all': count_all,
         'running': count_running,
@@ -2961,8 +3002,8 @@ def admin_campaigns():
         'paused': count_paused,
         'completed': count_completed
     }
-    
-    return render_template('admin/campaigns.html', 
+
+    return render_template('admin/campaigns.html',
                          campaigns=campaigns,
                          status_filter=status_filter,
                          counts=counts)
@@ -3049,6 +3090,26 @@ def admin_campaign_detail_api(campaign_id):
                 (campaign_id,),
             )
             counts = cur.fetchone()
+
+            # Para cadência + Uazapi: sent/pending da stage initial (mais preciso que campaign_leads).
+            if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(success_count), 0)::int AS initial_sent,
+                           COALESCE(SUM(failed_count), 0)::int AS initial_failed
+                    FROM campaign_stage_sends
+                    WHERE campaign_id = %s AND stage = 'initial'
+                    """,
+                    (campaign_id,),
+                )
+                init_row = cur.fetchone()
+                if init_row:
+                    total_leads = int(counts.get('total_leads') or 0)
+                    init_sent = int(init_row['initial_sent'] or 0)
+                    init_failed = int(init_row['initial_failed'] or 0)
+                    counts = dict(counts)
+                    counts['sent_count'] = init_sent
+                    counts['pending_count'] = max(0, total_leads - init_sent - init_failed)
     finally:
         conn.close()
 
@@ -3406,6 +3467,7 @@ def admin_sync_campaigns():
 
         result = []
         if synced_campaign_ids:
+            ids_list = list(synced_campaign_ids)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT campaign_id,
@@ -3415,15 +3477,41 @@ def admin_sync_campaigns():
                     FROM campaign_leads
                     WHERE campaign_id = ANY(%s)
                     GROUP BY campaign_id
-                """, (list(synced_campaign_ids),))
-                for r in cur.fetchall():
-                    result.append({
-                        'id': r['campaign_id'],
-                        'total_leads': r['total_leads'],
-                        'sent_count': r['sent_count'],
-                        'pending_count': r['pending_count'],
-                        'last_sync': now.isoformat(),
-                    })
+                """, (ids_list,))
+                leads_counts = {r['campaign_id']: r for r in cur.fetchall()}
+
+                # Cadence campaigns: usar campaign_stage_sends (initial) como fonte real.
+                cur.execute("""
+                    SELECT css.campaign_id,
+                           COALESCE(SUM(css.success_count), 0)::int AS initial_sent,
+                           COALESCE(SUM(css.failed_count), 0)::int AS initial_failed
+                    FROM campaign_stage_sends css
+                    JOIN campaigns c ON c.id = css.campaign_id
+                    WHERE css.campaign_id = ANY(%s)
+                      AND css.stage = 'initial'
+                      AND c.enable_cadence = TRUE
+                      AND c.use_uazapi_sender = TRUE
+                    GROUP BY css.campaign_id
+                """, (ids_list,))
+                initial_agg = {r['campaign_id']: r for r in cur.fetchall()}
+
+            for cid in ids_list:
+                lc = leads_counts.get(cid, {})
+                total = int(lc.get('total_leads') or 0)
+                sent = int(lc.get('sent_count') or 0)
+                pending_val = int(lc.get('pending_count') or 0)
+                ia = initial_agg.get(cid)
+                if ia:
+                    sent = int(ia['initial_sent'] or 0)
+                    failed = int(ia['initial_failed'] or 0)
+                    pending_val = max(0, total - sent - failed)
+                result.append({
+                    'id': cid,
+                    'total_leads': total,
+                    'sent_count': sent,
+                    'pending_count': pending_val,
+                    'last_sync': now.isoformat(),
+                })
 
         return json.dumps({'campaigns': result})
     except Exception as e:
@@ -5518,11 +5606,57 @@ def get_campaign_stats(campaign_id):
         pending = stats['pending'] or 0
         failed = stats['failed'] or 0
         total_leads = stats['total_leads'] or 0
-        uazapi_debug = {}  # para ?debug=1
-
-        # Campanhas API 2.0: usar list_folders/log_sucess como fonte de verdade para "enviados".
+        uazapi_debug = {}
         uazapi_scheduled = 0
-        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
+
+        # Pré-carregar stage_progress (campaign_stage_sends) — usado para cadência e headline.
+        conn_stage = get_db_connection()
+        try:
+            stage_progress = _get_campaign_stage_progress(conn_stage, campaign_id)
+
+            has_scheduled_chunk = False
+            if campaign.get('use_uazapi_sender') and campaign.get('enable_cadence'):
+                with conn_stage.cursor() as cur_sched:
+                    cur_sched.execute(
+                        "SELECT 1 FROM campaign_stage_sends WHERE campaign_id = %s AND stage = 'initial' AND status = 'scheduled' LIMIT 1",
+                        (campaign_id,),
+                    )
+                    has_scheduled_chunk = cur_sched.fetchone() is not None
+        finally:
+            conn_stage.close()
+
+        stages_payload = (stage_progress or {}).get("stages") or {}
+
+        # Agregar cadence_aggregate (todas as stages — para breakdown por etapa).
+        agg_p = agg_s = agg_f = 0
+        for _sk, sv in stages_payload.items():
+            agg_p += int(sv.get("planned_count") or 0)
+            agg_s += int(sv.get("success_count") or 0)
+            agg_f += int(sv.get("failed_count") or 0)
+
+        # --- Fonte de verdade para sent/failed/pending ---
+        # Campanhas com cadência + Uazapi: usar soma dos chunks de stage='initial'
+        # (cobre rotação multi-instância e chunks fragmentados pela lógica de pausa).
+        # Follow-ups não contam como "enviados" — só initial importa para daily limit.
+        if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
+            initial_data = stages_payload.get("initial") or {}
+            initial_sent = int(initial_data.get("success_count") or 0)
+            initial_failed = int(initial_data.get("failed_count") or 0)
+            initial_planned = int(initial_data.get("planned_count") or 0)
+
+            sent = initial_sent
+            failed = initial_failed
+            pending = max(0, total_leads - sent - failed)
+            uazapi_scheduled = max(0, initial_planned - initial_sent - initial_failed)
+            uazapi_debug = {
+                "source": "campaign_stage_sends_initial",
+                "initial_sent": initial_sent,
+                "initial_failed": initial_failed,
+                "initial_planned": initial_planned,
+            }
+
+        # Campanhas Uazapi SEM cadência: manter list_folders live no folder principal.
+        elif campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and not campaign.get('enable_cadence'):
             try:
                 conn2 = get_db_connection()
                 with conn2.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5538,11 +5672,9 @@ def get_campaign_stats(campaign_id):
                     uazapi = UazapiService()
                     folder_id = campaign['uazapi_folder_id']
                     token = inst['apikey']
-                    uazapi_sent, uazapi_failed, uazapi_scheduled = 0, 0, 0
-                    uazapi_debug = {}
+                    uazapi_sent, uazapi_failed = 0, 0
                     source_used = None
 
-                    # list_folders sem filtro de status para capturar folder ativo/concluído.
                     folders = uazapi.list_folders(token)
                     if isinstance(folders, dict):
                         folders = folders.get('folders') or folders.get('data') or folders.get('items') or []
@@ -5550,7 +5682,6 @@ def get_campaign_stats(campaign_id):
                         for f in folders:
                             fid = f.get('id') or f.get('folder_id') or f.get('folderId')
                             if str(fid) == str(folder_id):
-                                # log_sucess (typo na spec) é a fonte oficial para enviados.
                                 uazapi_sent = int(f.get('log_sucess', 0) or f.get('log_delivered', 0) or f.get('log_success', 0) or 0)
                                 uazapi_failed = int(f.get('log_failed', 0) or 0)
                                 log_total = int(f.get('log_total', 0) or 0)
@@ -5562,7 +5693,6 @@ def get_campaign_stats(campaign_id):
                     if source_used is not None:
                         sent = uazapi_sent
                         failed = uazapi_failed
-                        # invalid = subconjunto de failed (números inválidos); para API 2.0 não distinguimos.
                         pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
                     elif campaign.get('status') == 'running' and total_leads > 0:
                         now_ts = time.time()
@@ -5574,7 +5704,6 @@ def get_campaign_stats(campaign_id):
                 uazapi_debug = {"uazapi_error": str(e)}
                 print(f"⚠️ [Stats] Erro ao buscar stats Uazapi para campanha {campaign_id}: {e}")
 
-        # log_sucess da pasta Uazapi pode exceder o nº de leads; evita progresso > 100% e taxas distorcidas.
         if total_leads > 0:
             try:
                 sent = min(int(sent or 0), int(total_leads))
@@ -5582,23 +5711,6 @@ def get_campaign_stats(campaign_id):
                 pass
 
         conversion_rate = round((closed_deals / sent * 100), 1) if sent > 0 else 0
-        
-        has_scheduled_chunk = False
-        if campaign.get('use_uazapi_sender') and campaign.get('enable_cadence'):
-            conn_sched = get_db_connection()
-            try:
-                with conn_sched.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT 1 FROM campaign_stage_sends
-                        WHERE campaign_id = %s AND stage = 'initial' AND status = 'scheduled'
-                        LIMIT 1
-                        """,
-                        (campaign_id,),
-                    )
-                    has_scheduled_chunk = cur.fetchone() is not None
-            finally:
-                conn_sched.close()
 
         result = {
             "total_leads": total_leads,
@@ -5613,33 +5725,21 @@ def get_campaign_stats(campaign_id):
             "started_at": stats['started_at'].isoformat() if stats['started_at'] else None,
             "last_sent_at": stats['last_sent_at'].isoformat() if stats['last_sent_at'] else None,
             "enable_cadence": bool(campaign.get("enable_cadence")),
+            "stage_progress": stage_progress,
+            "last_sync_at": stage_progress.get("last_sync_at"),
+            "cadence_aggregate": {"planned": agg_p, "success": agg_s, "failed": agg_f},
         }
-        conn_stage = get_db_connection()
-        try:
-            stage_progress = _get_campaign_stage_progress(conn_stage, campaign_id)
-            result["stage_progress"] = stage_progress
-            result["last_sync_at"] = stage_progress.get("last_sync_at")
-            agg_p = agg_s = agg_f = 0
-            stages_payload = (stage_progress or {}).get("stages") or {}
-            for _sk, sv in stages_payload.items():
-                agg_p += int(sv.get("planned_count") or 0)
-                agg_s += int(sv.get("success_count") or 0)
-                agg_f += int(sv.get("failed_count") or 0)
-            result["cadence_aggregate"] = {"planned": agg_p, "success": agg_s, "failed": agg_f}
-        finally:
-            conn_stage.close()
-        if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
+        if campaign.get('use_uazapi_sender') and (campaign.get('uazapi_folder_id') or campaign.get('enable_cadence')):
             result["scheduled"] = uazapi_scheduled
-        
-        # Debug: ?debug=1 retorna fonte e dados brutos para diagnóstico
+
         if request.args.get('debug') == '1':
             result["debug"] = {
-                "source": "uazapi" if (campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id')) else "db",
+                "source": "campaign_stage_sends_initial" if (campaign.get('enable_cadence') and campaign.get('use_uazapi_sender')) else ("uazapi" if campaign.get('use_uazapi_sender') else "db"),
                 "campaign_status": campaign.get('status'),
-                "uazapi_folder_id": campaign.get('uazapi_folder_id'),  # para comparar com list_folders
+                "uazapi_folder_id": campaign.get('uazapi_folder_id'),
                 **uazapi_debug,
             }
-        
+
         return result
         
     except Exception as e:
@@ -6934,57 +7034,22 @@ def get_dashboard_overview():
             )
             month_sent = cur.fetchone()['count']
 
-            # Somar log_sucess das campanhas API 2.0 (fonte: list_folders por folder)
+            # Somar envios iniciais das campanhas API 2.0, filtrado pelo mês corrente.
             cur.execute(
                 """
-                SELECT c.id as campaign_id, c.uazapi_folder_id, tok.apikey
-                FROM campaigns c
-                LEFT JOIN LATERAL (
-                    SELECT i.apikey
-                    FROM campaign_instances ci
-                    JOIN instances i ON i.id = ci.instance_id
-                    WHERE ci.campaign_id = c.id
-                      AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
-                      AND i.apikey IS NOT NULL
-                    ORDER BY ci.id ASC
-                    LIMIT 1
-                ) tok ON TRUE
+                SELECT COALESCE(SUM(css.success_count), 0)::int AS uazapi_sent
+                FROM campaign_stage_sends css
+                JOIN campaigns c ON c.id = css.campaign_id
                 WHERE c.user_id = %s
                   AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
-                  AND c.uazapi_folder_id IS NOT NULL
+                  AND css.stage = 'initial'
+                  AND EXTRACT(MONTH FROM css.created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+                  AND EXTRACT(YEAR FROM css.created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
                 """,
                 (current_user.id,)
             )
-            uazapi_campaigns = cur.fetchall() or []
-
-            uazapi_sent_total = 0
-            uazapi = UazapiService()
-            for row in uazapi_campaigns:
-                token = row.get('apikey')
-                folder_id = row.get('uazapi_folder_id')
-                if not token or folder_id is None:
-                    continue
-                try:
-                    folders = uazapi.list_folders(token)
-                    if isinstance(folders, dict):
-                        folders = folders.get('folders') or folders.get('data') or folders.get('items') or []
-                    if not isinstance(folders, list):
-                        continue
-                    for folder in folders:
-                        fid = folder.get('id') or folder.get('folder_id') or folder.get('folderId')
-                        if str(fid) == str(folder_id):
-                            sent_count_folder = int(
-                                folder.get('log_sucess', 0)
-                                or folder.get('log_delivered', 0)
-                                or folder.get('log_success', 0)
-                                or 0
-                            )
-                            uazapi_sent_total += max(0, sent_count_folder)
-                            break
-                except Exception as folder_err:
-                    print(f"⚠️ [Dashboard] Falha ao ler log_sucess da campanha {row.get('campaign_id')}: {folder_err}")
-
-            month_sent += uazapi_sent_total
+            uazapi_row = cur.fetchone()
+            month_sent += int(uazapi_row['uazapi_sent'] or 0) if uazapi_row else 0
             
             # Taxa de sucesso NO MÊS (ALTERADO de hoje para mês)
             cur.execute(
