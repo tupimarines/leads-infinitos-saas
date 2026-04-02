@@ -3760,16 +3760,49 @@ def admin_user_scraping_jobs_api(user_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, keyword, locations, total_results, lead_count, created_at
+                SELECT id, keyword, locations, total_results, lead_count, results_path, created_at
                 FROM scraping_jobs
                 WHERE user_id = %s AND status = 'completed'
                 ORDER BY created_at DESC
             """, (user_id,))
             jobs = cur.fetchall()
         conn.close()
-        return json.dumps([dict(j, created_at=j['created_at'].isoformat()) for j in jobs], default=str)
+        result = []
+        for j in jobs:
+            d = dict(j, created_at=j['created_at'].isoformat())
+            d['has_csv'] = bool(j.get('results_path') and os.path.exists(j['results_path']))
+            d.pop('results_path', None)
+            result.append(d)
+        return json.dumps(result, default=str)
     except Exception as e:
         return json.dumps({'error': str(e)}), 500
+
+
+@app.route('/api/admin/scraping-jobs/<int:job_id>/download-csv')
+@login_required
+@admin_required
+def admin_download_job_csv(job_id):
+    """Superadmin: download do CSV de um scraping job."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT results_path FROM scraping_jobs WHERE id = %s", (job_id,))
+            job = cur.fetchone()
+
+        if not job or not job.get('results_path'):
+            return jsonify(error='Job não encontrado ou sem arquivo de resultados'), 404
+
+        file_path = job['results_path']
+        if not os.path.exists(file_path):
+            return jsonify(error='Arquivo CSV não encontrado no servidor'), 404
+
+        return send_file(file_path, as_attachment=True, download_name=os.path.basename(file_path))
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route('/admin/users/<int:user_id>/toggle_admin', methods=['POST'])
