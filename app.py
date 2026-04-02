@@ -42,6 +42,7 @@ from utils.limits import (
     resolve_license_type,
 )
 from utils.cadence_uazapi import iter_fu1_folder_ids, merge_fu1_folder_into_config, parse_cadence_config
+from utils.lead_numeric_parse import coerce_lead_numeric_fields
 
 
 load_dotenv()
@@ -1006,6 +1007,8 @@ class CampaignLead:
             with conn.cursor() as cur:
                 # Incluir status='pending' explicitamente para garantir processamento pelo worker
                 # Novas colunas de enriquecimento; csv_row_order = ordem da planilha (1..n)
+                for l in leads:
+                    coerce_lead_numeric_fields(l)
                 args_str = ','.join(
                     cur.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", 
                                (campaign_id, l.get('phone'), l.get('name'), l.get('whatsapp_link'), 'pending',
