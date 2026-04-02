@@ -292,20 +292,6 @@
                     <p class="text-xs text-gray-500 mt-2">Padrão: 8h às 20h, apenas dias úteis (seg-sex)</p>
                 </div>
 
-                <!-- [7] Delay min/max (opcional) -->
-                <div class="grid grid-cols-2 gap-4">
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-300 mb-2">Delay mín. (min)</label>
-                        <input type="number" id="delay_min_minutes" min="0"
-                            class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm" placeholder="Automático">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-300 mb-2">Delay máx. (min)</label>
-                        <input type="number" id="delay_max_minutes" min="0"
-                            class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm" placeholder="Automático">
-                    </div>
-                </div>
-
                 <!-- [8] Agendar início (opcional) -->
                 <div>
                     <label class="block text-sm font-semibold text-gray-300 mb-2">Início agendado (opcional)</label>
@@ -748,9 +734,6 @@
             scheduledStartUTC = scheduledDate.toISOString();
         }
 
-        const delayMinRaw = document.getElementById('delay_min_minutes').value;
-        const delayMaxRaw = document.getElementById('delay_max_minutes').value;
-
         const data = {
             user_id: parseInt(userId),
             name: campaignName,
@@ -760,8 +743,6 @@
             use_uazapi_sender: true,
             rotation_mode: instanceCheckboxes.length > 1 ? 'round_robin' : 'single',
             scheduled_start: scheduledStartUTC,
-            delay_min_minutes: delayMinRaw ? parseInt(delayMinRaw) : null,
-            delay_max_minutes: delayMaxRaw ? parseInt(delayMaxRaw) : null,
             send_hour_start: sendHourStart,
             send_hour_end: sendHourEnd,
             send_saturday: document.getElementById('send_saturday').checked,

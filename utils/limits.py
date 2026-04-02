@@ -22,9 +22,9 @@ PLAN_POLICY = {
         "validity_days": 365,
     },
     "starter_trial": {
-        "instance_limit": 1,
+        "instance_limit": 2,
         "monthly_extraction_limit": 210,
-        "daily_sends_per_instance_default": 30,
+        "daily_sends_per_instance_default": 15,
         "infinite_daily_options": (),
         "validity_days": 7,
     },
@@ -105,7 +105,7 @@ def get_instance_daily_limit(user_id: int, instance_id: int = None) -> int:
 def get_user_daily_limit(user_id: int, instance_id: int = None) -> int:
     """
     Obtém a cota diária por instância para o usuário.
-    Regra padrão: 30 para todos os planos.
+    Valor padrão definido por plano em PLAN_POLICY['daily_sends_per_instance_default'].
     Infinite pode sobrescrever por instância: 10/20/30/40/50.
     """
     conn = get_db_connection()

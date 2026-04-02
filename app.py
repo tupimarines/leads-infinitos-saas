@@ -5303,6 +5303,9 @@ def whatsapp_config():
 @login_required
 def init_whatsapp():
     """API to initialize a WhatsApp instance"""
+    if not current_user.has_active_license():
+        return {"error": "Sua licença expirou ou não está ativa. Renove sua licença para criar novas instâncias."}, 403
+
     payload = request.get_json(silent=True) or {}
     instance_name = payload.get("instance_name") or ""
 
