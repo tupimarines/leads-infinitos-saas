@@ -5072,9 +5072,9 @@ def _create_campaign_core(user_id, data, admin_id=None):
         CampaignLead.add_leads(campaign_id, valid_leads)
         
         # 5b. Uazapi: atribuir send_batch aos pendentes (para follow-up cadence)
-        # Chunk 30 por instância: batch 1 = leads 1-30, batch 2 = 31-60, etc.
+        # Batch = daily_limit leads por lote (ex: daily_limit=5 → batch 1 = leads 1-5, batch 2 = 6-10)
         if use_uazapi_sender:
-            per_instance_limit = 30
+            per_instance_limit = daily_limit
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
@@ -5098,8 +5098,9 @@ def _create_campaign_core(user_id, data, admin_id=None):
             if not allowed_instances:
                 print(f"⚠️ [Uazapi] Campanha {campaign_id}: nenhuma instância disponível (limite diário ou sem Uazapi).")
             else:
-                per_instance_limit = 30
-                total_limit = per_instance_limit * len(allowed_instances)
+                n_inst = len(allowed_instances)
+                per_instance_limit = min(30, -(-daily_limit // n_inst))
+                total_limit = daily_limit
 
                 conn = get_db_connection()
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
