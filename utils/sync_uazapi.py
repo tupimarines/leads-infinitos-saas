@@ -2,14 +2,27 @@
 Sincroniza campaign_leads com a API Uazapi (list_messages / list_folders / message/find).
 
 - list_folders: **fonte de verdade** para agregados log_success/log_failed na pasta (contadores de campanha).
-- Quando a pasta está finalizada e há >= ~80% do planejado, ou log_success > planned_count,
-  aplica pente fino: POST /message/find por chat (chatid=55...@s.whatsapp.net) e confere
-  send_folder_id nas mensagens. Desligar: UAZAPI_MESSAGE_FIND=0
+- **Task 3:** POST /message/find no escopo D4 quando a pasta está ``done``/``partial``/falha
+  terminal (``failed``/``error``/``cancelled``) **com** candidatos, ou send ``running`` com
+  ``log_success > 0`` e candidatos (reconexão). Paginação: ``UAZAPI_MESSAGE_FIND_LIMIT`` (1–200,
+  defeito 100) e ``UAZAPI_MESSAGE_FIND_MAX_PAGES`` (defeito 2). Desligar: ``UAZAPI_MESSAGE_FIND=0``
+  (log ``uazapi_message_find_disabled_blocking_reconcile``).
+- Promoção **sent** pelos primeiros N de **lead_ids** via **log_sucess** (listfolders) está
+  **desligada por defeito** (UAZAPI_LISTFOLDERS_PREFIX_SENT=0). UAZAPI_LISTFOLDERS_PREFIX_SENT=1
+  reativa o legado e emite um aviso JSON por send.
 - Se a pasta **não** aparece em listfolders mas listmessages não retorna erro: **não** há fallback
   em loop Sent/Failed/Scheduled (reduz carga no servidor); confia no próximo listfolders (~10 min).
 - Contagens em campaign_stage_sends são limitadas a planned_count para evitar 10/9 no UI.
+- **F11 / D3 / Task 4:** ``UAZAPI_LEAD_RECONCILE_V2=1`` → defeito ``UAZAPI_SYNC_RECONCILE_LISTMESSAGES=0`` (não
+  enumerar Sent/Failed em massa em ``needs_reconcile`` nem no fallback legado sem stage_sends). Com find activo e candidatos D4, o mesmo
+  ramo fica também suprimido em V2=0 para não duplicar SSOT com ``message_find`` (F10).
+- **F7:** o probe ``list_messages(Scheduled, page=1)`` quando a pasta falta em ``listfolders`` **não** é
+  controlado por ``UAZAPI_SYNC_RECONCILE_LISTMESSAGES`` (só detecção órfã; não enumeração Sent/Failed).
 
-Usado por app.py (rota sync-uazapi) e worker_cadence (antes do rollover).
+Usado por app.py (rota sync-uazapi) e worker_cadence (antes do rollover / Task 6 pré-chunk).
+
+- **Task 5:** ``should_block_initial_rollover_for_pending_find`` — com ``UAZAPI_LEAD_RECONCILE_V2=1``,
+  o rollover inicial→FU1 adia ``fu_rollover_done`` enquanto houver candidatos D4 a ``message_find``.
 """
 
 import json
@@ -24,6 +37,42 @@ def _normalize_folder_id(value):
     if value is None:
         return None
     return str(value).strip()
+
+
+def _lead_reconcile_v2_enabled():
+    return (os.environ.get("UAZAPI_LEAD_RECONCILE_V2") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _sync_reconcile_listmessages_enabled():
+    """
+    F11 / Task 4 (núcleo): com ``UAZAPI_LEAD_RECONCILE_V2=1``, defeito **desliga** o reconcile
+    Sent/Failed via ``list_messages`` em ``needs_reconcile``. Com V2=0, defeito **liga** (legado)
+    se a env não estiver definida.
+    """
+    v2 = _lead_reconcile_v2_enabled()
+    raw = os.environ.get("UAZAPI_SYNC_RECONCILE_LISTMESSAGES")
+    if raw is None or str(raw).strip() == "":
+        raw = "0" if v2 else "1"
+    else:
+        raw = str(raw).strip()
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
+def _listfolders_prefix_sent_enabled():
+    """
+    Legado: _sync_folder_via_listfolders marca os primeiros log_success IDs em
+    lead_ids como sent. Task 2 da spec — defeito 0 (desligado).
+    F11: com ``UAZAPI_LEAD_RECONCILE_V2=1`` o prefixo fica sempre desligado (rollout único).
+    """
+    if _lead_reconcile_v2_enabled():
+        return False
+    v = (os.environ.get("UAZAPI_LISTFOLDERS_PREFIX_SENT") or "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _lead_step_after_confirmed_send(stage: str) -> int:
@@ -61,8 +110,11 @@ def _cadence_stage_sql_guard(stage: str) -> str:
 
 def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed_phones):
     """
-    Reconcilia sucesso/falha por lead usando list_messages (Sent/Failed).
-    Evita confiar apenas no agregado log_sucess/log_failed quando houver divergência.
+    DEPRECATED (Task 4 / D3): reconciliação por enumeração ``list_messages`` Sent/Failed.
+
+    Mantido apenas com ``UAZAPI_SYNC_RECONCILE_LISTMESSAGES=1`` (suporte emergencial). O caminho
+    suportado é ``message_find`` no escopo do send (F10). Evita confiar só no agregado quando
+    a flag legacy está ligada.
     """
     if not lead_ids:
         return set(), set()
@@ -99,8 +151,8 @@ def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed
 
 def _reconcile_stage_by_messages(conn, campaign_id, stage, sent_phones, failed_phones):
     """
-    Reconcilia por etapa quando lead_ids do send não está disponível/confiável.
-    Usa etapa atual do lead como janela de elegibilidade.
+    DEPRECATED (Task 4 / D3): mesmo que ``_reconcile_send_by_messages``, por etapa quando
+    ``lead_ids`` do send não é fiável — só atrás de ``UAZAPI_SYNC_RECONCILE_LISTMESSAGES=1``.
     """
     stage_to_current_step = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
     current_step = stage_to_current_step.get(stage)
@@ -312,24 +364,223 @@ def _message_matches_folder(m, folder_id):
     return s_clean.lower() == str(folder_id).strip().lower()
 
 
-def _should_reconcile_via_message_find(log_success, log_failed, planned_count, status):
+def _lead_ids_needing_message_find(conn, campaign_id, send_row, folder_id):
     """
-    Dispara POST /message/find por chat quando:
-    - API reporta mais sucessos que leads planejados (ex.: 10/9), ou
-    - Pasta em estado final e listfolders já indica >= ~80% do planejado (evita confiar só no agregado).
-    Desligar: UAZAPI_MESSAGE_FIND=0
+    Subconjunto de ``send_row['lead_ids']`` que ainda deve entrar em ``message_find`` para
+    evidenciar envio nesta pasta (``folder_id``) e etapa do send.
+
+    **Invariantes**
+
+    - Só devolve IDs presentes em ``campaign_stage_sends.lead_ids`` (via ``send_row``).
+    - Exclui removidos do funil e cadência ``converted``/``lost``.
+    - Aplica o mesmo recorte de etapa que os ``UPDATE`` existentes (``_cadence_stage_sql_guard``).
+    - **F3:** lead ``failed`` com ``last_sent_folder_id`` já igual a esta pasta (find negativo
+      ou política terminal já “presa” a este folder) **não** volta ao find — evita loop infinito.
+      ``failed`` sem este folder (ex.: só agregado) continua candidato.
+    - **``sent``:** tratado como já confirmado para esta pasta quando ``last_sent_folder_id``
+      casa com ``folder_id`` (case-insensitive). *Nota:* até a Task 2 desligar o prefixo
+      ``listfolders``, um falso ``sent`` com pasta gravada parece confirmado; a correção
+      principal é parar a promoção por ordem em ``lead_ids``.
+
+    **SQL:** um ``SELECT cl.id`` com os predicados acima; parâmetros
+    ``(campaign_id, lead_ids, folder_norm, folder_norm)``.
     """
-    if os.environ.get("UAZAPI_MESSAGE_FIND", "1").strip().lower() in ("0", "false", "no", "off"):
+    fid = _normalize_folder_id(folder_id)
+    if not fid or not send_row:
+        return []
+    raw_leads = send_row.get("lead_ids") or []
+    if isinstance(raw_leads, str):
+        try:
+            raw_leads = json.loads(raw_leads)
+        except Exception:
+            raw_leads = []
+    if not raw_leads:
+        return []
+    lead_ids = []
+    for x in raw_leads:
+        try:
+            lead_ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not lead_ids:
+        return []
+
+    stage = (send_row.get("stage") or "").strip()
+    stage_guard = _cadence_stage_sql_guard(stage)
+
+    sql = (
+        """SELECT cl.id
+           FROM campaign_leads cl
+           WHERE cl.campaign_id = %s
+             AND cl.id = ANY(%s)
+             AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+             AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost') """
+        + stage_guard
+        + """ AND (
+                 cl.status = 'pending'
+                 OR (
+                   cl.status = 'failed'
+                   AND NOT (
+                     NULLIF(TRIM(cl.last_sent_folder_id::text), '') IS NOT NULL
+                     AND LOWER(TRIM(BOTH FROM cl.last_sent_folder_id::text)) = LOWER(%s)
+                   )
+                 )
+                 OR (
+                   cl.status = 'sent'
+                   AND NOT (
+                     NULLIF(TRIM(cl.last_sent_folder_id::text), '') IS NOT NULL
+                     AND LOWER(TRIM(BOTH FROM cl.last_sent_folder_id::text)) = LOWER(%s)
+                   )
+                 )
+               )
+           ORDER BY cl.id"""
+    )
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, (campaign_id, lead_ids, fid, fid))
+        rows = cur.fetchall() or []
+    out = []
+    for r in rows:
+        try:
+            out.append(int(r["id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def should_block_initial_rollover_for_pending_find(conn, campaign_id, send_row, folder_id):
+    """
+    Task 5 / D9: com ``UAZAPI_LEAD_RECONCILE_V2=1``, não marcar ``fu_rollover_done`` nem mover
+    leads para FU1 enquanto existirem candidatos a ``message_find`` (D4/F3) neste send/pasta.
+    Isto evita confiar só em ``succ+fail>=planned`` da API quando ainda há pendentes sem evidência.
+    """
+    if not _lead_reconcile_v2_enabled():
         return False
-    if planned_count <= 0:
-        return False
-    if log_success > planned_count:
-        return True
+    return len(_lead_ids_needing_message_find(conn, campaign_id, send_row, folder_id)) > 0
+
+
+def _ua_message_find_enabled():
+    return os.environ.get("UAZAPI_MESSAGE_FIND", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _message_find_limit_and_max_pages():
+    """F2: limite 1–200 por pedido; até N páginas (offset += limit)."""
+    try:
+        limit = int((os.environ.get("UAZAPI_MESSAGE_FIND_LIMIT") or "100").strip())
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 200))
+    try:
+        max_pages = int((os.environ.get("UAZAPI_MESSAGE_FIND_MAX_PAGES") or "2").strip())
+    except ValueError:
+        max_pages = 2
+    max_pages = max(1, min(max_pages, 20))
+    return limit, max_pages
+
+
+def _should_run_scope_message_find(status, log_success):
+    """
+    Task 3: corre find no escopo quando há candidatos D4 e:
+    - pasta ``done``/``partial``/estado terminal de falha na API, ou
+    - send ``running`` com ``log_success > 0`` (reconexão com entregas já contabilizadas).
+    """
     st = (status or "").lower()
-    if st not in ("done", "concluído", "completed", "concluido", "inconsistent"):
-        return False
-    thresh = max(1, (planned_count * 80 + 99) // 100)  # ceil 80% do planejado
-    return log_success >= thresh
+    if st in (
+        "done",
+        "concluído",
+        "completed",
+        "concluido",
+        "inconsistent",
+        "partial",
+        "failed",
+        "error",
+        "cancelled",
+        "canceled",
+    ):
+        return True
+    if st == "running" and int(log_success or 0) > 0:
+        return True
+    return False
+
+
+def reconcile_send_leads_via_message_find_for_scope(
+    uazapi_service,
+    token,
+    folder_id,
+    campaign_id,
+    conn,
+    send_row,
+    context=None,
+):
+    """
+    Orquestra ``message_find`` para todos os candidatos deste send/pasta (D4 + F3 via SQL).
+
+    Emite uma linha JSON com ``message_find_pages_used`` (F2) e contagens de escopo.
+
+    Returns:
+        ``(sent_ids, failed_ids, message_find_pages_used)``
+    """
+    fid = _normalize_folder_id(folder_id)
+    if not send_row or not fid:
+        return set(), set(), 0
+    scope = _lead_ids_needing_message_find(conn, campaign_id, send_row, fid)
+    scope_count = len(scope)
+    send_id = send_row.get("id")
+    if scope_count == 0:
+        return set(), set(), 0
+
+    if not _ua_message_find_enabled():
+        print(
+            json.dumps(
+                {
+                    "event": "uazapi_message_find_disabled_blocking_reconcile",
+                    "campaign_id": campaign_id,
+                    "send_id": send_id,
+                    "folder_id": fid,
+                    "find_scope_count": scope_count,
+                    "find_positive_count": 0,
+                    "find_negative_count": scope_count,
+                    "message_find_pages_used": 0,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return set(), set(), 0
+
+    sent_ids, failed_ids, pages_used = reconcile_leads_via_message_find(
+        uazapi_service,
+        token,
+        fid,
+        campaign_id,
+        None,
+        conn,
+        context=context,
+        send_row=send_row,
+    )
+    pos = len(sent_ids)
+    print(
+        json.dumps(
+            {
+                "event": "uazapi_reconcile_message_find_scope",
+                "campaign_id": campaign_id,
+                "send_id": send_id,
+                "folder_id": fid,
+                "find_scope_count": scope_count,
+                "find_positive_count": pos,
+                "find_negative_count": max(0, scope_count - pos),
+                "message_find_pages_used": int(pages_used),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return sent_ids, failed_ids, pages_used
 
 
 def reconcile_leads_via_message_find(
@@ -340,21 +591,33 @@ def reconcile_leads_via_message_find(
     lead_ids,
     conn,
     context=None,
+    send_row=None,
 ):
     """
     Para cada lead do chunk, POST /message/find com chatid=55...@s.whatsapp.net
     e confirma envio se existir mensagem com send_folder_id igual ao folder da campanha.
-    Retorna (sent_ids, failed_ids). failed_ids fica vazio (reservado).
+    Retorna ``(sent_ids, failed_ids, message_find_pages_used)``. ``failed_ids`` fica vazio (reservado).
+
+    Com ``send_row`` (linha ``campaign_stage_sends``), o escopo vem de
+    ``_lead_ids_needing_message_find`` (candidatos D4 + partição F3). Sem ``send_row``,
+    usa ``lead_ids`` como lista explícita (compatível com chamadas antigas).
+
+    **F8:** se ``phone`` e ``whatsapp_link`` normalizam para dígitos distintos, tenta-se
+    até dois chatids por lead no mesmo ciclo (para de encontrar match).
+
+    **F2:** paginação ``limit``/``offset`` até ``UAZAPI_MESSAGE_FIND_MAX_PAGES`` páginas.
     """
-    if not uazapi_service or not token or not folder_id or not lead_ids:
-        return set(), set()
-    if isinstance(lead_ids, str):
+    if not uazapi_service or not token or not folder_id:
+        return set(), set(), 0
+    if send_row is not None:
+        lead_ids = _lead_ids_needing_message_find(conn, campaign_id, send_row, folder_id)
+    elif isinstance(lead_ids, str):
         try:
             lead_ids = json.loads(lead_ids)
         except Exception:
             lead_ids = []
     if not lead_ids:
-        return set(), set()
+        return set(), set(), 0
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -366,24 +629,47 @@ def reconcile_leads_via_message_find(
         rows = cur.fetchall() or []
 
     sleep_s = float(os.environ.get("UAZAPI_MESSAGE_FIND_SLEEP_SEC", "0.05"))
+    limit, max_pages = _message_find_limit_and_max_pages()
     sent_ids = set()
+    pages_used = 0
     for row in rows:
-        raw = row.get("phone") or row.get("whatsapp_link")
-        phone = _normalize_phone_for_api(raw or "")
-        if not phone:
+        phones_to_try = []
+        p_phone = _normalize_phone_for_api(row.get("phone") or "")
+        p_link = _normalize_phone_for_api(row.get("whatsapp_link") or "")
+        if p_phone:
+            phones_to_try.append(p_phone)
+        if p_link and p_link != p_phone:
+            phones_to_try.append(p_link)
+        if not phones_to_try and p_link:
+            phones_to_try.append(p_link)
+        if not phones_to_try:
             continue
-        chatid = f"{phone}@s.whatsapp.net"
-        resp = uazapi_service.message_find(
-            token, chatid, limit=50, offset=0, context=context
-        )
-        if resp:
-            msgs = resp.get("messages") or []
-            if any(_message_matches_folder(m, folder_id) for m in msgs):
-                sent_ids.add(int(row["id"]))
-        if sleep_s > 0:
-            time.sleep(sleep_s)
+        lead_matched = False
+        for phone in phones_to_try:
+            chatid = f"{phone}@s.whatsapp.net"
+            for page_idx in range(max_pages):
+                offset = page_idx * limit
+                resp = uazapi_service.message_find(
+                    token, chatid, limit=limit, offset=offset, context=context
+                )
+                pages_used += 1
+                msgs = []
+                if resp:
+                    msgs = resp.get("messages") or []
+                if any(_message_matches_folder(m, folder_id) for m in msgs):
+                    sent_ids.add(int(row["id"]))
+                    lead_matched = True
+                    break
+                if not isinstance(msgs, list) or len(msgs) < limit:
+                    break
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+            if lead_matched:
+                break
+            if sleep_s > 0:
+                time.sleep(sleep_s)
 
-    return sent_ids, set()
+    return sent_ids, set(), pages_used
 
 
 def _sync_folder_via_listfolders(
@@ -453,6 +739,88 @@ def _sync_folder_via_listfolders(
     return cur.rowcount
 
 
+def sync_campaign_stage_sends_before_new_chunk(conn, campaign_id, uazapi_service, stage=None):
+    """
+    Task 6: antes de novo ``create_advanced_campaign`` ou materialização de chunk na mesma etapa,
+    corre ``sync_campaign_leads_from_uazapi`` para sends já materializados (message_find no escopo —
+    Task 3), alinhado a ``_materialize_scheduled_stage_sends``, ``schedule_next_initial_chunk`` e
+    ``app.py`` (continue-initial / ``_create_stage_campaign`` imediato).
+
+    Se ``stage`` for informado, só dispara quando existir ``campaign_stage_sends`` com pasta nessa
+    etapa (evita chamadas HTTP desnecessárias na primeira criação). ``stage=None`` exige qualquer
+    send com ``uazapi_folder_id`` na campanha.
+
+    Rollout: ``UAZAPI_RECONCILE_FIND_BEFORE_CHUNK=0`` desliga.
+    """
+    if not uazapi_service or not campaign_id:
+        return
+    raw = (os.environ.get("UAZAPI_RECONCILE_FIND_BEFORE_CHUNK") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+    stage_key = stage if stage else None
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM campaign_stage_sends css
+                WHERE css.campaign_id = %s
+                  AND css.uazapi_folder_id IS NOT NULL
+                  AND BTRIM(css.uazapi_folder_id::text) <> ''
+                  AND (%s::text IS NULL OR css.stage = %s::text)
+            ) AS has_prior
+            """,
+            (campaign_id, stage_key, stage_key),
+        )
+        has_prior = (cur.fetchone() or {}).get("has_prior")
+    if not has_prior:
+        return
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT c.uazapi_folder_id, i.apikey
+            FROM campaigns c
+            JOIN campaign_instances ci ON ci.campaign_id = c.id
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE c.id = %s
+              AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+              AND BTRIM(i.apikey::text) <> ''
+            ORDER BY i.id ASC
+            LIMIT 1
+            """,
+            (campaign_id,),
+        )
+        row = cur.fetchone()
+    if not row or not row.get("apikey"):
+        return
+    try:
+        sync_campaign_leads_from_uazapi(
+            conn,
+            campaign_id,
+            (row.get("apikey") or "").strip(),
+            row.get("uazapi_folder_id"),
+            uazapi_service,
+        )
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(
+            json.dumps(
+                {
+                    "event": "uazapi_sync_before_chunk_failed",
+                    "campaign_id": campaign_id,
+                    "stage": stage_key,
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+
+
 def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_service, debug=False):
     """
     Sincroniza status de campaign_leads com Uazapi.
@@ -462,8 +830,12 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
 
     O bloco legado (folder único em campaigns + uazapi_last_send_lead_ids e fallback list_messages
     com current_step+1) só roda em campanhas antigas **sem** use_uazapi_sender e **sem** stage_sends.
+
+    O ``token`` da assinatura é obrigatório **só** para esse legado; no fluxo por ``campaign_stage_sends``
+    cada send usa ``i.apikey`` (evita sync vazio em ``process_rollover_fu_next`` quando a primeira
+    instância da campanha não tem chave mas outra instância com send ativo tem).
     """
-    if not uazapi_service or not token:
+    if not uazapi_service:
         return {"sent": 0, "failed": 0, "updated_sent": 0, "updated_failed": 0}
 
     debug = os.environ.get("DEBUG_SYNC_UAZAPI") == "1"
@@ -493,6 +865,14 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             (campaign_id,),
         )
         stage_sends = cur.fetchall() or []
+
+    uses_modern_path = bool(
+        campaign_row.get("enable_cadence")
+        or campaign_row.get("use_uazapi_sender")
+        or stage_sends
+    )
+    if not uses_modern_path and not (token or "").strip():
+        return {"sent": 0, "failed": 0, "updated_sent": 0, "updated_failed": 0}
 
     for send in stage_sends:
         send_token = send.get("apikey")
@@ -625,12 +1005,26 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             "queued",
             "scheduled",
         )
+        listfolders_prefix_sent = _listfolders_prefix_sent_enabled()
         updated_from_listfolders = 0
         if (
-            not skip_listfolders_leads
+            listfolders_prefix_sent
+            and not skip_listfolders_leads
             and log_success > 0
             and lead_ids
         ):
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_listfolders_prefix_sent_legacy_enabled",
+                        "campaign_id": campaign_id,
+                        "send_id": send.get("id"),
+                        "folder_id": fid,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 n = _sync_folder_via_listfolders(
                     conn=conn,
@@ -651,15 +1045,39 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
 
         reconciled_success = 0
         reconciled_failed = 0
+        # Com prefixo desligado (Task 2), updated_from_listfolders fica 0 por desenho — não tratar
+        # como "menos updates que log_success" para não forçar list_messages só por comparação falsa.
         needs_reconcile = (
             status == "done"
             and (
                 not lead_ids
-                or (log_success > 0 and updated_from_listfolders < log_success)
+                or (
+                    listfolders_prefix_sent
+                    and log_success > 0
+                    and updated_from_listfolders < log_success
+                )
                 or (planned_count > 0 and (log_success + log_failed) < planned_count)
             )
         )
-        if needs_reconcile:
+
+        find_scope_count = 0
+        if lead_ids and planned_count > 0 and folder_info and fid:
+            find_scope_count = len(
+                _lead_ids_needing_message_find(conn, campaign_id, send, fid)
+            )
+        # Evita list_messages Sent/Failed + message_find no mesmo send (F10 / conflito Task 3).
+        skip_listmessages_reconcile = (
+            _ua_message_find_enabled()
+            and _should_run_scope_message_find(status, log_success)
+            and find_scope_count > 0
+        )
+
+        # Task 4: ramo needs_reconcile com list_messages — DEPRECATED; exige UAZAPI_SYNC_RECONCILE_LISTMESSAGES=1.
+        if (
+            needs_reconcile
+            and _sync_reconcile_listmessages_enabled()
+            and not skip_listmessages_reconcile
+        ):
             sent_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent", context=ctx)
             failed_phones_done = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed", context=ctx)
             if lead_ids:
@@ -746,20 +1164,20 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                     )
                     updated_failed += cur.rowcount
 
-        # Pente fino: /message/find por chat (send_folder_id) quando agregado listfolders diverge ou ≥80% em pasta final.
+        # Task 3: /message/find no escopo D4 (done/partial/falha API ou running+log_success>0).
         if (
             lead_ids
             and planned_count > 0
             and folder_info
-            and _should_reconcile_via_message_find(log_success, log_failed, planned_count, status)
+            and _should_run_scope_message_find(status, log_success)
         ):
-            mf_sent_ids, mf_failed_ids = reconcile_leads_via_message_find(
+            mf_sent_ids, mf_failed_ids, _mf_pages = reconcile_send_leads_via_message_find_for_scope(
                 uazapi_service,
                 send_token,
                 fid,
                 campaign_id,
-                lead_ids,
                 conn,
+                send,
                 context=ctx,
             )
             reconciled_success = len(mf_sent_ids)
@@ -857,7 +1275,20 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
     ctx_legacy = {"campaign_id": campaign_id}
     folders_list = uazapi_service.list_folders(token, context=ctx_legacy) if folder_id else None
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        if folders_list and folder_id and lead_ids_by_step.get(1):
+        if _listfolders_prefix_sent_enabled() and folders_list and folder_id and lead_ids_by_step.get(1):
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_listfolders_prefix_sent_legacy_enabled",
+                        "campaign_id": campaign_id,
+                        "send_id": None,
+                        "folder_id": str(folder_id),
+                        "legacy_path": "uazapi_last_send_lead_ids_step1",
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
             n = _sync_folder_via_listfolders(
                 conn, campaign_id, uazapi_service, token, folders_list,
                 folder_id, lead_ids_by_step.get(1), 2, cur,
@@ -869,7 +1300,20 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 updated_sent += n
         for step, next_step in [(2, 3), (3, 4), (4, 4)]:
             fid = cfg.get(f"rollover_fu{step-1}_folder_id")
-            if fid and folders_list and lead_ids_by_step.get(step):
+            if _listfolders_prefix_sent_enabled() and fid and folders_list and lead_ids_by_step.get(step):
+                print(
+                    json.dumps(
+                        {
+                            "event": "uazapi_listfolders_prefix_sent_legacy_enabled",
+                            "campaign_id": campaign_id,
+                            "send_id": None,
+                            "folder_id": str(fid),
+                            "legacy_path": f"rollover_fu_step{step}",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
                 n = _sync_folder_via_listfolders(
                     conn, campaign_id, uazapi_service, token, folders_list,
                     fid, lead_ids_by_step[step], next_step, cur,
@@ -880,71 +1324,73 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 if n > 0:
                     updated_sent += n
 
-    # 3) Fallback final por list_messages (status principal)
-    # list_messages serve só para atualizar quantitativo; pular quando não há chunks ativos
+    # 3) Fallback final por list_messages (campanhas sem stage_sends) — Task 4 / D3: mesmo gate que needs_reconcile.
+    # DEPRECATED: marcar leads via Sent/Failed em massa; com V2=1 o defeito desliga (F11).
     if not folder_id:
         conn.commit()
         return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
-    if not stage_sends:
-        conn.commit()
-        return {"sent": 0, "failed": 0, "updated_sent": updated_sent, "updated_failed": updated_failed}
+    # Não testar stage_sends aqui: neste ramo já sabemos que está vazio (senão teríamos retornado
+    # acima); um ``if not stage_sends`` tornava o fallback list_messages morto para sempre.
 
-    sent_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Sent", context=ctx_legacy)
-    failed_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Failed", context=ctx_legacy)
+    sent_phones = []
+    failed_phones = []
+    if _sync_reconcile_listmessages_enabled():
+        sent_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Sent", context=ctx_legacy)
+        failed_phones = fetch_all_phones_by_status(uazapi_service, token, folder_id, "Failed", context=ctx_legacy)
 
-    sent_normalized = set()
-    for ph in sent_phones:
-        sent_normalized |= normalize_phone_for_match(ph)
-    failed_normalized = set()
-    for ph in failed_phones:
-        failed_normalized |= normalize_phone_for_match(ph)
+        sent_normalized = set()
+        for ph in sent_phones:
+            sent_normalized |= normalize_phone_for_match(ph)
+        failed_normalized = set()
+        for ph in failed_phones:
+            failed_normalized |= normalize_phone_for_match(ph)
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """SELECT id, phone, whatsapp_link, status, cadence_status, removed_from_funnel
-               FROM campaign_leads WHERE campaign_id = %s""",
-            (campaign_id,),
-        )
-        leads = cur.fetchall()
-
-    sent_ids = []
-    failed_ids = []
-    for lead in leads:
-        if lead.get("removed_from_funnel"):
-            continue
-        if (lead.get("cadence_status") or "") in ("converted", "lost"):
-            continue
-        lead_variants = normalize_phone_for_match(lead.get("phone")) | normalize_phone_for_match(
-            lead.get("whatsapp_link")
-        )
-        if not lead_variants:
-            continue
-        if lead.get("status") != "sent" and (lead_variants & sent_normalized):
-            sent_ids.append(lead["id"])
-        elif lead.get("status") not in ("sent", "failed") and (lead_variants & failed_normalized):
-            failed_ids.append(lead["id"])
-
-    with conn.cursor() as cur:
-        if sent_ids and updated_sent == 0:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """UPDATE campaign_leads
-                   SET status = 'sent',
-                       sent_at = NOW(),
-                       current_step = LEAST(4, COALESCE(current_step, 1) + 1),
-                       last_message_sent_at = NOW(),
-                       last_sent_folder_id = COALESCE(last_sent_folder_id, %s)
-                   WHERE id = ANY(%s)""",
-                (folder_id, sent_ids),
+                """SELECT id, phone, whatsapp_link, status, cadence_status, removed_from_funnel
+                   FROM campaign_leads WHERE campaign_id = %s""",
+                (campaign_id,),
             )
-            updated_sent = cur.rowcount
-        if failed_ids:
-            cur.execute(
-                """UPDATE campaign_leads
-                   SET status = 'failed', sent_at = COALESCE(sent_at, NOW())
-                   WHERE id = ANY(%s)""",
-                (failed_ids,),
+            leads = cur.fetchall()
+
+        sent_ids = []
+        failed_ids = []
+        for lead in leads:
+            if lead.get("removed_from_funnel"):
+                continue
+            if (lead.get("cadence_status") or "") in ("converted", "lost"):
+                continue
+            lead_variants = normalize_phone_for_match(lead.get("phone")) | normalize_phone_for_match(
+                lead.get("whatsapp_link")
             )
-            updated_failed = cur.rowcount
+            if not lead_variants:
+                continue
+            if lead.get("status") != "sent" and (lead_variants & sent_normalized):
+                sent_ids.append(lead["id"])
+            elif lead.get("status") not in ("sent", "failed") and (lead_variants & failed_normalized):
+                failed_ids.append(lead["id"])
+
+        with conn.cursor() as cur:
+            if sent_ids and updated_sent == 0:
+                cur.execute(
+                    """UPDATE campaign_leads
+                       SET status = 'sent',
+                           sent_at = NOW(),
+                           current_step = LEAST(4, COALESCE(current_step, 1) + 1),
+                           last_message_sent_at = NOW(),
+                           last_sent_folder_id = COALESCE(last_sent_folder_id, %s)
+                       WHERE id = ANY(%s)""",
+                    (folder_id, sent_ids),
+                )
+                updated_sent = cur.rowcount
+            if failed_ids:
+                cur.execute(
+                    """UPDATE campaign_leads
+                       SET status = 'failed', sent_at = COALESCE(sent_at, NOW())
+                       WHERE id = ANY(%s)""",
+                    (failed_ids,),
+                )
+                updated_failed = cur.rowcount
     conn.commit()
 
     return {

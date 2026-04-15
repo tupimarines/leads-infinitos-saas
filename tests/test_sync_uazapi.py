@@ -8,6 +8,8 @@ from utils.sync_uazapi import (
     _extract_phones_from_message,
     _message_matches_folder,
     _reconcile_send_by_messages,
+    _lead_ids_needing_message_find,
+    reconcile_leads_via_message_find,
     sync_campaign_leads_from_uazapi,
 )
 
@@ -126,8 +128,10 @@ class TestReconcileSendByMessages:
 
 
 class TestSyncCampaignLeadsFromUazapi:
-    def test_sync_listfolders_updates_leads_when_folder_present(self):
-        """SSOT listfolders: pasta encontrada na lista → atualiza leads (sem ramo pesado list_messages)."""
+    def test_sync_listfolders_updates_leads_when_folder_present(self, monkeypatch):
+        """Com UAZAPI_LISTFOLDERS_PREFIX_SENT=1: listfolders + prefixo marca sent (legado)."""
+
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "1")
 
         class _FakeCursor:
             def __init__(self, conn):
@@ -163,6 +167,8 @@ class TestSyncCampaignLeadsFromUazapi:
                         "status": "running",
                         "apikey": "token-1",
                     }]
+                elif "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._fetchall = [{"id": 55}]
                 elif "SELECT id, phone, whatsapp_link FROM campaign_leads" in compact:
                     self._fetchall = [{"id": 55, "phone": "11999999999", "whatsapp_link": None}]
                 elif "UPDATE campaign_leads SET status = 'sent'" in compact:
@@ -219,6 +225,105 @@ class TestSyncCampaignLeadsFromUazapi:
         assert result["updated_sent"] == 1
         assert result["updated_failed"] == 0
         assert conn.committed is True
+
+    def test_sync_prefix_default_off_no_sent_without_find_or_listmessages_match(
+        self, monkeypatch
+    ):
+        """UAZAPI_LISTFOLDERS_PREFIX_SENT=0 (defeito): não promove por ordem; find desligado e list_messages vazio → 0 updates."""
+
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "0")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND", "0")
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "folder-fu1"}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 1,
+                        "stage": "follow1",
+                        "instance_id": 12,
+                        "instance_remote_jid": "5511999999999@s.whatsapp.net",
+                        "uazapi_folder_id": "folder-fu1",
+                        "lead_ids": [55],
+                        "planned_count": 1,
+                        "status": "running",
+                        "apikey": "token-1",
+                    }]
+                elif "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._fetchall = [{"id": 55}]
+                elif "SELECT id, phone, whatsapp_link FROM campaign_leads" in compact:
+                    self._fetchall = [{"id": 55, "phone": "11999999999", "whatsapp_link": None}]
+                elif "UPDATE campaign_stage_sends SET success_count = %s, failed_count = %s, status = %s" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{
+                    "id": "folder-fu1",
+                    "status": "done",
+                    "log_sucess": 1,
+                    "log_failed": 0,
+                    "log_total": 1,
+                }]
+
+            def list_messages(self, *_a, **_kw):
+                raise AssertionError(
+                    "list_messages (reconcile Sent/Failed) não deve disparar só por prefixo desligado"
+                )
+
+            def message_find(self, *_a, **_kw):
+                raise AssertionError("message_find não deve correr com UAZAPI_MESSAGE_FIND=0")
+
+        conn = _FakeConn()
+        result = sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=502,
+            token="main-token",
+            folder_id="folder-fu1",
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+
+        assert result["updated_sent"] == 0
+        assert result["updated_failed"] == 0
+        lead_updates = [q for q, _p in conn.executed if "UPDATE campaign_leads" in q and "status = 'sent'" in q]
+        assert lead_updates == []
 
     def test_sync_orphan_folder_listmessages_error_marks_send_failed(self, capsys):
         """Pasta ausente em listfolders + listmessages None (ex. 400) → failed, liberta instância."""
@@ -408,3 +513,607 @@ class TestSyncCampaignLeadsFromUazapi:
             and "status = 'failed'" not in q
         ]
         assert any(p == (100,) for _q, p in last_sync_only)
+
+    def test_sync_v2_skips_listmessages_needs_reconcile_on_done_gap(self, monkeypatch):
+        """F11/D3: V2=1 não chama list_messages Sent/Failed em needs_reconcile; lacuna cobre-se só com find."""
+        monkeypatch.setenv("UAZAPI_LEAD_RECONCILE_V2", "1")
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "0")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND", "1")
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "f-gap"}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 42,
+                        "stage": "initial",
+                        "instance_id": 9,
+                        "instance_remote_jid": None,
+                        "uazapi_folder_id": "f-gap",
+                        "lead_ids": [55, 56, 57],
+                        "planned_count": 3,
+                        "status": "running",
+                        "apikey": "tok-gap",
+                    }]
+                elif "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._fetchall = [{"id": 55}]
+                elif "SELECT id, phone, whatsapp_link FROM campaign_leads" in compact:
+                    self._fetchall = [{"id": 55, "phone": "11999999999", "whatsapp_link": None}]
+                elif "UPDATE campaign_stage_sends SET success_count" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{
+                    "id": "f-gap",
+                    "status": "done",
+                    "log_sucess": 1,
+                    "log_failed": 0,
+                    "log_total": 3,
+                }]
+
+            def list_messages(self, *_a, **kwargs):
+                st = kwargs.get("message_status")
+                if st in ("Sent", "Failed"):
+                    raise AssertionError("needs_reconcile não deve usar list_messages Sent/Failed com V2=1")
+                return {"messages": [], "pagination": {"lastPage": 1}}
+
+            def message_find(self, *_a, **_kw):
+                return {"messages": []}
+
+        conn = _FakeConn()
+        sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=601,
+            token="t",
+            folder_id="f-gap",
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+        assert conn.committed is True
+
+    def test_sync_legacy_sync_on_but_skips_listmessages_when_find_has_scope(self, monkeypatch):
+        """V2=0 com SYNC_RECONCILE_LISTMESSAGES=1: ainda não chama list_messages se há candidatos find (evita SSOT duplo)."""
+        monkeypatch.setenv("UAZAPI_LEAD_RECONCILE_V2", "0")
+        monkeypatch.setenv("UAZAPI_SYNC_RECONCILE_LISTMESSAGES", "1")
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "0")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND", "1")
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "f-gap2"}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 43,
+                        "stage": "initial",
+                        "instance_id": 9,
+                        "instance_remote_jid": None,
+                        "uazapi_folder_id": "f-gap2",
+                        "lead_ids": [55, 56, 57],
+                        "planned_count": 3,
+                        "status": "running",
+                        "apikey": "tok-gap2",
+                    }]
+                elif "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._fetchall = [{"id": 55}]
+                elif "SELECT id, phone, whatsapp_link FROM campaign_leads" in compact:
+                    self._fetchall = [{"id": 55, "phone": "11999999999", "whatsapp_link": None}]
+                elif "UPDATE campaign_stage_sends SET success_count" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{
+                    "id": "f-gap2",
+                    "status": "done",
+                    "log_sucess": 1,
+                    "log_failed": 0,
+                    "log_total": 3,
+                }]
+
+            def list_messages(self, *_a, **kwargs):
+                st = kwargs.get("message_status")
+                if st in ("Sent", "Failed"):
+                    raise AssertionError(
+                        "list_messages Sent/Failed suprimido quando há escopo message_find"
+                    )
+                return {"messages": [], "pagination": {"lastPage": 1}}
+
+            def message_find(self, *_a, **_kw):
+                return {"messages": []}
+
+        conn = _FakeConn()
+        sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=602,
+            token="t",
+            folder_id="f-gap2",
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+        assert conn.committed is True
+
+
+class TestReconcileLeadsMessageFindF8:
+    """F8: dois chatids quando phone e whatsapp_link normalizam diferente."""
+
+    def test_tries_both_numbers_before_negative(self):
+        calls = []
+
+        class _Svc:
+            def message_find(self, _token, chatid, limit=50, offset=0, context=None):
+                calls.append(chatid)
+                if chatid == "5541999998888@s.whatsapp.net":
+                    return {"messages": [{"body": "x"}]}  # sem send_folder_id
+                if chatid == "5511999999999@s.whatsapp.net":
+                    return {"messages": [{"send_folder_id": "fld1"}]}
+                return {"messages": []}
+
+        class _FakeCursor:
+            def __init__(self):
+                self._rows = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                if "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._rows = [{"id": 7}]
+                elif "SELECT id, phone, whatsapp_link" in compact:
+                    self._rows = [{"id": 7, "phone": "41999998888", "whatsapp_link": "5511999999999"}]
+
+            def fetchall(self):
+                return self._rows
+
+        class _FakeConn:
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor()
+
+        sent_ids, _failed, _pages = reconcile_leads_via_message_find(
+            _Svc(),
+            "tok",
+            "fld1",
+            1,
+            [7],
+            _FakeConn(),
+            send_row={"lead_ids": [7], "stage": "initial"},
+        )
+
+        assert 7 in sent_ids
+        assert calls == [
+            "5541999998888@s.whatsapp.net",
+            "5511999999999@s.whatsapp.net",
+        ]
+
+    def test_empty_scope_skips_message_find(self):
+        class _Svc:
+            def message_find(self, *_a, **_kw):
+                raise AssertionError("sem candidatos não deve chamar message_find")
+
+        class _FakeCursor:
+            def __init__(self):
+                self._rows = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                if "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._rows = []
+
+            def fetchall(self):
+                return self._rows
+
+        class _FakeConn:
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor()
+
+        sent_ids, _f, _p = reconcile_leads_via_message_find(
+            _Svc(),
+            "tok",
+            "fld1",
+            1,
+            [7, 8],
+            _FakeConn(),
+            send_row={"lead_ids": [7, 8], "stage": "initial"},
+        )
+        assert sent_ids == set()
+
+
+class TestTask8SpecMessageFindSync:
+    """Task 8 tech-spec: evidência por find, list_messages off, partial/reconexão."""
+
+    def test_log_success_two_only_second_lead_positive_find_marks_only_b_sent(self, monkeypatch):
+        """log_sucess=2, lead_ids=[A,B]; só B com find positivo → apenas B vira sent (AC1)."""
+        monkeypatch.setenv("UAZAPI_LEAD_RECONCILE_V2", "1")
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "0")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND", "1")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND_SLEEP_SEC", "0")
+
+        folder_id = "fld-ab-two"
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": folder_id}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 501,
+                        "stage": "initial",
+                        "instance_id": 12,
+                        "instance_remote_jid": "5511999999999@s.whatsapp.net",
+                        "uazapi_folder_id": folder_id,
+                        "lead_ids": [201, 202],
+                        "planned_count": 2,
+                        "status": "done",
+                        "apikey": "tok-ab",
+                    }]
+                elif "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._fetchall = [{"id": 201}, {"id": 202}]
+                elif "SELECT id, phone, whatsapp_link" in compact and "FROM campaign_leads" in compact:
+                    self._fetchall = [
+                        {"id": 201, "phone": "11911111111", "whatsapp_link": None},
+                        {"id": 202, "phone": "11922222222", "whatsapp_link": None},
+                    ]
+                elif "UPDATE campaign_leads SET status = 'sent'" in compact:
+                    assert params[0] == 1
+                    assert params[1] == "initial"
+                    assert sorted(list(params[5])) == [202]
+                    self.rowcount = 1
+                elif "UPDATE campaign_stage_sends SET success_count" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{
+                    "id": folder_id,
+                    "status": "done",
+                    "log_sucess": 2,
+                    "log_failed": 0,
+                    "log_total": 2,
+                }]
+
+            def list_messages(self, *_a, **kwargs):
+                st = kwargs.get("message_status")
+                if st in ("Sent", "Failed"):
+                    raise AssertionError(
+                        "Task 8: com prefixo off + V2, reconcile não deve usar list_messages Sent/Failed"
+                    )
+                return {"messages": [], "pagination": {"lastPage": 1}}
+
+            def message_find(self, _token, chatid, limit=50, offset=0, context=None):
+                if "5511911111111" in chatid:
+                    return {"messages": [{"body": "sem pasta"}]}
+                if "5511922222222" in chatid:
+                    return {"messages": [{"send_folder_id": folder_id}]}
+                return {"messages": []}
+
+        conn = _FakeConn()
+        result = sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=801,
+            token="main",
+            folder_id=folder_id,
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+
+        assert result["updated_sent"] == 1
+        assert conn.committed is True
+
+    def test_sync_reconcile_listmessages_zero_never_calls_sent_failed_enumeration(
+        self, monkeypatch
+    ):
+        """UAZAPI_SYNC_RECONCILE_LISTMESSAGES=0: needs_reconcile não dispara fetch Sent/Failed (Task 8)."""
+        monkeypatch.setenv("UAZAPI_LEAD_RECONCILE_V2", "0")
+        monkeypatch.setenv("UAZAPI_SYNC_RECONCILE_LISTMESSAGES", "0")
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "0")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND", "0")
+
+        folder_id = "fld-empty-leads"
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": folder_id}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 880,
+                        "stage": "initial",
+                        "instance_id": 1,
+                        "instance_remote_jid": None,
+                        "uazapi_folder_id": folder_id,
+                        "lead_ids": [],
+                        "planned_count": 2,
+                        "status": "done",
+                        "apikey": "tok-e",
+                    }]
+                elif "UPDATE campaign_stage_sends SET success_count" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{
+                    "id": folder_id,
+                    "status": "done",
+                    "log_sucess": 1,
+                    "log_failed": 0,
+                    "log_total": 2,
+                }]
+
+            def list_messages(self, *_a, **kwargs):
+                st = kwargs.get("message_status")
+                if st in ("Sent", "Failed"):
+                    raise AssertionError(
+                        "UAZAPI_SYNC_RECONCILE_LISTMESSAGES=0 não deve enumerar Sent/Failed"
+                    )
+                return {"messages": [], "pagination": {"lastPage": 1}}
+
+            def message_find(self, *_a, **_kw):
+                raise AssertionError("MESSAGE_FIND=0 neste cenário")
+
+        conn = _FakeConn()
+        sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=802,
+            token="t",
+            folder_id=folder_id,
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+        assert conn.committed is True
+
+    def test_partial_folder_with_pending_leads_calls_message_find(self, monkeypatch):
+        """Pasta partial + pendentes → message_find por lead (reconexão / Task 8)."""
+        monkeypatch.setenv("UAZAPI_LEAD_RECONCILE_V2", "1")
+        monkeypatch.setenv("UAZAPI_LISTFOLDERS_PREFIX_SENT", "0")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND", "1")
+        monkeypatch.setenv("UAZAPI_MESSAGE_FIND_SLEEP_SEC", "0")
+
+        folder_id = "fld-partial-rc"
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": folder_id}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 770,
+                        "stage": "initial",
+                        "instance_id": 5,
+                        "instance_remote_jid": None,
+                        "uazapi_folder_id": folder_id,
+                        "lead_ids": [301, 302],
+                        "planned_count": 2,
+                        "status": "partial",
+                        "apikey": "tok-p",
+                    }]
+                elif "FROM campaign_leads cl" in compact and "SELECT cl.id" in compact:
+                    self._fetchall = [{"id": 301}, {"id": 302}]
+                elif "SELECT id, phone, whatsapp_link" in compact and "FROM campaign_leads" in compact:
+                    self._fetchall = [
+                        {"id": 301, "phone": "11933333333", "whatsapp_link": None},
+                        {"id": 302, "phone": "11944444444", "whatsapp_link": None},
+                    ]
+                elif "UPDATE campaign_stage_sends SET success_count" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        mf_calls = []
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{
+                    "id": folder_id,
+                    "status": "partial",
+                    "log_sucess": 1,
+                    "log_failed": 0,
+                    "log_total": 2,
+                }]
+
+            def list_messages(self, *_a, **kwargs):
+                st = kwargs.get("message_status")
+                if st in ("Sent", "Failed"):
+                    raise AssertionError("partial+pendentes: sem reconcile list_messages")
+                return {"messages": [], "pagination": {"lastPage": 1}}
+
+            def message_find(self, _token, chatid, limit=50, offset=0, context=None):
+                mf_calls.append(chatid)
+                return {"messages": []}
+
+        conn = _FakeConn()
+        sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=803,
+            token="t",
+            folder_id=folder_id,
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+
+        assert len(mf_calls) >= 2
+        assert conn.committed is True

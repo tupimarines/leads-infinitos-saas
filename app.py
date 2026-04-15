@@ -2609,7 +2609,17 @@ def campaign_kanban(campaign_id):
 @app.route('/api/campaigns/<int:campaign_id>/kanban-data')
 @login_required
 def campaign_kanban_data(campaign_id):
-    """API: Get all leads for the kanban board. Para Uazapi: sync antes de retornar + stats."""
+    """API: leads do Kanban a partir de ``campaign_leads`` (SSOT por lead).
+
+    Para UAZAPI pode correr ``sync_campaign_leads_from_uazapi`` antes da leitura;
+    o JSON ``leads[]`` reflete apenas colunas da BD (ex.: ``status``, ``current_step``,
+    ``last_sent_stage``). Não há recálculo de ``sent`` por lead a partir de
+    ``listfolders`` neste handler.
+
+    ``uazapi_stats`` e ``stage_progress`` são agregados de ``campaign_stage_sends``
+    (contagens / estado do envio) para resumo operacional; não substituem o estado
+    por destinatário em ``leads[]`` (tech-spec Task 9 / F12).
+    """
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         return json.dumps({'error': 'Campanha não encontrada'}), 404
@@ -2652,6 +2662,7 @@ def campaign_kanban_data(campaign_id):
                         should_sync = (now_utc - last_sync_at).total_seconds() >= (UAZAPI_SYNC_WEB_INTERVAL_MINUTES * 60)
                     if should_sync:
                         sync_campaign_leads_from_uazapi(conn_sync, campaign_id, inst['apikey'], campaign.uazapi_folder_id, uazapi)
+                    # Agregados da etapa inicial (não aplicados sobre ``leads[]``; só ``uazapi_stats``).
                     # Usar campaign_stage_sends (initial) para stats — cobre multi-instância e chunks fragmentados.
                     with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute(
@@ -3623,7 +3634,11 @@ def admin_update_campaign(campaign_id):
 @login_required
 @admin_required
 def admin_get_campaign_leads(campaign_id):
-    """Leads paginados de qualquer campanha (admin, sem filtro user_id)."""
+    """Leads paginados de qualquer campanha (admin, sem filtro user_id).
+
+    Estado por lead (``status``, etc.) vem só de ``campaign_leads``; sem inferência
+    a partir de agregados UAZAPI/listfolders nesta rota (tech-spec Task 9).
+    """
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -6104,6 +6119,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
         try:
             import worker_cadence as wc
 
+            # Task 6: pré-sync corre dentro de wc._materialize_scheduled_stage_sends (evita duplicar API).
             conn_m = get_db_connection()
             try:
                 mat = wc._materialize_scheduled_stage_sends(conn_m, force_send_ids=created_ids)
@@ -6680,6 +6696,18 @@ def _create_stage_campaign(campaign_id):
     delay_max_sec = int(delay_max_minutes * 60)
     uazapi = UazapiService()
 
+    # Task 6: reconciliar sends da mesma etapa antes de novo create_advanced_campaign (retomada FU).
+    try:
+        from utils.sync_uazapi import sync_campaign_stage_sends_before_new_chunk
+
+        conn_fu = get_db_connection()
+        try:
+            sync_campaign_stage_sends_before_new_chunk(conn_fu, campaign_id, uazapi, stage=stage)
+        finally:
+            conn_fu.close()
+    except Exception as sync_ex:
+        print(f"[UAZAPI] _create_stage_campaign sync pré-chunk (Task 6) campaign_id={campaign_id}: {sync_ex}")
+
     sends_created = []
     errors = []
     for idx, chunk in enumerate(lead_chunks):
@@ -7171,6 +7199,7 @@ def edit_campaign(campaign_id):
 @app.route('/api/campaigns/<int:campaign_id>/leads')
 @login_required
 def get_campaign_leads(campaign_id):
+    """Lista paginada de leads: SSOT ``campaign_leads`` (sem ``sent`` derivado de listfolders aqui)."""
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         return json.dumps({'error': 'Campanha não encontrada'}), 404

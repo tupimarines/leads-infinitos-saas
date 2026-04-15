@@ -42,10 +42,12 @@ except ImportError:
 from utils.limits import can_create_campaign_today, INITIAL_CHUNK_ACTIVE_SEND_STATUSES
 from utils.sync_uazapi import (
     sync_campaign_leads_from_uazapi,
+    sync_campaign_stage_sends_before_new_chunk,
     get_uazapi_campaign_counts,
     is_initial_campaign_finished,
     fetch_all_phones_by_status,
     normalize_phone_for_match,
+    should_block_initial_rollover_for_pending_find,
 )
 from utils.uazapi_pacing import (
     build_pacing_segments_for_leads,
@@ -75,6 +77,21 @@ VERIFY_FOLDER_AFTER_SECONDS = 180  # list_folders 3 min após create_advanced_ca
 
 # Fila de verificação pós-create: (send_id, folder_id, token, verify_at)
 _verify_folder_queue = []
+
+
+def _reconcile_find_before_rollover_enabled():
+    """
+    Task 5 + Task 7: ``sync_campaign_leads_from_uazapi`` (incl. ``message_find`` em
+    ``campaign_stage_sends``) antes de rollover que chama ``create_advanced_campaign`` —
+    inicial→FU1 (``process_uazapi_initial_stage_rollovers``) e FU1→FU2→Despedida por tempo
+    (``process_rollover_fu_next``). Defeito ligado; ``0`` / ``false`` desliga (emergência).
+    """
+    return os.environ.get("UAZAPI_RECONCILE_FIND_BEFORE_ROLLOVER", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def _parse_json_lead_ids(raw):
@@ -473,6 +490,28 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
         if total_limit <= 0:
             continue
 
+        # Task 6: find no escopo dos sends antigos (mesma etapa) antes de novo folder / create_advanced_campaign.
+        if sends and sends[0].get("use_uazapi_sender"):
+            try:
+                sync_campaign_stage_sends_before_new_chunk(conn, campaign_id, uazapi_service, stage=stage)
+            except Exception as e:
+                print(
+                    json.dumps(
+                        {
+                            "event": "uazapi_materialize_pre_sync_failed",
+                            "campaign_id": campaign_id,
+                            "stage": stage,
+                            "error": str(e),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
         # Stage 'initial': pending + excluir apenas de chunks que efetivamente enviaram (done/running/partial)
         # Chunks failed/cancelled: libera leads para retry
         status_clause = "AND status = 'pending'" if stage == "initial" else "AND status = 'sent'"
@@ -837,9 +876,13 @@ def _sync_active_stage_folders(conn):
 
     Contagem/progresso alinhados à API vêm de listfolders apenas; listmessages não substitui
     esse SSOT para totais globais. O SQL limita re-sync ao intervalo de ~10 min (last_sync_at).
+
+    Returns:
+        ``set`` de ``campaign_id`` para os quais ``sync_campaign_leads_from_uazapi`` foi chamado
+        nesta execução (evita segundo sync HTTP no mesmo tick em rollover — Task 5 / process_rollover_fu_next).
     """
     if not uazapi_service:
-        return
+        return set()
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -863,7 +906,7 @@ def _sync_active_stage_folders(conn):
         rows = cur.fetchall() or []
 
     if not rows:
-        return
+        return set()
 
     by_campaign = {}
     for row in rows:
@@ -884,6 +927,8 @@ def _sync_active_stage_folders(conn):
                 conn.rollback()
             except Exception:
                 pass
+
+    return set(by_campaign.keys())
 
 # --- MAIN LOGIC ---
 
@@ -906,8 +951,11 @@ def process_cadence():
                 last_stage_sync_at is None
                 or (now_sync - last_stage_sync_at).total_seconds() >= STAGE_SYNC_INTERVAL_MINUTES * 60
             )
+            # Campanhas já sincronizadas neste tick: rollover (initial→FU1, FU chain) reutiliza BD
+            # sem segundo sync HTTP para o mesmo campaign_id.
+            synced_campaign_ids = set()
             if should_sync:
-                _sync_active_stage_folders(conn)
+                synced_campaign_ids = _sync_active_stage_folders(conn) or set()
                 last_stage_sync_at = now_sync
 
             # --- PART A: SAFETY BUFFER CHECK (Monitoring Phase) ---
@@ -916,7 +964,9 @@ def process_cadence():
             # Rollover Inicial → FU1: consulta própria em process_uazapi_initial_stage_rollovers (não usa a lista abaixo).
             # Deve rodar mesmo quando não há campanhas em "running/pending/completed" (ex.: campanha pausada) ou lista vazia por outro motivo;
             # caso contrário os cards nunca saem da Inicial após o envio.
-            process_uazapi_initial_stage_rollovers(conn)
+            process_uazapi_initial_stage_rollovers(
+                conn, campaigns_synced_this_tick=synced_campaign_ids
+            )
 
             # 1. Campanhas ativas: cadência completa OU Uazapi "só inicial" (enable_cadence=false).
             # Neste último caso só rodamos schedule_next_initial_chunk (chunks etapa initial); sem FU/rollover/send legado.
@@ -955,8 +1005,22 @@ def process_cadence():
                 if not campaign.get('enable_cadence'):
                     continue
 
-                process_rollover_fu_next(campaign, conn, from_step=2, to_step=3, step_label="Follow-up 2")
-                process_rollover_fu_next(campaign, conn, from_step=3, to_step=4, step_label="Despedida")
+                process_rollover_fu_next(
+                    campaign,
+                    conn,
+                    from_step=2,
+                    to_step=3,
+                    step_label="Follow-up 2",
+                    campaigns_synced_this_tick=synced_campaign_ids,
+                )
+                process_rollover_fu_next(
+                    campaign,
+                    conn,
+                    from_step=3,
+                    to_step=4,
+                    step_label="Despedida",
+                    campaigns_synced_this_tick=synced_campaign_ids,
+                )
 
                 if is_campaign_send_window(campaign):
                     process_campaign_sends(campaign, conn)
@@ -1248,6 +1312,26 @@ def schedule_next_initial_chunk(campaign, conn):
         print(f"  ❌ [Initial Chunk] Campaign '{campaign.get('name')}': sem mensagem configurada (campaign_steps step 1 e campaigns.message_template vazios)")
         return
 
+    # Task 6: reconciliar sends iniciais já materializados antes de agendar novo chunk (evita duplicidade pós-reconexão).
+    try:
+        sync_campaign_stage_sends_before_new_chunk(conn, cid, uazapi_service, stage="initial")
+    except Exception as e:
+        print(
+            json.dumps(
+                {
+                    "event": "uazapi_schedule_next_chunk_pre_sync_failed",
+                    "campaign_id": cid,
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     # Um ciclo = chunks para todas as instâncias. Materialize atribui leads distintos por instância.
     created = 0
     for inst in sorted(instances, key=lambda x: x.get('instance_id') or 0):
@@ -1283,7 +1367,7 @@ def schedule_next_initial_chunk(campaign, conn):
         print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {sched_brt} ({created} instâncias)")
 
 
-def process_uazapi_initial_stage_rollovers(conn):
+def process_uazapi_initial_stage_rollovers(conn, campaigns_synced_this_tick=None):
     """
     Rollover automático (cadência + Uazapi): quando a pasta inicial contabilizou todos os slots
     (success_count + failed_count >= planned_count), move para FU1 os leads ainda em step 1 com
@@ -1291,14 +1375,28 @@ def process_uazapi_initial_stage_rollovers(conn):
     Se houver texto/mídia em campaign_steps step 2 e credenciais Uazapi, cria também a
     campanha agendada na API; caso contrário apenas atualiza o banco (Gerar no Kanban depois).
     Um registro em campaign_stage_sends = um folder Uazapi; cada um faz rollover independente.
+
+    Task 5: com ``UAZAPI_RECONCILE_FIND_BEFORE_ROLLOVER`` (defeito 1), corre ``sync_campaign_leads_from_uazapi``
+    antes de escolher ``rollover_leads`` — nunca promover FU só com ``log_sucess`` + ordem em ``lead_ids``.
+    Com ``UAZAPI_LEAD_RECONCILE_V2=1``, aplica gate D9: não marca ``fu_rollover_done`` nem move leads
+    enquanto existirem candidatos a ``message_find`` no escopo do send. Mutaciones no send usam
+    ``SELECT … FOR UPDATE`` (D10) para concorrência entre workers.
+
+    Args:
+        campaigns_synced_this_tick: ``campaign_id`` já sincronizados neste tick do worker
+        (ex.: por ``_sync_active_stage_folders``); evita segundo ``sync_campaign_leads_from_uazapi``
+        HTTP para a mesma campanha — mantém-se o ``SELECT`` de reload do send na BD.
     """
     if not uazapi_service:
         return
 
+    already_synced = campaigns_synced_this_tick or set()
+
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT css.id AS send_id, css.campaign_id, css.instance_id, css.uazapi_folder_id, css.lead_ids,
+            SELECT css.id AS send_id, css.campaign_id, css.instance_id, css.instance_remote_jid,
+                   css.uazapi_folder_id, css.lead_ids,
                    css.planned_count, css.success_count, css.failed_count,
                    c.name AS campaign_name, c.user_id AS user_id, c.send_hour_start, c.send_saturday, c.send_sunday,
                    i.apikey
@@ -1336,8 +1434,76 @@ def process_uazapi_initial_stage_rollovers(conn):
         if succ + fail < planned:
             continue
 
+        token = (row.get("apikey") or "").strip()
+        folder_for_sync = row.get("uazapi_folder_id")
+        instance_remote_jid = row.get("instance_remote_jid")
+
+        if (
+            _reconcile_find_before_rollover_enabled()
+            and token
+            and folder_for_sync
+        ):
+            if cid not in already_synced:
+                try:
+                    sync_campaign_leads_from_uazapi(conn, cid, token, folder_for_sync, uazapi_service)
+                except Exception as e:
+                    print(
+                        f"  ⚠️ [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: "
+                        f"sync antes do rollover falhou ({e}); segue com contagens já carregadas."
+                    )
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT planned_count, success_count, failed_count, lead_ids, instance_remote_jid
+                    FROM campaign_stage_sends WHERE id = %s
+                    """,
+                    (send_id,),
+                )
+                ref = cur.fetchone()
+            if ref:
+                planned = int(ref.get("planned_count") or 0)
+                succ = int(ref.get("success_count") or 0)
+                fail = int(ref.get("failed_count") or 0)
+                lr = ref.get("lead_ids") or []
+                if isinstance(lr, str):
+                    try:
+                        lr = json.loads(lr)
+                    except Exception:
+                        lr = []
+                lids_raw = lr
+                if planned <= 0 and lids_raw:
+                    planned = len(lids_raw)
+                instance_remote_jid = ref.get("instance_remote_jid")
+
+        if planned <= 0:
+            continue
+        if succ + fail < planned:
+            continue
+
+        send_row_scope = {
+            "id": send_id,
+            "lead_ids": lids_raw,
+            "stage": "initial",
+            "instance_id": row.get("instance_id"),
+            "instance_remote_jid": instance_remote_jid,
+        }
+        if folder_for_sync and should_block_initial_rollover_for_pending_find(
+            conn, cid, send_row_scope, folder_for_sync
+        ):
+            print(
+                f"  ⏸️ [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: "
+                "ainda há candidatos a message_find neste send — rollover adiado até reconciliar (D9)."
+            )
+            continue
+
         if not lids_raw:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM campaign_stage_sends WHERE id = %s FOR UPDATE",
+                    (send_id,),
+                )
+                if cur.fetchone() is None:
+                    continue
                 cur.execute(
                     "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
                     (send_id,),
@@ -1346,6 +1512,12 @@ def process_uazapi_initial_stage_rollovers(conn):
             continue
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM campaign_stage_sends WHERE id = %s FOR UPDATE",
+                (send_id,),
+            )
+            if cur.fetchone() is None:
+                continue
             cur.execute(
                 """
                 SELECT cl.id, cl.phone, cl.name, cl.whatsapp_link
@@ -1365,9 +1537,14 @@ def process_uazapi_initial_stage_rollovers(conn):
             if succ + fail >= planned:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
+                        "SELECT id FROM campaign_stage_sends WHERE id = %s FOR UPDATE",
                         (send_id,),
                     )
+                    if cur.fetchone() is not None:
+                        cur.execute(
+                            "UPDATE campaign_stage_sends SET fu_rollover_done = TRUE, updated_at = NOW() WHERE id = %s",
+                            (send_id,),
+                        )
                 conn.commit()
                 print(
                     f"  ⏭️ [Uazapi Rollover] '{row['campaign_name']}' send_id={send_id}: "
@@ -1435,7 +1612,6 @@ def process_uazapi_initial_stage_rollovers(conn):
             except Exception:
                 msg_text = str(raw_tpl)
 
-        token = (row.get("apikey") or "").strip()
         can_api = bool(token and row.get("uazapi_folder_id"))
         has_body = bool((msg_text or "").strip()) or bool(media_file_data)
         want_api = can_api and has_body
@@ -1491,6 +1667,12 @@ def process_uazapi_initial_stage_rollovers(conn):
             else:
                 print(f"  ❌ [Uazapi Rollover] Campaign '{row['campaign_name']}': create_advanced_campaign FU1 falhou; leads movidos só no banco.")
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM campaign_stage_sends WHERE id = %s FOR UPDATE",
+                (send_id,),
+            )
+            if cur.fetchone() is None:
+                continue
             cur.execute(
                 """
                 UPDATE campaign_leads
@@ -1750,21 +1932,41 @@ def process_rollover(campaign, conn):
     print(f"  🔄 [Rollover] Campaign '{campaign['name']}': {len(lead_ids)} leads Inicial → Follow-up 1, agendado {target_dt.strftime('%d/%m %H:%M')} BRT")
 
 
-def process_rollover_fu_next(campaign, conn, from_step, to_step, step_label):
+def process_rollover_fu_next(
+    campaign, conn, from_step, to_step, step_label, campaigns_synced_this_tick=None
+):
     """
-    Rollover FU1→FU2 ou FU2→Despedida: leads em from_step com snooze_until<=NOW()
-    → criar campanha Uazapi para to_step e mover leads.
+    Rollover por tempo (snooze): FU1→FU2 ou FU2→Despedida.
+
+    Mapeamento ``campaign_stage_sends.stage`` (UAZAPI) ↔ coluna de cadência (``current_step``):
+    - ``initial`` — envio da etapa Inicial (step 1); rollover automático em ``process_uazapi_initial_stage_rollovers``.
+    - ``follow1`` — pasta do Follow-up 1 (leads em ``current_step`` 2 após rollover inicial).
+    - ``follow2`` — pasta do Follow-up 2 (step 3).
+    - ``breakup`` — pasta da Despedida (step 4).
+
+    **Task 7 / product-rules §5.3:** não promover a etapa seguinte só com ``snooze_until`` expirado se o
+    estado ``status='sent'`` + ``last_sent_stage`` ainda puder estar desalinhado do ``message_find``.
+    Com ``_reconcile_find_before_rollover_enabled()`` (env ``UAZAPI_RECONCILE_FIND_BEFORE_ROLLOVER``,
+    defeito ligado), corre-se ``sync_campaign_leads_from_uazapi`` antes de selecionar leads — o mesmo
+    pipeline que reconcilia ``follow1``/``follow2``/``breakup`` em ``campaign_stage_sends``. O token
+    da instância retornada por ``get_campaign_instance`` é opcional: o sync usa ``apikey`` por send na BD.
+
+    ``required_last_stage`` garante que só entram leads cuja última etapa confirmada na BD corresponde
+    ao send anterior (ex.: FU2→Despedida exige ``last_sent_stage='follow2'``).
     """
     cid = campaign['id']
     instance = get_campaign_instance(cid, conn)
     if not instance or instance.get('api_provider') != 'uazapi' or not uazapi_service:
         return
 
-    # Antes de decidir próximo estágio, sincroniza com source-of-truth da API.
-    if campaign.get('use_uazapi_sender') and instance.get('apikey'):
+    # Sync completo da campanha (todas as pastas em campaign_stage_sends + find no escopo) antes
+    # de confiar em status=sent para o próximo create_advanced_campaign.
+    # ``token`` pode ser vazio: ``sync_campaign_leads_from_uazapi`` usa apikey por send na BD.
+    if _reconcile_find_before_rollover_enabled() and campaign.get('use_uazapi_sender'):
         try:
+            sync_token = (instance.get('apikey') or '').strip() if instance else ''
             sync_campaign_leads_from_uazapi(
-                conn, cid, instance['apikey'], campaign.get('uazapi_folder_id'), uazapi_service
+                conn, cid, sync_token, campaign.get('uazapi_folder_id'), uazapi_service
             )
         except Exception as e:
             print(f"  ⚠️ [Rollover {step_label}] Sync pré-decisão falhou: {e}")
