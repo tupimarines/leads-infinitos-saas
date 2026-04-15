@@ -1,0 +1,4 @@
+name,address,domain,website,phone_number,whatsapp_link,category,location,reviews_count,reviews_average,latitude,longitude,status
+Joao Silva,Rua das Flores 123,,https://exemplo1.com.br,+55 41 3798-4966,https://wa.me/554137984966,Restaurante,Curitiba,45,4.5,-25.4284,-49.2733,1
+Maria Santos,Av Brasil 456,,https://exemplo2.com.br,+55 41 3798-4981,https://wa.me/554137984981,Clinica Medica,Curitiba,120,4.8,-25.4284,-49.2733,1
+Pedro Oliveira,Rua XV de Novembro 789,,https://exemplo3.com.br,+55 41 3798-4741,https://wa.me/554137984741,Academia,Curitiba,89,4.2,-25.4284,-49.2733,1

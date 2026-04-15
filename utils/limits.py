@@ -10,6 +10,11 @@ from psycopg2.extras import RealDictCursor
 from utils.config import SUPER_ADMIN_EMAILS
 INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
 
+# campaign_stage_sends (stage initial): só estes status bloqueiam novo chunk na mesma instância
+# (worker_cadence.schedule_next_initial_chunk). failed/done não entram — após pasta órfã (sync → failed),
+# a instância volta a poder receber chunk (tech-spec-uazapi-campanhas-n8n-sync-observabilidade, Task 3).
+INITIAL_CHUNK_ACTIVE_SEND_STATUSES = ("scheduled", "running", "partial")
+
 # Fonte única de regras de plano.
 # validity_days: dias até expiração (a partir da data de aplicação ao usuário).
 # starter_trial: 7 dias; demais planos: 365 dias.

@@ -3,7 +3,8 @@ title: 'Validação automática de lista no upload e pós-extração'
 slug: 'validacao-automatica-upload-extracao'
 created: '2026-03-09'
 status: 'implementation-complete'
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted: [1, 2, 3, 4, 5]
+acVerified: true
 tech_stack: ['Python 3.x', 'Flask', 'PostgreSQL', 'Uazapi API', 'pandas', 'psycopg2']
 files_to_modify: ['app.py', 'worker_scraper.py', 'templates/jobs.html', 'utils/validate_job_csv.py']
 code_patterns: ['check_phone batch', '_normalize_phone_for_api', 'scraping_jobs results_path', 'upload_csv_leads job_id', 'extract_phone_from_whatsapp_link', 'phone_col whatsapp_link_col']
@@ -163,14 +164,14 @@ curl --request POST \
 
 ### Acceptance Criteria
 
-- [ ] **AC1:** Given upload de CSV com 100 números (15 sem WhatsApp), when upload concluído com user tem Uazapi, then CSV sobrescrito com 85 linhas; job.lead_count=85; resposta JSON inclui validated=true, valid=85, invalid=15
-- [ ] **AC2:** Given extração completa com 50 leads, when worker finaliza, then validate_job_csv é chamado; CSV atualizado com apenas válidos; lead_count atualizado no job
-- [ ] **AC3:** Given usuário sem instância Uazapi, when upload ou extração, then validação é skip (lista não modificada); sem erro; resposta upload com validated=false
-- [ ] **AC4:** Given check_phone retorna 504/timeout em um batch, when validate_job_csv, then batches_skipped; partial=true; CSV mantém linhas dos batches que validaram; retorna resultado parcial
-- [ ] **AC5:** Given job de outro usuário, when validate_job_csv(job_id, user_id), then retorna None (ownership verificado)
-- [ ] **AC6:** Given CSV sem coluna phone ou whatsapp_link, when validate_job_csv, then retorna None cedo; CSV permanece intacto; log "skip: no phone column"
-- [ ] **AC7:** Given upload com user Uazapi, when validate_job_csv lança exceção, then upload retorna job_id com validated=false; job não é perdido
-- [ ] **AC8:** Given worker com dfs vazio (sem CSVs válidos), when job completa, then NÃO chama validate_job_csv; update_job_status com lead_count=0
+- [x] **AC1:** Given upload de CSV com 100 números (15 sem WhatsApp), when upload concluído com user tem Uazapi, then CSV sobrescrito com 85 linhas; job.lead_count=85; resposta JSON inclui validated=true, valid=85, invalid=15
+- [x] **AC2:** Given extração completa com 50 leads, when worker finaliza, then validate_job_csv é chamado; CSV atualizado com apenas válidos; lead_count atualizado no job
+- [x] **AC3:** Given usuário sem instância Uazapi, when upload ou extração, then validação é skip (lista não modificada); sem erro; resposta upload com validated=false
+- [x] **AC4:** Given check_phone retorna 504/timeout em um batch, when validate_job_csv, then batches_skipped; partial=true; CSV mantém linhas dos batches que validaram; retorna resultado parcial
+- [x] **AC5:** Given job de outro usuário, when validate_job_csv(job_id, user_id), then retorna None (ownership verificado)
+- [x] **AC6:** Given CSV sem coluna phone ou whatsapp_link, when validate_job_csv, then retorna None cedo; CSV permanece intacto; log "skip: no phone column"
+- [x] **AC7:** Given upload com user Uazapi, when validate_job_csv lança exceção, then upload retorna job_id com validated=false; job não é perdido
+- [x] **AC8:** Given worker com dfs vazio (sem CSVs válidos), when job completa, then NÃO chama validate_job_csv; update_job_status com lead_count=0
 
 ### Dependencies
 

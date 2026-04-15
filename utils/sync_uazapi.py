@@ -1,10 +1,12 @@
 """
 Sincroniza campaign_leads com a API Uazapi (list_messages / list_folders / message/find).
 
-- list_folders: agregados log_success/log_failed (podem divergir do número de leads).
+- list_folders: **fonte de verdade** para agregados log_success/log_failed na pasta (contadores de campanha).
 - Quando a pasta está finalizada e há >= ~80% do planejado, ou log_success > planned_count,
   aplica pente fino: POST /message/find por chat (chatid=55...@s.whatsapp.net) e confere
   send_folder_id nas mensagens. Desligar: UAZAPI_MESSAGE_FIND=0
+- Se a pasta **não** aparece em listfolders mas listmessages não retorna erro: **não** há fallback
+  em loop Sent/Failed/Scheduled (reduz carga no servidor); confia no próximo listfolders (~10 min).
 - Contagens em campaign_stage_sends são limitadas a planned_count para evitar 10/9 no UI.
 
 Usado por app.py (rota sync-uazapi) e worker_cadence (antes do rollover).
@@ -501,7 +503,38 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
         stage_guard = _cadence_stage_sql_guard(send.get("stage") or "")
 
         ctx = {"campaign_id": campaign_id, "instance_id": send.get("instance_id")}
-        folders_list = uazapi_service.list_folders(send_token, context=ctx) or []
+        folders_raw = uazapi_service.list_folders(send_token, context=ctx)
+        # None = falha de transporte/HTTP (ver UazapiService.list_folders). Não tratar como
+        # "pasta ausente" nem correr probe→failed (Task 7 / AC5 — evita falso órfão).
+        if folders_raw is None:
+            if debug:
+                print(
+                    f"ℹ️ [Uazapi Sync] list_folders indisponível; sem SSOT neste ciclo — não inferir órfão. "
+                    f"send_id={send.get('id')} folder_id={fid}"
+                )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE campaign_stage_sends
+                       SET last_sync_at = NOW(), updated_at = NOW()
+                       WHERE id = %s""",
+                    (send["id"],),
+                )
+            continue
+        if not isinstance(folders_raw, list):
+            if debug:
+                print(
+                    f"ℹ️ [Uazapi Sync] list_folders retorno inesperado (não-lista); adiar sync. "
+                    f"send_id={send.get('id')} folder_id={fid}"
+                )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE campaign_stage_sends
+                       SET last_sync_at = NOW(), updated_at = NOW()
+                       WHERE id = %s""",
+                    (send["id"],),
+                )
+            continue
+        folders_list = folders_raw
         folder_info = None
         for f in folders_list:
             cur_fid = _normalize_folder_id(f.get("id") or f.get("folder_id") or f.get("folderId"))
@@ -509,124 +542,55 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                 folder_info = f
                 break
         if not folder_info:
-            # Fallback resiliente: quando list_folders falha/diverge, reconciliar via list_messages.
+            # Pasta ausente em listfolders: pode ser atraso da API, ou pasta órfã (ex.: API devolveu
+            # folder_id no advanced mas removeu da fila sem enviar — esperaríamos queued/scheduled).
+            probe = uazapi_service.list_messages(
+                send_token,
+                fid,
+                message_status="Scheduled",
+                page=1,
+                page_size=1,
+                context=ctx,
+            )
+            if probe is None:
+                # Uma linha JSON para agregadores / suporte (Task 4 spec n8n-sync-observabilidade).
+                print(
+                    json.dumps(
+                        {
+                            "event": "uazapi_stage_send_orphan_probe_null",
+                            "campaign_id": campaign_id,
+                            "send_id": send["id"],
+                            "instance_id": send.get("instance_id"),
+                            "folder_id": fid,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE campaign_stage_sends
+                           SET success_count = 0, failed_count = 0, status = 'failed',
+                               last_sync_at = NOW(), updated_at = NOW()
+                           WHERE id = %s""",
+                        (send["id"],),
+                    )
+                continue
+
+            # Pasta ainda não listada em listfolders mas listmessages não deu 400: não fazer fallback
+            # pesado (Sent/Failed/Scheduled em loop). Não é SSOT, sobrecarrega o servidor e o total em
+            # listmessages não é fiável. O próximo sync (~10 min) reconsulta listfolders.
             if debug:
                 print(
-                    f"ℹ️ [Uazapi Sync] folder não encontrado em list_folders; usando fallback list_messages "
-                    f"(campaign={campaign_id}, send_id={send.get('id')}, stage={send.get('stage')}, folder_id={fid})"
+                    f"ℹ️ [Uazapi Sync] folder ausente em listfolders, listmessages OK (não órfã); "
+                    f"sem batelada list_messages — SSOT=listfolders. send_id={send.get('id')} folder_id={fid}"
                 )
-
-            sent_phones_fb = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Sent", context=ctx)
-            failed_phones_fb = fetch_all_phones_by_status(uazapi_service, send_token, fid, "Failed", context=ctx)
-            counts_fb = get_uazapi_campaign_counts(uazapi_service, send_token, fid, context=ctx)
-            scheduled_fb = int(counts_fb.get("scheduled") or 0)
-
-            lead_ids = send.get("lead_ids") or []
-            if isinstance(lead_ids, str):
-                try:
-                    lead_ids = json.loads(lead_ids)
-                except Exception:
-                    lead_ids = []
-
-            if lead_ids:
-                sent_ids_fb, failed_ids_fb = _reconcile_send_by_messages(
-                    conn=conn,
-                    campaign_id=campaign_id,
-                    lead_ids=lead_ids,
-                    sent_phones=sent_phones_fb,
-                    failed_phones=failed_phones_fb,
-                )
-                if not sent_ids_fb and not failed_ids_fb:
-                    sent_ids_fb, failed_ids_fb = _reconcile_stage_by_messages(
-                        conn=conn,
-                        campaign_id=campaign_id,
-                        stage=send.get("stage"),
-                        sent_phones=sent_phones_fb,
-                        failed_phones=failed_phones_fb,
-                    )
-            else:
-                sent_ids_fb, failed_ids_fb = _reconcile_stage_by_messages(
-                    conn=conn,
-                    campaign_id=campaign_id,
-                    stage=send.get("stage"),
-                    sent_phones=sent_phones_fb,
-                    failed_phones=failed_phones_fb,
-                )
-
-            if sent_ids_fb:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """UPDATE campaign_leads
-                           SET status = 'sent',
-                               sent_at = NOW(),
-                               current_step = %s,
-                               last_message_sent_at = NOW(),
-                               last_sent_stage = COALESCE(%s, last_sent_stage),
-                               last_sent_instance_id = COALESCE(%s, last_sent_instance_id),
-                               last_sent_instance_remote_jid = COALESCE(%s, last_sent_instance_remote_jid),
-                               last_sent_folder_id = COALESCE(%s, last_sent_folder_id)
-                           WHERE id = ANY(%s)
-                             AND campaign_id = %s
-                             AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
-                        + stage_guard,
-                        (
-                            _lead_step_after_confirmed_send(send.get("stage") or ""),
-                            send.get("stage"),
-                            send.get("instance_id"),
-                            send.get("instance_remote_jid"),
-                            fid,
-                            list(sent_ids_fb),
-                            campaign_id,
-                        ),
-                    )
-                    updated_sent += cur.rowcount
-
-            if failed_ids_fb:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """UPDATE campaign_leads
-                           SET status = 'failed',
-                               sent_at = COALESCE(sent_at, NOW()),
-                               last_sent_stage = COALESCE(%s, last_sent_stage),
-                               last_sent_instance_id = COALESCE(%s, last_sent_instance_id),
-                               last_sent_instance_remote_jid = COALESCE(%s, last_sent_instance_remote_jid),
-                               last_sent_folder_id = COALESCE(%s, last_sent_folder_id)
-                           WHERE id = ANY(%s)
-                             AND campaign_id = %s
-                             AND COALESCE(removed_from_funnel, FALSE) = FALSE
-                             AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
-                        + stage_guard,
-                        (
-                            send.get("stage"),
-                            send.get("instance_id"),
-                            send.get("instance_remote_jid"),
-                            fid,
-                            list(failed_ids_fb),
-                            campaign_id,
-                        ),
-                    )
-                    updated_failed += cur.rowcount
-
-            success_fb = len(sent_ids_fb)
-            failed_fb = len(failed_ids_fb)
-            if scheduled_fb > 0:
-                normalized_status_fb = "running"
-            elif success_fb > 0 or failed_fb > 0:
-                normalized_status_fb = "partial"
-            else:
-                normalized_status_fb = "running"
-
             with conn.cursor() as cur:
                 cur.execute(
                     """UPDATE campaign_stage_sends
-                       SET success_count = %s,
-                           failed_count = %s,
-                           status = %s,
-                           last_sync_at = NOW(),
-                           updated_at = NOW()
+                       SET last_sync_at = NOW(), updated_at = NOW()
                        WHERE id = %s""",
-                    (success_fb, failed_fb, normalized_status_fb, send["id"]),
+                    (send["id"],),
                 )
             continue
 

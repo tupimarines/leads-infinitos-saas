@@ -356,7 +356,10 @@ class UazapiService:
         Lista campanhas via GET /sender/listfolders.
         status: "Active" | "Archived" (opcional).
         context: dict opcional (campaign_id, instance_id) para logs de erro.
-        Retorna array de pastas/campanhas.
+        Retorna lista de pastas em sucesso (HTTP 200, corpo JSON em array).
+
+        Retorna None em falha de transporte/HTTP (timeout, rede, status ≠200, 401 token inválido,
+        etc.). O sync não deve inferir pasta órfã quando este método devolve None (Task 7 / AC5).
         """
         url = f"{self.base_url}/sender/listfolders"
         headers = {"token": token}

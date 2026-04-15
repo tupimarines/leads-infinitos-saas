@@ -39,7 +39,7 @@ except ImportError:
     uazapi_service = None
 
 # Limites compartilhados
-from utils.limits import can_create_campaign_today
+from utils.limits import can_create_campaign_today, INITIAL_CHUNK_ACTIVE_SEND_STATUSES
 from utils.sync_uazapi import (
     sync_campaign_leads_from_uazapi,
     get_uazapi_campaign_counts,
@@ -66,6 +66,10 @@ CADENCE_POLL_INTERVAL = 30  # seconds (mais frequente para pegar scheduled_start
 SAFETY_BUFFER_MINUTES = 5
 PRE_DISPARO_WINDOW_MIN = 2
 PRE_DISPARO_WINDOW_MAX = 5
+# UAZAPI — contadores de campanha (decisão travada; evitar regressão):
+# SSOT dos agregados é GET /sender/listfolders (log_sucess, log_failed, log_total, status).
+# Não usar listmessages como total oficial (teto/paginação do provedor).
+# O intervalo abaixo casa com o filtro last_sync_at (~10 min) em _sync_active_stage_folders.
 STAGE_SYNC_INTERVAL_MINUTES = 10
 VERIFY_FOLDER_AFTER_SECONDS = 180  # list_folders 3 min após create_advanced_campaign
 
@@ -829,8 +833,10 @@ def _process_verify_folder_queue():
 
 def _sync_active_stage_folders(conn):
     """
-    Sync explícito de folders ativos a cada 10 min.
-    Atualiza progresso por stage/instância com base em listfolders.
+    Sincroniza pastas UAZAPI ativas por campanha, respeitando STAGE_SYNC_INTERVAL_MINUTES.
+
+    Contagem/progresso alinhados à API vêm de listfolders apenas; listmessages não substitui
+    esse SSOT para totais globais. O SQL limita re-sync ao intervalo de ~10 min (last_sync_at).
     """
     if not uazapi_service:
         return
@@ -1152,6 +1158,11 @@ def schedule_next_initial_chunk(campaign, conn):
     """
     Para campanhas Uazapi: agenda o próximo chunk de 30 mensagens (stage initial) para
     o próximo horário de envio. Corrige o bug onde chunks 2+ nunca eram enviados.
+
+    Duplicação por instância: só pula se já existir send initial em um dos estados em
+    INITIAL_CHUNK_ACTIVE_SEND_STATUSES (scheduled/running/partial). Sends em failed ou
+    done não bloqueiam — necessário para libertar a instância após deteção de pasta órfã
+    no sync periódico (utils/sync_uazapi.py).
     """
     cid = campaign['id']
     if not campaign.get('use_uazapi_sender') or not uazapi_service:
@@ -1245,10 +1256,10 @@ def schedule_next_initial_chunk(campaign, conn):
                 """
                 SELECT id FROM campaign_stage_sends
                 WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
-                  AND status IN ('scheduled', 'running', 'partial')
+                  AND status = ANY(%s)
                 LIMIT 1
                 """,
-                (cid, inst['instance_id']),
+                (cid, inst['instance_id'], list(INITIAL_CHUNK_ACTIVE_SEND_STATUSES)),
             )
             if cur.fetchone():
                 continue  # Instância já tem chunk ativo — evita duplicação

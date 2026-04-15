@@ -1,0 +1,192 @@
+{
+  "name": "uazapi-diagnostico-campanha-advanced",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1f2e3d4-trigger",
+      "name": "When clicking Test workflow",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-1040, 120]
+    },
+    {
+      "parameters": {
+        "content": "## UAZAPI — diagnóstico (advanced + listfolders + listmessages)\n\n- **Base:** `https://neurix.uazapi.com`\n- Token **fixo** nos headers — **não commite** em repo público; **rotacione** após testes.\n- Fluxo: Code monta `messages` (textos aleatórios) → `POST /sender/advanced` → `GET /sender/listfolders` → Code compara `folder_id` do create com a lista (cenário tipo print: pasta **não listada**).\n- Depois: 3× `POST /sender/listmessages` com `page`/`pageSize` (igual `services/uazapi.py`).\n\n### Opcional\n- Insira um nó **Wait** entre **Criar** e **GET listfolders** se quiser dar tempo da fila indexar a pasta.\n- Para testar `r34e1…` antigo: desative **Montar** + **Criar** e nos 3 listmessages troque a expressão do `folder_id` por string fixa.",
+        "height": 560,
+        "width": 440,
+        "color": 5
+      },
+      "id": "b2c3d4e5-note",
+      "name": "Notas",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1120, -360]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/** BR DDD 41: números locais → 55 + dígitos (API sem @s.whatsapp.net). */\nconst digits = [\n  '4137982599','4137982908','4137982960','4137982595','4137981318','4137981306',\n  '4137981158','4137981130','4137980902','4137984981','4137984966','4137984019','4137984061'\n];\nconst toApiNumber = (d) => '55' + String(d).replace(/\\D/g, '');\nconst variants = [\n  'Olá! Tudo bem? Mensagem de teste n8n.',\n  'Oi — campanha diagnóstico. Pode ignorar.',\n  '[TESTE] disparo verificado pela fila UAZAPI.',\n  'Mensagem aleatória A — Leads Infinitos.',\n  'Mensagem aleatória B — verificação de envio.',\n  'Oi! Conteúdo randômico para diff entre destinos.',\n  'Campanha lab: texto variado por destinatário.'\n];\nconst pick = (arr) => arr[Math.floor(Math.random() * arr.length)];\nconst messages = digits.map((d, i) => ({\n  number: toApiNumber(d),\n  type: 'text',\n  text: `${pick(variants)} (#${i + 1} · ${Math.random().toString(36).slice(2, 9)})`,\n}));\nreturn [{\n  json: {\n    delayMin: 3,\n    delayMax: 8,\n    info: `n8n-diag-advanced-${Date.now()}`,\n    scheduled_for: 1,\n    messages,\n  }\n}];"
+      },
+      "id": "c3d4e5f6-build",
+      "name": "Montar payload advanced",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-780, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://neurix.uazapi.com/sender/advanced",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "token", "value": "034ad53b-9e71-43df-b735-ccb570dcc9ac" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "d4e5f6a7-create",
+      "name": "Criar campanha advanced",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-520, 120]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://neurix.uazapi.com/sender/listfolders",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "token", "value": "034ad53b-9e71-43df-b735-ccb570dcc9ac" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f6a7b8c9-listf",
+      "name": "GET listfolders",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-260, 120]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const create = $('Criar campanha advanced').first().json;\nconst folderId = create.folder_id ?? create.folderId ?? null;\nconst items = $input.all();\nlet folders = [];\nconst j0 = items[0]?.json;\nif (Array.isArray(j0)) {\n  folders = j0;\n} else {\n  for (const it of items) {\n    const j = it.json;\n    if (j && j.id) folders.push(j);\n  }\n}\nconst found = folderId ? folders.find((f) => f.id === folderId) : null;\nreturn [{\n  json: {\n    folder_id_from_create: folderId,\n    create_full_response: create,\n    folder_found_in_listfolders: !!found,\n    folder_row_from_api: found ?? null,\n    total_folders_in_response: folders.length,\n    ids_sample: folders.slice(0, 12).map((f) => f.id),\n  },\n}];"
+      },
+      "id": "a7b8c9d0-diag",
+      "name": "Diagnóstico folder vs listfolders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://neurix.uazapi.com/sender/listmessages",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "token", "value": "034ad53b-9e71-43df-b735-ccb570dcc9ac" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ folder_id: $('Criar campanha advanced').first().json.folder_id, messageStatus: 'Scheduled', page: 1, pageSize: 100 }) }}",
+        "options": {}
+      },
+      "id": "b8c9d0e1-lms",
+      "name": "POST listmessages Scheduled",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, -40]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://neurix.uazapi.com/sender/listmessages",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "token", "value": "034ad53b-9e71-43df-b735-ccb570dcc9ac" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ folder_id: $('Criar campanha advanced').first().json.folder_id, messageStatus: 'Sent', page: 1, pageSize: 100 }) }}",
+        "options": {}
+      },
+      "id": "c9d0e1f2-lm-sent",
+      "name": "POST listmessages Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://neurix.uazapi.com/sender/listmessages",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "token", "value": "034ad53b-9e71-43df-b735-ccb570dcc9ac" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ folder_id: $('Criar campanha advanced').first().json.folder_id, messageStatus: 'Failed', page: 1, pageSize: 100 }) }}",
+        "options": {}
+      },
+      "id": "d0e1f2a3-lm-fail",
+      "name": "POST listmessages Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 280]
+    }
+  ],
+  "connections": {
+    "When clicking Test workflow": {
+      "main": [[{ "node": "Montar payload advanced", "type": "main", "index": 0 }]]
+    },
+    "Montar payload advanced": {
+      "main": [[{ "node": "Criar campanha advanced", "type": "main", "index": 0 }]]
+    },
+    "Criar campanha advanced": {
+      "main": [[{ "node": "GET listfolders", "type": "main", "index": 0 }]]
+    },
+    "GET listfolders": {
+      "main": [[{ "node": "Diagnóstico folder vs listfolders", "type": "main", "index": 0 }]]
+    },
+    "Diagnóstico folder vs listfolders": {
+      "main": [
+        [
+          { "node": "POST listmessages Scheduled", "type": "main", "index": 0 },
+          { "node": "POST listmessages Sent", "type": "main", "index": 0 },
+          { "node": "POST listmessages Failed", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "meta": { "instanceId": "" },
+  "tags": []
+}

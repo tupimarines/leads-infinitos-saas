@@ -1,0 +1,12 @@
+{
+  "delayMin": 1,
+  "delayMax": 2,
+  "info": "teste-curl-4numeros",
+  "scheduled_for": 1,
+  "messages": [
+    {"number": "554137984981", "type": "text", "text": "Teste Maria"},
+    {"number": "554137984019", "type": "text", "text": "Teste Ana"},
+    {"number": "554137984966", "type": "text", "text": "Teste João"},
+    {"number": "554137984741", "type": "text", "text": "Teste Pedro"}
+  ]
+}

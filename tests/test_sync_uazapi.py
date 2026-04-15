@@ -1,4 +1,6 @@
 """Testes para utils/sync_uazapi - match de telefone API ↔ DB."""
+import json
+
 import pytest
 
 from utils.sync_uazapi import (
@@ -124,7 +126,9 @@ class TestReconcileSendByMessages:
 
 
 class TestSyncCampaignLeadsFromUazapi:
-    def test_sync_fallback_listmessages_updates_step_and_status(self):
+    def test_sync_listfolders_updates_leads_when_folder_present(self):
+        """SSOT listfolders: pasta encontrada na lista → atualiza leads (sem ramo pesado list_messages)."""
+
         class _FakeCursor:
             def __init__(self, conn):
                 self.conn = conn
@@ -146,7 +150,7 @@ class TestSyncCampaignLeadsFromUazapi:
                 self._fetchone = {}
 
                 if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
-                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "main-folder"}
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "folder-fu1"}
                 elif "FROM campaign_stage_sends css" in compact:
                     self._fetchall = [{
                         "id": 1,
@@ -162,7 +166,6 @@ class TestSyncCampaignLeadsFromUazapi:
                 elif "SELECT id, phone, whatsapp_link FROM campaign_leads" in compact:
                     self._fetchall = [{"id": 55, "phone": "11999999999", "whatsapp_link": None}]
                 elif "UPDATE campaign_leads SET status = 'sent'" in compact:
-                    # follow1 deve avançar para current_step=3
                     assert params[0] == 3
                     assert params[1] == "follow1"
                     assert list(params[5]) == [55]
@@ -189,28 +192,219 @@ class TestSyncCampaignLeadsFromUazapi:
 
         class _FakeUazapiService:
             def list_folders(self, _token, context=None):
-                # Força fallback list_messages (folder não encontrado)
-                return [{"id": "another-folder", "status": "running"}]
+                return [{
+                    "id": "folder-fu1",
+                    "status": "done",
+                    "log_sucess": 1,
+                    "log_failed": 0,
+                    "log_total": 1,
+                }]
 
-            def list_messages(self, _token, _folder_id, message_status=None, page=1, page_size=500, context=None):
-                if message_status == "Sent":
-                    return {"messages": [{"chatid": "5511999999999@s.whatsapp.net"}], "pagination": {"lastPage": 1}}
-                if message_status == "Failed":
-                    return {"messages": [], "pagination": {"lastPage": 1}}
-                if message_status == "Scheduled":
-                    return {"messages": [], "pagination": {"lastPage": 1}}
-                return {"messages": [], "pagination": {"lastPage": 1}}
+            def list_messages(self, *_a, **_kw):
+                raise AssertionError("list_messages não deve ser chamado neste cenário só-listfolders")
+
+            def message_find(self, *_a, **_kw):
+                return {"messages": []}
 
         conn = _FakeConn()
         result = sync_campaign_leads_from_uazapi(
             conn=conn,
             campaign_id=501,
             token="main-token",
-            folder_id="main-folder",
+            folder_id="folder-fu1",
             uazapi_service=_FakeUazapiService(),
-            debug=True,
+            debug=False,
         )
 
         assert result["updated_sent"] == 1
         assert result["updated_failed"] == 0
         assert conn.committed is True
+
+    def test_sync_orphan_folder_listmessages_error_marks_send_failed(self, capsys):
+        """Pasta ausente em listfolders + listmessages None (ex. 400) → failed, liberta instância."""
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "orphan-folder"}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 99,
+                        "stage": "initial",
+                        "instance_id": 108,
+                        "instance_remote_jid": "5511999999999@s.whatsapp.net",
+                        "uazapi_folder_id": "r34orphan",
+                        "lead_ids": [1, 2],
+                        "planned_count": 22,
+                        "status": "running",
+                        "apikey": "tok-orphan",
+                    }]
+                elif "UPDATE campaign_stage_sends" in compact and "status = 'failed'" in compact:
+                    assert params == (99,)
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return [{"id": "other-folder", "status": "done", "log_sucess": 1, "log_total": 1}]
+
+            def list_messages(self, _token, _folder_id, message_status=None, page=1, page_size=500, context=None):
+                return None
+
+        conn = _FakeConn()
+        result = sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=187,
+            token="tok-orphan",
+            folder_id="orphan-folder",
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+
+        assert result["updated_sent"] == 0
+        assert result["updated_failed"] == 0
+        assert conn.committed is True
+        orphan_updates = [
+            p for q, p in conn.executed if "UPDATE campaign_stage_sends" in q and "status = 'failed'" in q
+        ]
+        assert orphan_updates == [(99,)]
+
+        out = capsys.readouterr().out
+        orphan_line = next(
+            (
+                ln
+                for ln in out.splitlines()
+                if '"event": "uazapi_stage_send_orphan_probe_null"' in ln
+            ),
+            None,
+        )
+        assert orphan_line is not None
+        payload = json.loads(orphan_line)
+        assert payload == {
+            "event": "uazapi_stage_send_orphan_probe_null",
+            "campaign_id": 187,
+            "send_id": 99,
+            "instance_id": 108,
+            "folder_id": "r34orphan",
+        }
+
+    def test_sync_listfolders_none_does_not_mark_failed_even_if_probe_would_be_none(self):
+        """Task 7 / AC5: falha em list_folders (None) não deve marcar failed nem chamar probe."""
+
+        class _FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                self.conn.executed.append((compact, params))
+                self.rowcount = 0
+                self._fetchall = []
+                self._fetchone = {}
+
+                if "SELECT uazapi_folder_id, uazapi_last_send_lead_ids, cadence_config, enable_cadence" in compact and "use_uazapi_sender" in compact:
+                    self._fetchone = {"enable_cadence": True, "use_uazapi_sender": True, "uazapi_folder_id": "x"}
+                elif "FROM campaign_stage_sends css" in compact:
+                    self._fetchall = [{
+                        "id": 100,
+                        "stage": "initial",
+                        "instance_id": 1,
+                        "instance_remote_jid": None,
+                        "uazapi_folder_id": "folder-net-err",
+                        "lead_ids": [1],
+                        "planned_count": 1,
+                        "status": "running",
+                        "apikey": "tok",
+                    }]
+                elif "UPDATE campaign_stage_sends" in compact and "last_sync_at" in compact:
+                    self.rowcount = 1
+
+            def fetchall(self):
+                return self._fetchall
+
+            def fetchone(self):
+                return self._fetchone
+
+        class _FakeConn:
+            def __init__(self):
+                self.executed = []
+                self.committed = False
+
+            def cursor(self, cursor_factory=None):
+                return _FakeCursor(self)
+
+            def commit(self):
+                self.committed = True
+
+        class _FakeUazapiService:
+            def list_folders(self, _token, context=None):
+                return None
+
+            def list_messages(self, *_a, **_kw):
+                raise AssertionError("list_messages não deve ser chamado quando list_folders falhou")
+
+        conn = _FakeConn()
+        sync_campaign_leads_from_uazapi(
+            conn=conn,
+            campaign_id=200,
+            token="tok",
+            folder_id="x",
+            uazapi_service=_FakeUazapiService(),
+            debug=False,
+        )
+
+        failed_updates = [
+            p for q, p in conn.executed if "UPDATE campaign_stage_sends" in q and "status = 'failed'" in q
+        ]
+        assert failed_updates == []
+        last_sync_only = [
+            (q, p)
+            for q, p in conn.executed
+            if "UPDATE campaign_stage_sends" in q
+            and "last_sync_at" in q
+            and "status = 'failed'" not in q
+        ]
+        assert any(p == (100,) for _q, p in last_sync_only)
