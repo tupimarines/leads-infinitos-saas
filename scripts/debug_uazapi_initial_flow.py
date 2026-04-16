@@ -2,6 +2,9 @@
 """
 Traço do fluxo inicial Uazapi (chunks de 30): DB + opcional API.
 
+Para diagnóstico completo (token + listfolders + contagens + prompt para agente), use:
+  python scripts/diagnostico_campanha_uazapi.py <campaign_id>
+
 Uso:
   python scripts/debug_uazapi_initial_flow.py <campaign_id>
   UAZAPI_DEBUG=1 já loga o JSON de create_advanced_campaign no worker; este script foca em estado local.
