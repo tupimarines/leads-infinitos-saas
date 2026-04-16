@@ -27,7 +27,8 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,6 +40,25 @@ try:
     load_dotenv()
 except Exception:
     pass
+
+
+def _json_friendly(obj: Any) -> Any:
+    """Converte datetime/Decimal/etc. para tipos aceitos por json.dumps."""
+    if obj is None:
+        return None
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {str(k): _json_friendly(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_friendly(v) for v in obj]
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode("utf-8", errors="replace")
+    return obj
 
 
 def _mask_token(t: Optional[str]) -> str:
@@ -78,7 +98,7 @@ def _load_db_bundle(cur, campaign_id: int, chunks_limit: int) -> dict[str, Any]:
     if not campaign:
         return {"error": "campaign_not_found", "campaign_id": campaign_id}
 
-    c = dict(campaign)
+    c = _json_friendly(dict(campaign))
     for blob in ("message_template",):
         if isinstance(c.get(blob), str) and len(c[blob] or "") > 2000:
             c[blob] = (c[blob][:2000] + "… [truncado]")
@@ -119,7 +139,7 @@ def _load_db_bundle(cur, campaign_id: int, chunks_limit: int) -> dict[str, Any]:
         """,
         (campaign_id,),
     )
-    instances = [dict(r) for r in (cur.fetchall() or [])]
+    instances = [_json_friendly(dict(r)) for r in (cur.fetchall() or [])]
 
     cur.execute(
         """
@@ -135,11 +155,7 @@ def _load_db_bundle(cur, campaign_id: int, chunks_limit: int) -> dict[str, Any]:
     )
     stage_sends = []
     for r in cur.fetchall() or []:
-        row = dict(r)
-        for k, v in list(row.items()):
-            if isinstance(v, datetime):
-                row[k] = v.isoformat()
-        stage_sends.append(row)
+        stage_sends.append(_json_friendly(dict(r)))
 
     uaz_rows = [i for i in instances if (i.get("api_provider") or "").lower() == "uazapi"]
     primary = None
@@ -382,7 +398,7 @@ def _agent_prompt(bundle: dict[str, Any], api: Optional[dict[str, Any]], heur: d
             "chunk agendado sem folder_id, e defasagem entre DB e API."
         ),
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
 
 
 def main() -> int:
