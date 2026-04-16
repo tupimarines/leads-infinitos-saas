@@ -5268,18 +5268,13 @@ def _create_campaign_core(user_id, data, admin_id=None):
                             "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
                             (first_folder_id, json.dumps(all_lead_ids) if all_lead_ids else None, campaign_id)
                         )
-                        # Com cadência: NÃO marcar em lote — worker_cadence fará sync via list_messages antes do rollover
-                        if not enable_cadence:
-                            cur.execute(
-                                """UPDATE campaign_leads SET status = 'sent', sent_at = COALESCE(sent_at, NOW()),
-                                   current_step = 1 WHERE campaign_id = %s AND id = ANY(%s)""",
-                                (campaign_id, all_lead_ids)
-                            )
-                        else:
-                            cur.execute(
-                                """UPDATE campaign_leads SET current_step = 1 WHERE campaign_id = %s AND id = ANY(%s)""",
-                                (campaign_id, all_lead_ids)
-                            )
+                        # UAZAPI: create_advanced_campaign só cria a pasta na fila — não confirma entrega.
+                        # Nunca marcar status=sent em lote aqui (bug: UI "Enviado" para todos com chunk partial).
+                        # campaign_leads ficam pending até sync + message_find (ou fluxo legado explícito).
+                        cur.execute(
+                            """UPDATE campaign_leads SET current_step = 1 WHERE campaign_id = %s AND id = ANY(%s)""",
+                            (campaign_id, all_lead_ids)
+                        )
                     conn.commit()
                     conn.close()
                     if errors:

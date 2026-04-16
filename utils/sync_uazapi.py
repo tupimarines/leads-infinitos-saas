@@ -108,6 +108,61 @@ def _cadence_stage_sql_guard(stage: str) -> str:
     return ""
 
 
+def _repair_leads_sent_without_folder_on_active_folder(
+    conn, campaign_id, lead_ids, stage_guard: str, folder_status: str
+):
+    """
+    Corrige dados já gravados pelo bug em app.py (campanha UAZAPI sem enable_cadence marcava
+    todos os lead_ids como sent ao criar a pasta). Repõe ``pending`` só quando a pasta ainda
+    não está terminal e não há evidência ``last_sent_folder_id`` — seguro para o find reconciliar.
+    """
+    st = (folder_status or "").lower() or "running"
+    if st in (
+        "done",
+        "concluído",
+        "completed",
+        "concluido",
+        "failed",
+        "error",
+        "cancelled",
+        "canceled",
+    ):
+        return 0
+    if st not in (
+        "partial",
+        "running",
+        "queued",
+        "scheduled",
+        "sending",
+        "inconsistent",
+    ):
+        return 0
+    ids = []
+    for x in lead_ids or []:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE campaign_leads
+               SET status = 'pending',
+                   sent_at = NULL,
+                   last_message_sent_at = NULL
+               WHERE campaign_id = %s
+                 AND id = ANY(%s)
+                 AND status = 'sent'
+                 AND (last_sent_folder_id IS NULL OR BTRIM(last_sent_folder_id::text) = '')
+                 AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                 AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')"""
+            + stage_guard,
+            (campaign_id, ids),
+        )
+        return int(cur.rowcount or 0)
+
+
 def _reconcile_send_by_messages(conn, campaign_id, lead_ids, sent_phones, failed_phones):
     """
     DEPRECATED (Task 4 / D3): reconciliação por enumeração ``list_messages`` Sent/Failed.
@@ -998,6 +1053,24 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             print(
                 f"ℹ️ [Uazapi Sync] campaign={campaign_id} send_id={send.get('id')} stage={send.get('stage')} "
                 f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"
+            )
+
+        repaired = _repair_leads_sent_without_folder_on_active_folder(
+            conn, campaign_id, lead_ids, stage_guard, status
+        )
+        if repaired > 0:
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_repaired_sent_without_folder",
+                        "campaign_id": campaign_id,
+                        "send_id": send.get("id"),
+                        "folder_id": fid,
+                        "rows": repaired,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
             )
 
         # log_success em queued/scheduled costuma refletir fila aceita, não entrega no WhatsApp.
