@@ -3068,13 +3068,18 @@ def admin_campaigns():
         campaigns_out = []
         for c in campaigns:
             c = dict(c)
+            rec = None
             if c.get("enable_cadence") and c.get("use_uazapi_sender"):
                 rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
                     conn, c["id"], c, int(c.get("total_leads") or 0)
                 )
-                if rec:
-                    c["sent_count"] = rec["sent"]
-                    c["pending_count"] = rec["pending"]
+            elif c.get("use_uazapi_sender") and c.get("uazapi_folder_id") and not c.get("enable_cadence"):
+                rec = _reconciled_uazapi_single_folder_list_folders(
+                    c["id"], c, int(c.get("total_leads") or 0)
+                )
+            if rec:
+                c["sent_count"] = rec["sent"]
+                c["pending_count"] = rec["pending"]
             campaigns_out.append(c)
         campaigns = campaigns_out
     finally:
@@ -3176,15 +3181,24 @@ def admin_campaign_detail_api(campaign_id):
             )
             counts = cur.fetchone()
 
-            # Para cadência + Uazapi: mesmo SSOT que Minhas Campanhas (stage_progress initial).
-            if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
+            # Mesmo SSOT que Minhas Campanhas (cadência + stage_progress OU pasta única + list_folders).
+            rec = None
+            if campaign.get("enable_cadence") and campaign.get("use_uazapi_sender"):
                 rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
                     conn, campaign_id, dict(campaign), int(counts.get("total_leads") or 0)
                 )
-                if rec:
-                    counts = dict(counts)
-                    counts["sent_count"] = rec["sent"]
-                    counts["pending_count"] = rec["pending"]
+            elif (
+                campaign.get("use_uazapi_sender")
+                and campaign.get("uazapi_folder_id")
+                and not campaign.get("enable_cadence")
+            ):
+                rec = _reconciled_uazapi_single_folder_list_folders(
+                    campaign_id, dict(campaign), int(counts.get("total_leads") or 0)
+                )
+            if rec:
+                counts = dict(counts)
+                counts["sent_count"] = rec["sent"]
+                counts["pending_count"] = rec["pending"]
     finally:
         conn.close()
 
@@ -3556,7 +3570,7 @@ def admin_sync_campaigns():
                 leads_counts = {r['campaign_id']: r for r in cur.fetchall()}
 
                 cur.execute(
-                    "SELECT id, enable_cadence, use_uazapi_sender FROM campaigns WHERE id = ANY(%s)",
+                    "SELECT id, enable_cadence, use_uazapi_sender, uazapi_folder_id FROM campaigns WHERE id = ANY(%s)",
                     (ids_list,),
                 )
                 flags_by_id = {r["id"]: r for r in cur.fetchall()}
@@ -3567,13 +3581,21 @@ def admin_sync_campaigns():
                 sent = int(lc.get('sent_count') or 0)
                 pending_val = int(lc.get('pending_count') or 0)
                 row = flags_by_id.get(cid)
+                rec = None
                 if row and row.get("enable_cadence") and row.get("use_uazapi_sender"):
                     rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
                         conn, cid, dict(row), total
                     )
-                    if rec:
-                        sent = rec["sent"]
-                        pending_val = rec["pending"]
+                elif (
+                    row
+                    and row.get("use_uazapi_sender")
+                    and row.get("uazapi_folder_id")
+                    and not row.get("enable_cadence")
+                ):
+                    rec = _reconciled_uazapi_single_folder_list_folders(cid, dict(row), total)
+                if rec:
+                    sent = rec["sent"]
+                    pending_val = rec["pending"]
                 result.append({
                     'id': cid,
                     'total_leads': total,
@@ -5941,48 +5963,28 @@ def get_campaign_stats(campaign_id):
         # Campanhas Uazapi SEM cadência: manter list_folders live no folder principal.
         elif campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and not campaign.get('enable_cadence'):
             try:
-                conn2 = get_db_connection()
-                with conn2.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("""
-                        SELECT i.apikey FROM campaign_instances ci
-                        JOIN instances i ON i.id = ci.instance_id
-                        WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
-                        LIMIT 1
-                    """, (campaign_id,))
-                    inst = cur.fetchone()
-                conn2.close()
-                if inst and inst.get('apikey'):
-                    uazapi = UazapiService()
-                    folder_id = campaign['uazapi_folder_id']
-                    token = inst['apikey']
-                    uazapi_sent, uazapi_failed = 0, 0
-                    source_used = None
-
-                    folders = uazapi.list_folders(token)
-                    if isinstance(folders, dict):
-                        folders = folders.get('folders') or folders.get('data') or folders.get('items') or []
-                    if isinstance(folders, list):
-                        for f in folders:
-                            fid = f.get('id') or f.get('folder_id') or f.get('folderId')
-                            if str(fid) == str(folder_id):
-                                uazapi_sent = int(f.get('log_sucess', 0) or f.get('log_delivered', 0) or f.get('log_success', 0) or 0)
-                                uazapi_failed = int(f.get('log_failed', 0) or 0)
-                                log_total = int(f.get('log_total', 0) or 0)
-                                uazapi_scheduled = max(0, log_total - uazapi_sent - uazapi_failed)
-                                uazapi_debug = {"uazapi_sent": uazapi_sent, "uazapi_failed": uazapi_failed, "uazapi_scheduled": uazapi_scheduled, "source": "list_folders"}
-                                source_used = "list_folders"
-                                break
-
-                    if source_used is not None:
-                        sent = uazapi_sent
-                        failed = uazapi_failed
-                        pending = max(0, total_leads - sent - failed) if total_leads else uazapi_scheduled
-                    elif campaign.get('status') == 'running' and total_leads > 0:
-                        now_ts = time.time()
-                        last = _stats_uazapi_warning_last.get(campaign_id, 0)
-                        if now_ts - last >= STATS_UAZAPI_WARNING_COOLDOWN:
-                            print(f"⚠️ [Stats] Campanha {campaign_id} Uazapi: {source_used or 'API'} retornou 0 para todos os status. Verificar API/token.")
-                            _stats_uazapi_warning_last[campaign_id] = now_ts
+                rec2 = _reconciled_uazapi_single_folder_list_folders(
+                    campaign_id, dict(campaign), total_leads
+                )
+                if rec2:
+                    sent = rec2["sent"]
+                    failed = rec2["failed"]
+                    pending = rec2["pending"]
+                    uazapi_scheduled = rec2["uazapi_scheduled"]
+                    uazapi_debug = {
+                        "uazapi_sent": rec2["raw_log_sent"],
+                        "uazapi_failed": rec2["raw_log_failed"],
+                        "uazapi_scheduled": uazapi_scheduled,
+                        "source": "list_folders",
+                    }
+                elif campaign.get('status') == 'running' and total_leads > 0:
+                    now_ts = time.time()
+                    last = _stats_uazapi_warning_last.get(campaign_id, 0)
+                    if now_ts - last >= STATS_UAZAPI_WARNING_COOLDOWN:
+                        print(
+                            f"⚠️ [Stats] Campanha {campaign_id} Uazapi: list_folders não devolveu a pasta ou API falhou. Verificar API/token."
+                        )
+                        _stats_uazapi_warning_last[campaign_id] = now_ts
             except Exception as e:
                 uazapi_debug = {"uazapi_error": str(e)}
                 print(f"⚠️ [Stats] Erro ao buscar stats Uazapi para campanha {campaign_id}: {e}")
@@ -6771,6 +6773,69 @@ def _reconciled_uazapi_cadence_counts_via_stage_progress(conn, campaign_id, camp
         "initial_sent_raw": initial_sent,
         "initial_failed_raw": initial_failed,
     }
+
+
+def _reconciled_uazapi_single_folder_list_folders(campaign_id, campaign_row, total_leads):
+    """
+    SSOT com ``/api/campaigns/<id>/stats`` para Uazapi **sem** cadência: pasta principal
+    em ``campaigns.uazapi_folder_id`` + ``list_folders`` (não usar só ``COUNT`` de leads em ``sent``).
+    """
+    if not (
+        campaign_row.get("use_uazapi_sender")
+        and campaign_row.get("uazapi_folder_id")
+        and not campaign_row.get("enable_cadence")
+    ):
+        return None
+    conn2 = get_db_connection()
+    try:
+        with conn2.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT i.apikey FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                LIMIT 1
+                """,
+                (campaign_id,),
+            )
+            inst = cur.fetchone()
+    finally:
+        conn2.close()
+    if not inst or not inst.get("apikey"):
+        return None
+    uazapi = UazapiService()
+    folder_id = campaign_row.get("uazapi_folder_id")
+    token = inst["apikey"]
+    folders = uazapi.list_folders(token)
+    if isinstance(folders, dict):
+        folders = folders.get("folders") or folders.get("data") or folders.get("items") or []
+    if not isinstance(folders, list):
+        return None
+    for f in folders:
+        fid = f.get("id") or f.get("folder_id") or f.get("folderId")
+        if str(fid) != str(folder_id):
+            continue
+        raw_sent = int(f.get("log_sucess", 0) or f.get("log_delivered", 0) or f.get("log_success", 0) or 0)
+        raw_failed = int(f.get("log_failed", 0) or 0)
+        log_total = int(f.get("log_total", 0) or 0)
+        uazapi_scheduled = max(0, log_total - raw_sent - raw_failed)
+        sent = raw_sent
+        failed = raw_failed
+        pending = max(0, int(total_leads or 0) - sent - failed) if total_leads else uazapi_scheduled
+        if total_leads and int(total_leads) > 0:
+            try:
+                sent = min(int(sent or 0), int(total_leads))
+            except (TypeError, ValueError):
+                pass
+        return {
+            "sent": sent,
+            "pending": pending,
+            "failed": failed,
+            "uazapi_scheduled": uazapi_scheduled,
+            "raw_log_sent": raw_sent,
+            "raw_log_failed": raw_failed,
+        }
+    return None
 
 
 def _is_previous_stage_fully_done(campaign_id, step):
