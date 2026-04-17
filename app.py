@@ -3064,39 +3064,21 @@ def admin_campaigns():
         
         campaigns = cur.fetchall()
 
-        # Para campanhas com cadência + Uazapi: sobrescrever sent/pending com stage initial.
-        cadence_ids = [c['id'] for c in campaigns if c.get('enable_cadence') and c.get('use_uazapi_sender')]
-        initial_agg = {}
-        if cadence_ids:
-            cur.execute(
-                """
-                SELECT campaign_id,
-                       COALESCE(SUM(success_count), 0)::int AS initial_sent,
-                       COALESCE(SUM(failed_count), 0)::int AS initial_failed
-                FROM campaign_stage_sends
-                WHERE campaign_id = ANY(%s) AND stage = 'initial'
-                GROUP BY campaign_id
-                """,
-                (cadence_ids,),
-            )
-            for r in cur.fetchall():
-                initial_agg[r['campaign_id']] = r
-
-    conn.close()
-
-    if initial_agg:
+    try:
         campaigns_out = []
         for c in campaigns:
             c = dict(c)
-            agg = initial_agg.get(c['id'])
-            if agg:
-                total = int(c.get('total_leads') or 0)
-                init_sent = int(agg['initial_sent'] or 0)
-                init_failed = int(agg['initial_failed'] or 0)
-                c['sent_count'] = init_sent
-                c['pending_count'] = max(0, total - init_sent - init_failed)
+            if c.get("enable_cadence") and c.get("use_uazapi_sender"):
+                rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
+                    conn, c["id"], c, int(c.get("total_leads") or 0)
+                )
+                if rec:
+                    c["sent_count"] = rec["sent"]
+                    c["pending_count"] = rec["pending"]
             campaigns_out.append(c)
         campaigns = campaigns_out
+    finally:
+        conn.close()
 
     counts = {
         'all': count_all,
@@ -3194,25 +3176,15 @@ def admin_campaign_detail_api(campaign_id):
             )
             counts = cur.fetchone()
 
-            # Para cadência + Uazapi: sent/pending da stage initial (mais preciso que campaign_leads).
+            # Para cadência + Uazapi: mesmo SSOT que Minhas Campanhas (stage_progress initial).
             if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
-                cur.execute(
-                    """
-                    SELECT COALESCE(SUM(success_count), 0)::int AS initial_sent,
-                           COALESCE(SUM(failed_count), 0)::int AS initial_failed
-                    FROM campaign_stage_sends
-                    WHERE campaign_id = %s AND stage = 'initial'
-                    """,
-                    (campaign_id,),
+                rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
+                    conn, campaign_id, dict(campaign), int(counts.get("total_leads") or 0)
                 )
-                init_row = cur.fetchone()
-                if init_row:
-                    total_leads = int(counts.get('total_leads') or 0)
-                    init_sent = int(init_row['initial_sent'] or 0)
-                    init_failed = int(init_row['initial_failed'] or 0)
+                if rec:
                     counts = dict(counts)
-                    counts['sent_count'] = init_sent
-                    counts['pending_count'] = max(0, total_leads - init_sent - init_failed)
+                    counts["sent_count"] = rec["sent"]
+                    counts["pending_count"] = rec["pending"]
     finally:
         conn.close()
 
@@ -3583,31 +3555,25 @@ def admin_sync_campaigns():
                 """, (ids_list,))
                 leads_counts = {r['campaign_id']: r for r in cur.fetchall()}
 
-                # Cadence campaigns: usar campaign_stage_sends (initial) como fonte real.
-                cur.execute("""
-                    SELECT css.campaign_id,
-                           COALESCE(SUM(css.success_count), 0)::int AS initial_sent,
-                           COALESCE(SUM(css.failed_count), 0)::int AS initial_failed
-                    FROM campaign_stage_sends css
-                    JOIN campaigns c ON c.id = css.campaign_id
-                    WHERE css.campaign_id = ANY(%s)
-                      AND css.stage = 'initial'
-                      AND c.enable_cadence = TRUE
-                      AND c.use_uazapi_sender = TRUE
-                    GROUP BY css.campaign_id
-                """, (ids_list,))
-                initial_agg = {r['campaign_id']: r for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT id, enable_cadence, use_uazapi_sender FROM campaigns WHERE id = ANY(%s)",
+                    (ids_list,),
+                )
+                flags_by_id = {r["id"]: r for r in cur.fetchall()}
 
             for cid in ids_list:
                 lc = leads_counts.get(cid, {})
                 total = int(lc.get('total_leads') or 0)
                 sent = int(lc.get('sent_count') or 0)
                 pending_val = int(lc.get('pending_count') or 0)
-                ia = initial_agg.get(cid)
-                if ia:
-                    sent = int(ia['initial_sent'] or 0)
-                    failed = int(ia['initial_failed'] or 0)
-                    pending_val = max(0, total - sent - failed)
+                row = flags_by_id.get(cid)
+                if row and row.get("enable_cadence") and row.get("use_uazapi_sender"):
+                    rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
+                        conn, cid, dict(row), total
+                    )
+                    if rec:
+                        sent = rec["sent"]
+                        pending_val = rec["pending"]
                 result.append({
                     'id': cid,
                     'total_leads': total,
@@ -5952,25 +5918,25 @@ def get_campaign_stats(campaign_id):
             agg_f += int(sv.get("failed_count") or 0)
 
         # --- Fonte de verdade para sent/failed/pending ---
-        # Campanhas com cadência + Uazapi: usar soma dos chunks de stage='initial'
-        # (cobre rotação multi-instância e chunks fragmentados pela lógica de pausa).
-        # Follow-ups não contam como "enviados" — só initial importa para daily limit.
+        # Campanhas com cadência + Uazapi: mesmo núcleo que admin (SSOT ``_reconciled_uazapi_cadence_counts_via_stage_progress``).
         if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
-            initial_data = stages_payload.get("initial") or {}
-            initial_sent = int(initial_data.get("success_count") or 0)
-            initial_failed = int(initial_data.get("failed_count") or 0)
-            initial_planned = int(initial_data.get("planned_count") or 0)
-
-            sent = initial_sent
-            failed = initial_failed
-            pending = max(0, total_leads - sent - failed)
-            uazapi_scheduled = max(0, initial_planned - initial_sent - initial_failed)
-            uazapi_debug = {
-                "source": "campaign_stage_sends_initial",
-                "initial_sent": initial_sent,
-                "initial_failed": initial_failed,
-                "initial_planned": initial_planned,
-            }
+            rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
+                conn_stage, campaign_id, dict(campaign), total_leads
+            )
+            if rec:
+                sent = rec["sent"]
+                failed = rec["failed"]
+                pending = rec["pending"]
+                uazapi_scheduled = max(
+                    0,
+                    rec["initial_planned"] - rec["initial_sent_raw"] - rec["initial_failed_raw"],
+                )
+                uazapi_debug = {
+                    "source": "campaign_stage_sends_initial",
+                    "initial_sent": rec["initial_sent_raw"],
+                    "initial_failed": rec["initial_failed_raw"],
+                    "initial_planned": rec["initial_planned"],
+                }
 
         # Campanhas Uazapi SEM cadência: manter list_folders live no folder principal.
         elif campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and not campaign.get('enable_cadence'):
@@ -6772,6 +6738,38 @@ def _get_campaign_stage_progress(conn, campaign_id):
     return {
         "stages": stage_data,
         "last_sync_at": global_last_sync.isoformat() if global_last_sync else None,
+    }
+
+
+def _reconciled_uazapi_cadence_counts_via_stage_progress(conn, campaign_id, campaign_row, total_leads):
+    """
+    SSOT com ``/api/campaigns/<id>/stats`` (Minhas Campanhas): enviados/pendentes/falhas da etapa
+    ``initial`` via ``_get_campaign_stage_progress`` — não usar ``SUM(success_count)`` cru em SQL
+    (agregação por instância + cap ``min(sent, total_leads)`` alinhados à UI do utilizador).
+    """
+    if not (campaign_row.get("enable_cadence") and campaign_row.get("use_uazapi_sender")):
+        return None
+    stage_progress = _get_campaign_stage_progress(conn, campaign_id)
+    stages_payload = (stage_progress or {}).get("stages") or {}
+    initial_data = stages_payload.get("initial") or {}
+    initial_sent = int(initial_data.get("success_count") or 0)
+    initial_failed = int(initial_data.get("failed_count") or 0)
+    initial_planned = int(initial_data.get("planned_count") or 0)
+    sent = initial_sent
+    failed = initial_failed
+    pending = max(0, int(total_leads or 0) - sent - failed)
+    if total_leads and int(total_leads) > 0:
+        try:
+            sent = min(int(sent or 0), int(total_leads))
+        except (TypeError, ValueError):
+            pass
+    return {
+        "sent": sent,
+        "pending": pending,
+        "failed": failed,
+        "initial_planned": initial_planned,
+        "initial_sent_raw": initial_sent,
+        "initial_failed_raw": initial_failed,
     }
 
 
