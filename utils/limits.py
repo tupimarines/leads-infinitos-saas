@@ -4,16 +4,26 @@ Usado por worker_sender e worker_cadence.
 """
 
 import os
+from typing import Optional
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from utils.config import SUPER_ADMIN_EMAILS
+from utils.campaign_send_policy import (
+    INITIAL_CHUNK_DAILY_QUOTA_POLICY,
+    initial_chunk_daily_quota_allows,
+)
 INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
 
 # campaign_stage_sends (stage initial): só estes status bloqueiam novo chunk na mesma instância
-# (worker_cadence.schedule_next_initial_chunk). failed/done não entram — após pasta órfã (sync → failed),
-# a instância volta a poder receber chunk (tech-spec-uazapi-campanhas-n8n-sync-observabilidade, Task 3).
-INITIAL_CHUNK_ACTIVE_SEND_STATUSES = ("scheduled", "running", "partial")
+# (worker_cadence.schedule_next_initial_chunk, _continue_initial_chunk_core busy check).
+# failed/done não entram — após pasta órfã (sync → failed), a instância volta a poder receber chunk.
+#
+# TD-7 / T8: inclui ``queued`` para alinhar com ``app.py`` (legado ou futuro). Após ``create_advanced_campaign``
+# bem-sucedido, o worker grava ``status='running'`` na BD mesmo quando a API Uazapi devolve ``status=queued``
+# na pasta — ``queued`` aqui é estado de *linha* em campaign_stage_sends, não o status remoto da API.
+INITIAL_CHUNK_ACTIVE_SEND_STATUSES = ("scheduled", "running", "partial", "queued")
 
 # Fonte única de regras de plano.
 # validity_days: dias até expiração (a partir da data de aplicação ao usuário).
@@ -213,6 +223,79 @@ def get_sent_today_count_by_instance(instance_id: int) -> int:
 def can_create_campaign_today(instance_id: int) -> bool:
     """Sempre permite criar chunks (limite diário removido)."""
     return True
+
+
+def get_sent_today_campaign_initial_count(campaign_id: int) -> int:
+    """
+    Conta disparos iniciais enviados hoje (BRT) apenas nesta campanha.
+    Mesma definição de \"inicial\" que `get_sent_today_count` / `check_daily_limit`
+    (current_step=1 ou last_sent_stage='initial'), com filtro `c.id = campaign_id`.
+    """
+    query = """
+    SELECT COUNT(cl.id) as count
+    FROM campaign_leads cl
+    JOIN campaigns c ON cl.campaign_id = c.id
+    WHERE c.id = %s
+      AND cl.status = 'sent'
+      AND (
+          COALESCE(cl.current_step, 1) = 1
+          OR COALESCE(cl.last_sent_stage, '') = 'initial'
+      )
+      AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
+          = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (campaign_id,))
+            row = cur.fetchone()
+        return row["count"] if row else 0
+    finally:
+        conn.close()
+
+
+def check_initial_chunk_daily_quota_for_campaign(
+    campaign_id: int,
+    instance_id: Optional[int] = None,
+    policy: Optional[str] = None,
+) -> bool:
+    """
+    True se a política TD-12 (default G2) permite mais envios iniciais hoje para a campanha.
+
+    Usa sempre `campaigns.user_id` como dono da cota (AC14 / campanhas criadas por admin).
+    """
+    row = None
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT user_id, daily_limit FROM campaigns WHERE id = %s",
+                (campaign_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return False
+
+    owner_id = int(row["user_id"])
+    plan_limit = int(get_user_daily_limit(owner_id, instance_id=instance_id))
+    raw_cap = row.get("daily_limit")
+    campaign_cap = int(raw_cap) if raw_cap is not None else plan_limit
+    if campaign_cap <= 0:
+        campaign_cap = plan_limit
+
+    sent_user = int(get_sent_today_count(owner_id))
+    sent_campaign = int(get_sent_today_campaign_initial_count(campaign_id))
+
+    return initial_chunk_daily_quota_allows(
+        sent_user,
+        sent_campaign,
+        plan_daily_limit=plan_limit,
+        campaign_daily_limit=campaign_cap,
+        policy=policy or INITIAL_CHUNK_DAILY_QUOTA_POLICY,
+    )
 
 
 def check_daily_limit(user_id: int, plan_limit: int) -> bool:

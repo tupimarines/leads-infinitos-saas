@@ -39,7 +39,11 @@ except ImportError:
     uazapi_service = None
 
 # Limites compartilhados
-from utils.limits import can_create_campaign_today, INITIAL_CHUNK_ACTIVE_SEND_STATUSES
+from utils.limits import (
+    can_create_campaign_today,
+    INITIAL_CHUNK_ACTIVE_SEND_STATUSES,
+    check_initial_chunk_daily_quota_for_campaign,
+)
 from utils.sync_uazapi import (
     sync_campaign_leads_from_uazapi,
     sync_campaign_stage_sends_before_new_chunk,
@@ -58,6 +62,15 @@ from utils.uazapi_pacing import (
 from utils.cadence_uazapi import merge_fu1_into_campaign_db
 
 from utils.config import SUPER_ADMIN_EMAILS
+from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
+from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
+# Slot matinal automático do chunk initial: ``cadence_next_initial_send_slot`` em
+# ``utils/initial_chunk_schedule_target.py`` (sucessor de ``_next_initial_send_slot``).
+from utils.initial_chunk_schedule_target import (
+    cadence_next_send_datetime,
+    uazapi_same_day_initial_chunk_after_unlock_enabled,
+    resolve_initial_chunk_schedule_target,
+)
 
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
@@ -66,8 +79,12 @@ CHATWOOT_ACCOUNT_ID = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
 
 CADENCE_POLL_INTERVAL = 30  # seconds (mais frequente para pegar scheduled_start e Continuar)
 SAFETY_BUFFER_MINUTES = 5
+# Janela UTC do materialize automático (`_materialize_scheduled_stage_sends`): mesma SSOT na query SQL
+# e no filtro `remaining` (segundos até scheduled_for). Ver docstring da função.
+MATERIALIZE_LOOKBACK_MIN = 15
+MATERIALIZE_LOOKAHEAD_MIN = 5
 PRE_DISPARO_WINDOW_MIN = 2
-PRE_DISPARO_WINDOW_MAX = 5
+PRE_DISPARO_WINDOW_MAX = MATERIALIZE_LOOKAHEAD_MIN
 # UAZAPI — contadores de campanha (decisão travada; evitar regressão):
 # SSOT dos agregados é GET /sender/listfolders (log_sucess, log_failed, log_total, status).
 # Não usar listmessages como total oficial (teto/paginação do provedor).
@@ -127,25 +144,6 @@ def is_business_hours():
     now_brazil = datetime.now(BRAZIL_TZ)
     return BUSINESS_HOUR_START <= now_brazil.hour < BUSINESS_HOUR_END
 
-
-def is_campaign_send_window(campaign: dict, now_brazil=None) -> bool:
-    """
-    Janela por campanha: hora do dia + opcional sábado/domingo.
-    Fora da janela ou em fim de semana bloqueado: não dispara envios / process_campaign_sends.
-    """
-    now_brazil = now_brazil or datetime.now(BRAZIL_TZ)
-    wd = now_brazil.weekday()
-    if wd == 5 and not bool(campaign.get("send_saturday")):
-        return False
-    if wd == 6 and not bool(campaign.get("send_sunday")):
-        return False
-    try:
-        sh = int(campaign.get("send_hour_start") if campaign.get("send_hour_start") is not None else BUSINESS_HOUR_START)
-        eh = int(campaign.get("send_hour_end") if campaign.get("send_hour_end") is not None else BUSINESS_HOUR_END)
-    except (TypeError, ValueError):
-        sh, eh = BUSINESS_HOUR_START, BUSINESS_HOUR_END
-    h = now_brazil.hour
-    return sh <= h < eh
 
 def format_jid(phone):
     """Formats a phone number into a WhatsApp JID."""
@@ -396,15 +394,375 @@ def _parse_message_template(raw):
     return []
 
 
+def _stale_recovery_enabled():
+    """T7: recovery automático de ``scheduled`` initial sem pasta, fora do TTL (default ligado)."""
+    return os.environ.get("UAZAPI_STALE_RECOVERY_ENABLED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _recover_stale_scheduled_initial_uazapi_sends(
+    conn,
+    *,
+    only_campaign_id=None,
+    respect_recovery_env=True,
+    dry_run=False,
+    return_stats=False,
+    force_any_campaign_status=False,
+    recovery_mode="recovery",
+    max_rows_override=None,
+):
+    """
+    T7 / TD-1 / TD-2 / F1 / F6 / F10: antes do materialize automático, trata linhas
+    ``initial`` + Uazapi ``scheduled`` sem pasta com ``scheduled_for`` estritamente
+    anterior a ``utcnow() - TTL``.
+
+    Política default ADR **B + C**: tenta **C** (``scheduled_for = next_valid`` com margem
+    de materialize); se ``next_valid`` inválido ou instância sem ``apikey``, **B**
+    (``status = failed``). Não chama ``create_advanced_campaign`` aqui — exclusão mútua
+    com ``_materialize_scheduled_stage_sends`` no mesmo tick.
+
+    **T10 (admin):** ``only_campaign_id`` restringe a uma campanha; ``respect_recovery_env=False``
+    ignora ``UAZAPI_STALE_RECOVERY_ENABLED``; ``dry_run`` só inspeciona; ``return_stats``
+    devolve contadores/listas; ``force_any_campaign_status`` inclui campanhas fora de
+    ``running|pending|completed``; ``recovery_mode`` = ``mark_failed`` força ``failed`` em
+    todas as linhas stale (desbloqueio agressivo).
+
+    Env: ``UAZAPI_STALE_RECOVERY_ENABLED`` (default ``1``), ``UAZAPI_STALE_RECOVERY_MAX_PER_TICK``
+    (default ``50``), ``UAZAPI_STALE_RECOVERY_TTL_MINUTES`` (default ``90``).
+    """
+    stats = {
+        "bumped_send_ids": [],
+        "failed_send_ids": [],
+        "dry_run_stale_send_ids": [],
+        "skipped_disabled": False,
+    }
+    if respect_recovery_env and not _stale_recovery_enabled():
+        stats["skipped_disabled"] = True
+        return stats if return_stats else None
+    try:
+        ttl_min = int(os.environ.get("UAZAPI_STALE_RECOVERY_TTL_MINUTES", "90"))
+    except (TypeError, ValueError):
+        ttl_min = 90
+    try:
+        max_per_tick = (
+            int(max_rows_override)
+            if max_rows_override is not None
+            else int(os.environ.get("UAZAPI_STALE_RECOVERY_MAX_PER_TICK", "50"))
+        )
+    except (TypeError, ValueError):
+        max_per_tick = 50
+    if max_per_tick <= 0:
+        return stats if return_stats else None
+
+    now_utc_naive = datetime.utcnow()
+    cutoff = now_utc_naive - timedelta(minutes=max(1, ttl_min))
+    mode_norm = (recovery_mode or "recovery").strip().lower()
+    if mode_norm not in ("recovery", "mark_failed"):
+        mode_norm = "recovery"
+
+    status_clause = (
+        "TRUE"
+        if force_any_campaign_status
+        else "c.status IN ('running', 'pending', 'completed')"
+    )
+    campaign_clause = (
+        "AND css.campaign_id = %s" if only_campaign_id is not None else ""
+    )
+    lock_sql = (
+        ""
+        if dry_run
+        else "FOR UPDATE OF campaign_stage_sends SKIP LOCKED"
+    )
+    params = [cutoff]
+    if only_campaign_id is not None:
+        params.append(int(only_campaign_id))
+    params.append(max_per_tick)
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT css.id, css.campaign_id, css.instance_id, css.scheduled_for,
+                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
+                       c.user_id, c.daily_limit, i.apikey
+                FROM campaign_stage_sends css
+                INNER JOIN campaigns c ON c.id = css.campaign_id
+                INNER JOIN instances i ON i.id = css.instance_id
+                WHERE css.status = 'scheduled'
+                  AND css.uazapi_folder_id IS NULL
+                  AND css.stage = 'initial'
+                  AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+                  AND css.scheduled_for IS NOT NULL
+                  AND css.scheduled_for < %s
+                  AND ({status_clause})
+                  {campaign_clause}
+                ORDER BY css.scheduled_for ASC, css.id ASC
+                {lock_sql}
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall() or []
+
+        def _stale_recovery_log(payload):
+            print(json.dumps(payload, ensure_ascii=False, default=str), flush=True)
+
+        for row in rows:
+            send_id = row["id"]
+            cid = row["campaign_id"]
+            instance_id = row.get("instance_id")
+            sched_old = row.get("scheduled_for")
+            camp_win = {
+                "send_hour_start": row.get("send_hour_start"),
+                "send_hour_end": row.get("send_hour_end"),
+                "send_saturday": row.get("send_saturday"),
+                "send_sunday": row.get("send_sunday"),
+            }
+            now_brt = datetime.now(BRAZIL_TZ)
+            within_send_window = is_campaign_send_window(camp_win, now_brazil=now_brt)
+            if sched_old:
+                rem_sec = (sched_old - now_utc_naive).total_seconds()
+                within_materialize = (
+                    -MATERIALIZE_LOOKBACK_MIN * 60 <= rem_sec <= MATERIALIZE_LOOKAHEAD_MIN * 60
+                )
+            else:
+                within_materialize = False
+
+            if mode_norm == "mark_failed":
+                if dry_run:
+                    stats["dry_run_stale_send_ids"].append(send_id)
+                    _stale_recovery_log(
+                        {
+                            "event": "uazapi_stale_scheduled_recovery",
+                            "campaign_id": cid,
+                            "send_ids": [send_id],
+                            "instance_id": instance_id,
+                            "reason": "admin_stale_flush_mark_failed_dry_run",
+                            "policy": "dry_run",
+                            "within_send_window": within_send_window,
+                            "within_materialize_window": within_materialize,
+                        }
+                    )
+                    continue
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE campaign_stage_sends
+                        SET status = 'failed', updated_at = NOW()
+                        WHERE id = %s AND status = 'scheduled'
+                        """,
+                        (send_id,),
+                    )
+                stats["failed_send_ids"].append(send_id)
+                _stale_recovery_log(
+                    {
+                        "event": "uazapi_stale_scheduled_recovery",
+                        "campaign_id": cid,
+                        "send_ids": [send_id],
+                        "instance_id": instance_id,
+                        "reason": "admin_stale_flush_mark_failed",
+                        "policy": "failed",
+                        "within_send_window": within_send_window,
+                        "within_materialize_window": within_materialize,
+                    }
+                )
+                continue
+
+            token = row.get("apikey")
+            if not token:
+                if dry_run:
+                    stats["dry_run_stale_send_ids"].append(send_id)
+                    _stale_recovery_log(
+                        {
+                            "event": "uazapi_stale_scheduled_recovery",
+                            "campaign_id": cid,
+                            "send_ids": [send_id],
+                            "instance_id": instance_id,
+                            "reason": "stale_recovery_failed_no_apikey_dry_run",
+                            "policy": "dry_run",
+                            "within_send_window": within_send_window,
+                            "within_materialize_window": within_materialize,
+                            "quota_policy": None,
+                        }
+                    )
+                    continue
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE campaign_stage_sends
+                        SET status = 'failed', updated_at = NOW()
+                        WHERE id = %s AND status = 'scheduled'
+                        """,
+                        (send_id,),
+                    )
+                stats["failed_send_ids"].append(send_id)
+                _stale_recovery_log(
+                    {
+                        "event": "uazapi_stale_scheduled_recovery",
+                        "campaign_id": cid,
+                        "send_ids": [send_id],
+                        "instance_id": instance_id,
+                        "reason": "stale_recovery_failed_no_apikey",
+                        "policy": "failed",
+                        "within_send_window": within_send_window,
+                        "within_materialize_window": within_materialize,
+                        "quota_policy": None,
+                    }
+                )
+                continue
+
+            try:
+                next_sf = next_valid_send_utc_naive(
+                    camp_win,
+                    from_utc_naive=now_utc_naive,
+                    margin_minutes=MATERIALIZE_LOOKAHEAD_MIN,
+                )
+            except ValueError as exc:
+                if dry_run:
+                    stats["dry_run_stale_send_ids"].append(send_id)
+                    _stale_recovery_log(
+                        {
+                            "event": "uazapi_stale_scheduled_recovery",
+                            "campaign_id": cid,
+                            "send_ids": [send_id],
+                            "instance_id": instance_id,
+                            "reason": "stale_recovery_failed_next_valid_dry_run",
+                            "policy": "dry_run",
+                            "detail": str(exc),
+                            "within_send_window": within_send_window,
+                            "within_materialize_window": within_materialize,
+                            "next_valid_scheduled_for": None,
+                        }
+                    )
+                    continue
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE campaign_stage_sends
+                        SET status = 'failed', updated_at = NOW()
+                        WHERE id = %s AND status = 'scheduled'
+                        """,
+                        (send_id,),
+                    )
+                stats["failed_send_ids"].append(send_id)
+                _stale_recovery_log(
+                    {
+                        "event": "uazapi_stale_scheduled_recovery",
+                        "campaign_id": cid,
+                        "send_ids": [send_id],
+                        "instance_id": instance_id,
+                        "reason": "stale_recovery_failed_next_valid",
+                        "policy": "failed",
+                        "detail": str(exc),
+                        "within_send_window": within_send_window,
+                        "within_materialize_window": within_materialize,
+                        "next_valid_scheduled_for": None,
+                    }
+                )
+                continue
+
+            quota_ok = check_initial_chunk_daily_quota_for_campaign(
+                int(cid), instance_id=int(instance_id) if instance_id is not None else None
+            )
+
+            if dry_run:
+                stats["dry_run_stale_send_ids"].append(send_id)
+                _stale_recovery_log(
+                    {
+                        "event": "uazapi_stale_scheduled_recovery",
+                        "campaign_id": cid,
+                        "send_ids": [send_id],
+                        "instance_id": instance_id,
+                        "reason": "stale_recovery_bump_next_valid_dry_run",
+                        "policy": "dry_run",
+                        "within_send_window": within_send_window,
+                        "within_materialize_window": within_materialize,
+                        "daily_limit_remaining": None,
+                        "next_valid_scheduled_for": next_sf.isoformat()
+                        if hasattr(next_sf, "isoformat")
+                        else str(next_sf),
+                        "quota_allows_initial_today": quota_ok,
+                    }
+                )
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_stage_sends
+                    SET scheduled_for = %s, updated_at = NOW()
+                    WHERE id = %s AND status = 'scheduled'
+                    """,
+                    (next_sf, send_id),
+                )
+
+            stats["bumped_send_ids"].append(send_id)
+            _stale_recovery_log(
+                {
+                    "event": "uazapi_stale_scheduled_recovery",
+                    "campaign_id": cid,
+                    "send_ids": [send_id],
+                    "instance_id": instance_id,
+                    "reason": "stale_recovery_bump_next_valid",
+                    "policy": "bump_scheduled_for",
+                    "within_send_window": within_send_window,
+                    "within_materialize_window": within_materialize,
+                    "daily_limit_remaining": None,
+                    "next_valid_scheduled_for": next_sf.isoformat()
+                    if hasattr(next_sf, "isoformat")
+                    else str(next_sf),
+                    "quota_allows_initial_today": quota_ok,
+                }
+            )
+
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+        return stats if return_stats else None
+    except Exception as e:
+        print(
+            json.dumps(
+                {
+                    "event": "uazapi_stale_scheduled_recovery_error",
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if return_stats:
+            stats["error"] = str(e)
+            return stats
+        return None
+
+
 def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
     """
-    Pré-disparo determinístico (2-5 min antes):
+    Materialização de sends Uazapi `scheduled` (pasta ainda NULL).
+
+    **Janela UTC (automático, sem force_send_ids):** só entram linhas com
+    ``scheduled_for`` entre ``now_utc - MATERIALIZE_LOOKBACK_MIN`` e
+    ``now_utc + MATERIALIZE_LOOKAHEAD_MIN`` (minutos), espelhando a query SQL
+    e o filtro Python em ``remaining`` (evita drift entre SELECT e loop).
+
+    **force_send_ids:** materializa na hora (ignora a janela UTC acima).
+
+    Comportamento:
     - recalcula elegíveis imediatamente antes do envio
     - exclui converted/lost/removed_from_funnel
-    - cria folder só na janela curta
-
-    force_send_ids: ids de campaign_stage_sends — materializa na hora (ignora janela 2–5 min).
-    Usado pelo continue-initial-chunk para não depender só do worker.
+    - cria folder na janela definida acima (ou forçada)
+    - **T9 / AC-RULE-1:** envio Uazapi fora da janela BRT não usa mais ``continue`` sem efeito:
+      telemetria ``skipped_outside_window`` + ``scheduled_for = next_valid`` (margem
+      ``MATERIALIZE_LOOKAHEAD_MIN``), ou ``failed`` se a janela da campanha for inválida.
 
     Retorno: dict {"folders_created": int} ou None se uazapi indisponível.
     """
@@ -426,7 +784,8 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                        css.status, i.apikey,
                        css.delay_min_minutes, css.delay_max_minutes, css.message_variations, css.lead_ids,
                        c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max,
-                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender
+                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender,
+                       c.daily_limit
                 FROM campaign_stage_sends css
                 JOIN campaigns c ON c.id = css.campaign_id
                 JOIN instances i ON i.id = css.instance_id
@@ -447,17 +806,19 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                        css.status, i.apikey,
                        css.delay_min_minutes, css.delay_max_minutes, css.message_variations, css.lead_ids,
                        c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max,
-                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender
+                       c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender,
+                       c.daily_limit
                 FROM campaign_stage_sends css
                 JOIN campaigns c ON c.id = css.campaign_id
                 JOIN instances i ON i.id = css.instance_id
                 WHERE css.status = 'scheduled'
                   AND css.uazapi_folder_id IS NULL
                   AND css.scheduled_for IS NOT NULL
-                  AND css.scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + INTERVAL '5 minutes')
-                  AND css.scheduled_for >= ((NOW() AT TIME ZONE 'UTC') - INTERVAL '15 minutes')
+                  AND css.scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + (%s * INTERVAL '1 minute'))
+                  AND css.scheduled_for >= ((NOW() AT TIME ZONE 'UTC') - (%s * INTERVAL '1 minute'))
                 ORDER BY css.scheduled_for ASC, css.id ASC
-                """
+                """,
+                (MATERIALIZE_LOOKAHEAD_MIN, MATERIALIZE_LOOKBACK_MIN),
             )
             rows = cur.fetchall() or []
 
@@ -469,9 +830,9 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
             continue
         remaining = (sched - now_utc_naive).total_seconds()
         if force_set is None:
-            if remaining > PRE_DISPARO_WINDOW_MAX * 60:
+            if remaining > MATERIALIZE_LOOKAHEAD_MIN * 60:
                 continue
-            if remaining < -15 * 60:
+            if remaining < -MATERIALIZE_LOOKBACK_MIN * 60:
                 continue
         elif remaining < -86400:
             continue
@@ -485,8 +846,15 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
         # Ordenar por instance_id: chunks[0]→inst1, chunks[1]→inst2 (rotação, sem overlap de números)
         sends = sorted(sends, key=lambda x: x.get("instance_id") or 0)
         print(f"  📤 [Materialize] campaign_id={campaign_id} stage={stage} scheduled_for={scheduled_for} sends={len(sends)}")
-        per_instance_limit = 30
-        total_limit = per_instance_limit * len(sends)
+        row0 = sends[0]
+        if stage == "initial" and row0.get("use_uazapi_sender"):
+            daily_lim = int(row0.get("daily_limit") or 0)
+            per_instance_limit, total_limit = uazapi_initial_chunk_distribution_limits(
+                daily_lim, len(sends)
+            )
+        else:
+            per_instance_limit = 30
+            total_limit = per_instance_limit * len(sends)
         if total_limit <= 0:
             continue
 
@@ -618,8 +986,68 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 "send_sunday": send.get("send_sunday"),
             }
             if send.get("use_uazapi_sender") and not is_campaign_send_window(camp_win):
+                sched_for = send.get("scheduled_for") or scheduled_for
+                if sched_for:
+                    rem_sec = (sched_for - now_utc_naive).total_seconds()
+                    within_materialize = (
+                        -MATERIALIZE_LOOKBACK_MIN * 60
+                        <= rem_sec
+                        <= MATERIALIZE_LOOKAHEAD_MIN * 60
+                    )
+                else:
+                    within_materialize = False
+                base_log = {
+                    "event": "uazapi_materialize_outside_send_window",
+                    "campaign_id": campaign_id,
+                    "send_id": send_id,
+                    "instance_id": send.get("instance_id"),
+                    "skipped_outside_window": True,
+                    "within_send_window": False,
+                    "within_materialize_window": within_materialize,
+                    "next_valid_scheduled_for": None,
+                }
+                try:
+                    next_sf = next_valid_send_utc_naive(
+                        camp_win,
+                        from_utc_naive=now_utc_naive,
+                        margin_minutes=MATERIALIZE_LOOKAHEAD_MIN,
+                    )
+                except ValueError as exc:
+                    base_log["reason"] = "materialize_outside_brt_invalid_window"
+                    base_log["policy"] = "failed"
+                    base_log["error"] = str(exc)
+                    print(json.dumps(base_log, ensure_ascii=False, default=str), flush=True)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE campaign_stage_sends
+                            SET status = 'failed', updated_at = NOW()
+                            WHERE id = %s AND status = 'scheduled'
+                            """,
+                            (send_id,),
+                        )
+                    conn.commit()
+                    continue
+
+                base_log["reason"] = "materialize_outside_brt_bump_next_valid"
+                base_log["policy"] = "bump_scheduled_for"
+                base_log["next_valid_scheduled_for"] = (
+                    next_sf.isoformat() if hasattr(next_sf, "isoformat") else str(next_sf)
+                )
+                print(json.dumps(base_log, ensure_ascii=False, default=str), flush=True)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE campaign_stage_sends
+                        SET scheduled_for = %s, updated_at = NOW()
+                        WHERE id = %s AND status = 'scheduled'
+                        """,
+                        (next_sf, send_id),
+                    )
+                conn.commit()
                 print(
-                    f"  ⏭️ [Materialize] send_id={send_id} fora da janela de envio da campanha {campaign_id}; aguardando próximo ciclo."
+                    f"  ⏭️ [Materialize] send_id={send_id} fora da janela BRT (campanha {campaign_id}); "
+                    f"reagendado para {base_log['next_valid_scheduled_for']}."
                 )
                 continue
 
@@ -940,6 +1368,9 @@ def process_cadence():
         try:
             conn = get_db_connection()
 
+            # T7: recovery de ``scheduled`` initial sem pasta (TTL) antes do materialize — F1
+            _recover_stale_scheduled_initial_uazapi_sends(conn)
+
             # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)
             _materialize_scheduled_stage_sends(conn)
 
@@ -1171,62 +1602,21 @@ def _parse_rollover_time(rollover_str):
     return 23, 0
 
 
-def _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun):
-    """
-    Próximo horário de envio para chunk inicial (worker): APENAS o primeiro slot do dia.
-    - Antes de send_hour hoje: slot às send_hour (primeiro disparo do dia).
-    - Depois: próximo dia útil às send_hour (não encadeia chunks automaticamente).
-    Chunks adicionais no mesmo dia: apenas via botão Continuar (usuário explícito).
-    Evita flood: 1 chunk/dia/instância/etapa do worker; Continuar limitado por
-    can_create_campaign_today (8 chunks/dia).
-    """
-    send_hour = send_hour or 8
-    today_at = datetime(
-        now_brazil.year, now_brazil.month, now_brazil.day,
-        send_hour, 0, 0, tzinfo=BRAZIL_TZ
-    )
-    if now_brazil < today_at:
-        return today_at
-    return _next_send_datetime(now_brazil, 1, send_hour, send_sat, send_sun)
-
-
-def _next_send_datetime(from_dt, delay_days, send_hour_start, send_saturday, send_sunday):
-    """
-    Calcula próximo dia útil no horário send_hour_start.
-    Pula sábado/domingo se send_saturday/send_sunday forem False.
-    delay_days=0: envia no próximo ciclo (~2 min) para testes.
-    """
-    if delay_days <= 0:
-        return from_dt + timedelta(minutes=2)
-    send_sat = bool(send_saturday)
-    send_sun = bool(send_sunday)
-    d = from_dt.date()
-    remaining = delay_days
-    for _ in range(30):
-        wd = d.weekday()
-        if wd == 5 and not send_sat:
-            d += timedelta(days=1)
-            continue
-        if wd == 6 and not send_sun:
-            d += timedelta(days=1)
-            continue
-        if remaining <= 0:
-            break
-        remaining -= 1
-        d += timedelta(days=1)
-    target = datetime(d.year, d.month, d.day, send_hour_start or 8, 0, 0, tzinfo=BRAZIL_TZ)
-    return target
-
-
 def schedule_next_initial_chunk(campaign, conn):
     """
     Para campanhas Uazapi: agenda o próximo chunk de 30 mensagens (stage initial) para
     o próximo horário de envio. Corrige o bug onde chunks 2+ nunca eram enviados.
 
+    T6 / D1: com ``UAZAPI_SAME_DAY_INITIAL_CHUNK_AFTER_UNLOCK=1``, janela BRT ativa e cota
+    (``check_initial_chunk_daily_quota_for_campaign``), o alvo pode ser o mesmo dia em vez
+    do próximo slot matinal; telemetria ``same_day_after_unlock``. O ``scheduled_for`` gravado
+    passa por ``next_valid_send_utc_naive`` (TD-9/11).
+
     Duplicação por instância: só pula se já existir send initial em um dos estados em
-    INITIAL_CHUNK_ACTIVE_SEND_STATUSES (scheduled/running/partial). Sends em failed ou
-    done não bloqueiam — necessário para libertar a instância após deteção de pasta órfã
-    no sync periódico (utils/sync_uazapi.py).
+    INITIAL_CHUNK_ACTIVE_SEND_STATUSES (scheduled/running/partial/queued; ver utils/limits.py).
+    Sends em failed ou done não bloqueiam — necessário para libertar a instância após deteção
+    de pasta órfã no sync periódico (utils/sync_uazapi.py). Pós-create_advanced na BD o estado
+    típico é ``running`` mesmo quando a API devolve ``queued`` na pasta.
     """
     cid = campaign['id']
     if not campaign.get('use_uazapi_sender') or not uazapi_service:
@@ -1270,27 +1660,42 @@ def schedule_next_initial_chunk(campaign, conn):
     send_sat = bool(campaign.get('send_saturday'))
     send_sun = bool(campaign.get('send_sunday'))
     now_brazil = datetime.now(BRAZIL_TZ)
-    # Se usuário editou scheduled_start para daqui a pouco (ex: 2 min), usar "agora + 30s" UMA VEZ
-    # Janela estreita (0-90s) evita loop: só usa "agora" quando acabou de passar
-    sched_start = campaign.get('scheduled_start')
-    use_immediate = False
-    if sched_start:
-        if getattr(sched_start, 'tzinfo', None) is None:
-            sched_start = pytz.UTC.localize(sched_start).astimezone(BRAZIL_TZ)
-        else:
-            sched_start = sched_start.astimezone(BRAZIL_TZ)
-        delta_sec = (now_brazil - sched_start).total_seconds()
-        # Antes: só 0–90s após o horário gerava "agora+30s"; editar início para há minutos/horas
-        # caía em _next_initial_send_slot (ex.: só no dia seguinte) e parecia que "começar agora" não funcionava.
-        if delta_sec >= 0:
-            # Horário alvo já passou (ou é agora): próximo chunk o quanto antes, não o próximo dia útil.
-            use_immediate = True
-            target_dt = now_brazil + timedelta(seconds=30)
-        else:
-            target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
-    else:
-        target_dt = _next_initial_send_slot(now_brazil, send_hour, send_sat, send_sun)
+    camp_win = {
+        "send_hour_start": campaign.get("send_hour_start"),
+        "send_hour_end": campaign.get("send_hour_end"),
+        "send_saturday": campaign.get("send_saturday"),
+        "send_sunday": campaign.get("send_sunday"),
+    }
+    quota_allows = check_initial_chunk_daily_quota_for_campaign(cid)
+    target_dt, use_immediate, same_day_reason = resolve_initial_chunk_schedule_target(
+        now_brazil=now_brazil,
+        send_hour_start=send_hour,
+        send_sat=send_sat,
+        send_sun=send_sun,
+        scheduled_start_raw=campaign.get("scheduled_start"),
+        campaign_send_window=camp_win,
+        same_day_env_enabled=uazapi_same_day_initial_chunk_after_unlock_enabled(),
+        quota_allows_today=quota_allows,
+    )
     scheduled_for = target_dt.astimezone(pytz.UTC).replace(tzinfo=None)
+    try:
+        # TD-11 / TD-9: instante gravado deve cair em janela BRT + dias permitidos (sem skip silencioso).
+        scheduled_for = next_valid_send_utc_naive(
+            camp_win, scheduled_for, margin_minutes=0
+        )
+    except ValueError as e:
+        print(
+            json.dumps(
+                {
+                    "event": "uazapi_schedule_next_chunk_invalid_window",
+                    "campaign_id": cid,
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return
 
     delay_min, delay_max = default_inter_message_delay_range_minutes()
     if campaign.get("delay_min_minutes") is not None:
@@ -1363,6 +1768,20 @@ def schedule_next_initial_chunk(campaign, conn):
             with conn.cursor() as cur:
                 cur.execute("UPDATE campaigns SET scheduled_start = NULL WHERE id = %s", (cid,))
         conn.commit()
+        if same_day_reason:
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_initial_chunk_scheduled",
+                        "campaign_id": cid,
+                        "reason": same_day_reason,
+                        "within_send_window": True,
+                        "instances": created,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
         sched_brt = pytz.UTC.localize(scheduled_for).astimezone(BRAZIL_TZ).strftime("%d/%m %H:%M BRT")
         print(f"  📅 [Initial Chunk] Campaign '{campaign['name']}': agendado próximo chunk para {sched_brt} ({created} instâncias)")
 
@@ -1568,7 +1987,7 @@ def process_uazapi_initial_stage_rollovers(conn, campaigns_synced_this_tick=None
         else:
             delay_days = 3
         now_brazil = datetime.now(BRAZIL_TZ)
-        target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
+        target_dt = cadence_next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
         scheduled_ts = int(target_dt.timestamp() * 1000)
 
         user_id = row.get("user_id")
@@ -1823,7 +2242,7 @@ def process_rollover(campaign, conn):
     delay_days = step2.get('delay_days')
     delay_days = 1 if delay_days is None else int(delay_days)
 
-    target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
+    target_dt = cadence_next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
     scheduled_ts = int(target_dt.timestamp() * 1000)  # Uazapi espera ms
 
     # Gate superadmin para mídia
@@ -2014,7 +2433,7 @@ def process_rollover_fu_next(
     delay_days = step_cfg.get('delay_days')
     delay_days = 1 if delay_days is None else int(delay_days)
     now_brazil = datetime.now(BRAZIL_TZ)
-    target_dt = _next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
+    target_dt = cadence_next_send_datetime(now_brazil, delay_days, send_hour, send_sat, send_sun)
     scheduled_ts = int(target_dt.timestamp() * 1000)
 
     # Gate superadmin para mídia

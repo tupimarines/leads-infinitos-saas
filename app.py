@@ -1,4 +1,16 @@
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash, abort, jsonify, Response
+from flask import (
+    Flask,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    send_file,
+    flash,
+    abort,
+    jsonify,
+    Response,
+    session,
+)
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -35,6 +47,7 @@ from openai import OpenAI
 from functools import wraps
 import pytz
 from utils.limits import (
+    INITIAL_CHUNK_ACTIVE_SEND_STATUSES,
     PLAN_POLICY,
     INFINITE_DAILY_SEND_OPTIONS,
     get_plan_policy,
@@ -694,6 +707,25 @@ def _init_db_body() -> None:
             """
         )
 
+        # T10: auditoria de flush admin de sends stale (Uazapi initial)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_uazapi_stale_flush_audit (
+                id SERIAL PRIMARY KEY,
+                admin_user_id INTEGER NOT NULL REFERENCES users(id),
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+                recovery_mode TEXT NOT NULL DEFAULT 'recovery',
+                force_any_campaign_status BOOLEAN NOT NULL DEFAULT FALSE,
+                bumped_send_ids INTEGER[] NOT NULL DEFAULT '{}',
+                failed_send_ids INTEGER[] NOT NULL DEFAULT '{}',
+                dry_run_stale_send_ids INTEGER[] NOT NULL DEFAULT '{}',
+                extra JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
         # ============================================================
         # END CADENCE FEATURE MIGRATIONS
         # ============================================================
@@ -909,6 +941,49 @@ def admin_required(f):
             return redirect(url_for('index'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+def _verify_json_csrf():
+    """T10: exige token igual ao da sessão (header ``X-CSRF-Token`` ou JSON ``csrf_token``)."""
+    expected = session.get("csrf_token")
+    token = request.headers.get("X-CSRF-Token") or request.headers.get("X-Csrf-Token")
+    if not token and request.is_json:
+        token = (request.get_json(silent=True) or {}).get("csrf_token")
+    if not expected or not token:
+        return (
+            jsonify(
+                {
+                    "error": "csrf_invalid",
+                    "message": "Token CSRF ausente ou inválido.",
+                }
+            ),
+            403,
+        )
+    if not secrets.compare_digest(str(expected), str(token)):
+        return (
+            jsonify(
+                {
+                    "error": "csrf_invalid",
+                    "message": "Token CSRF ausente ou inválido.",
+                }
+            ),
+            403,
+        )
+    return None
+
+
+def _admin_stale_flush_rate_allow(user_id: int) -> bool:
+    """T10: até 15 POST / minuto por admin (Redis)."""
+    try:
+        key = f"admin:uazapi:stale_flush:{int(user_id)}"
+        n = redis_conn.incr(key)
+        if n == 1:
+            redis_conn.expire(key, 60)
+        return n <= 15
+    except Exception as exc:
+        print(f"[admin_flush_stale] rate limit redis error: {exc}")
+        return True
+
 
 def is_super_admin(user=None):
     """Verifica se o usuário é super admin (multi-instance feature)"""
@@ -1813,6 +1888,14 @@ login_manager.login_view = "login"
 login_manager.init_app(app)
 
 
+@app.before_request
+def _ensure_csrf_token_for_session():
+    """T10: token CSRF para rotas admin JSON (header X-CSRF-Token ou body csrf_token)."""
+    if current_user.is_authenticated and "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        session.modified = True
+
+
 @login_manager.unauthorized_handler
 def unauthorized():
     """Return JSON 401 for API/XHR requests instead of redirecting to HTML login."""
@@ -1878,6 +1961,8 @@ def register():
             )
             
             login_user(user)
+            session["csrf_token"] = secrets.token_urlsafe(32)
+            session.modified = True
             flash(f"Conta criada com sucesso! Sua licença {license_type} está ativa.")
             return redirect(url_for("index"))
             
@@ -1903,7 +1988,9 @@ def api_login():
         if not user or not check_password_hash(user.password_hash, password):
             return json.dumps({"error": "Credenciais inválidas"}), 401
         login_user(user)
-        return json.dumps({"ok": True, "user_id": user.id}), 200
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        session.modified = True
+        return json.dumps({"ok": True, "user_id": user.id, "csrf_token": session["csrf_token"]}), 200
     return json.dumps({"error": "Content-Type deve ser application/json"}), 400
 
 
@@ -1919,6 +2006,8 @@ def login():
             flash("Credenciais inválidas.")
             return redirect(url_for("login"))
         login_user(user)
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        session.modified = True
         return redirect(url_for("index"))
     return render_template("login.html")
 
@@ -3430,9 +3519,9 @@ def admin_sync_campaigns():
                 FROM campaign_stage_sends css
                 JOIN instances i ON i.id = css.instance_id
                 WHERE css.campaign_id = ANY(%s)
-                  AND css.status IN ('running', 'partial', 'scheduled', 'queued')
+                  AND css.status = ANY(%s)
                   AND css.uazapi_folder_id IS NOT NULL
-            """, (campaign_ids,))
+            """, (campaign_ids, list(INITIAL_CHUNK_ACTIVE_SEND_STATUSES)))
             sends = cur.fetchall()
 
         now = datetime.now()
@@ -3626,6 +3715,170 @@ def admin_update_campaign(campaign_id):
     except Exception as e:
         conn.rollback()
         return json.dumps({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/api/admin/campaigns/<int:campaign_id>/flush-stale-initial-chunk",
+    methods=["POST"],
+)
+@login_required
+def admin_flush_stale_initial_chunk(campaign_id):
+    """
+    T10 / D3: flush manual de ``campaign_stage_sends`` initial Uazapi stale
+    (``scheduled``, sem pasta, ``scheduled_for`` < now − TTL).
+
+    Body JSON opcional: ``csrf_token`` (ou header ``X-CSRF-Token``), ``dry_run``,
+    ``force`` (permite campanha fora de running/pending/completed), ``mode``
+    (``recovery`` | ``mark_failed``), ``max_rows`` (1–200).
+    """
+    if not getattr(current_user, "is_admin", False):
+        return jsonify({"error": "forbidden", "message": "Apenas administradores."}), 403
+    csrf_err = _verify_json_csrf()
+    if csrf_err:
+        return csrf_err
+    if not _admin_stale_flush_rate_allow(current_user.id):
+        return (
+            jsonify(
+                {
+                    "error": "rate_limited",
+                    "message": "Muitas requisições. Tente novamente em um minuto.",
+                }
+            ),
+            429,
+        )
+
+    data = request.get_json(silent=True) or {}
+    dry_run = bool(data.get("dry_run"))
+    force = bool(data.get("force"))
+    mode_raw = (data.get("mode") or "recovery").strip().lower()
+    if mode_raw not in ("recovery", "mark_failed"):
+        return (
+            jsonify(
+                {
+                    "error": "invalid_mode",
+                    "message": "mode deve ser recovery ou mark_failed.",
+                }
+            ),
+            400,
+        )
+
+    max_rows = data.get("max_rows")
+    try:
+        max_rows = int(max_rows) if max_rows is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_max_rows"}), 400
+    if max_rows is None:
+        max_rows = 50
+    max_rows = max(1, min(max_rows, 200))
+
+    import worker_cadence as wc
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_id, COALESCE(use_uazapi_sender, false) AS use_uazapi_sender
+                FROM campaigns WHERE id = %s
+                """,
+                (campaign_id,),
+            )
+            camp = cur.fetchone()
+        if not camp:
+            return jsonify({"error": "not_found", "message": "Campanha não encontrada."}), 404
+        if not camp.get("use_uazapi_sender"):
+            return (
+                jsonify(
+                    {
+                        "error": "not_uazapi",
+                        "message": "Campanha não usa envio Uazapi.",
+                    }
+                ),
+                400,
+            )
+        eligible = camp["status"] in ("running", "pending", "completed")
+        if not eligible and not force:
+            return (
+                jsonify(
+                    {
+                        "error": "campaign_not_eligible",
+                        "message": "Só campanhas running, pending ou completed; use force=true se necessário.",
+                        "status": camp["status"],
+                    }
+                ),
+                400,
+            )
+
+        stats = wc._recover_stale_scheduled_initial_uazapi_sends(
+            conn,
+            only_campaign_id=campaign_id,
+            respect_recovery_env=False,
+            dry_run=dry_run,
+            return_stats=True,
+            force_any_campaign_status=bool(force),
+            recovery_mode=mode_raw,
+            max_rows_override=max_rows,
+        )
+        if stats is None:
+            stats = {}
+
+        bumped = list(stats.get("bumped_send_ids") or [])
+        failed = list(stats.get("failed_send_ids") or [])
+        dry_ids = list(stats.get("dry_run_stale_send_ids") or [])
+        updated = len(bumped) + len(failed)
+
+        extra_audit = {
+            "skipped_disabled": stats.get("skipped_disabled"),
+            "ttl_minutes_env": os.environ.get("UAZAPI_STALE_RECOVERY_TTL_MINUTES", "90"),
+            "campaign_owner_user_id": camp.get("user_id"),
+        }
+        if stats.get("error"):
+            extra_audit["worker_error"] = stats["error"]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO admin_uazapi_stale_flush_audit
+                (admin_user_id, campaign_id, dry_run, recovery_mode, force_any_campaign_status,
+                 bumped_send_ids, failed_send_ids, dry_run_stale_send_ids, extra)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                """,
+                (
+                    current_user.id,
+                    campaign_id,
+                    dry_run,
+                    mode_raw,
+                    bool(force),
+                    bumped,
+                    failed,
+                    dry_ids,
+                    json.dumps(extra_audit),
+                ),
+            )
+        conn.commit()
+
+        return jsonify(
+            {
+                "ok": True,
+                "campaign_id": campaign_id,
+                "dry_run": dry_run,
+                "mode": mode_raw,
+                "updated": updated,
+                "bumped_send_ids": bumped,
+                "failed_send_ids": failed,
+                "dry_run_stale_send_ids": dry_ids if dry_run else [],
+                "next_scheduled_for": None,
+            }
+        )
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[admin_flush_stale] {e}")
+        return jsonify({"error": "server_error", "message": str(e)}), 500
     finally:
         conn.close()
 
@@ -4571,10 +4824,16 @@ def toggle_campaign_pause(campaign_id):
                 cres = _continue_initial_chunk_core(
                     campaign_id, current_user.id, log_label="toggle-start+initial-chunk"
                 )
-                if cres.get("ok"):
+                ib = cres.get("body") if isinstance(cres.get("body"), dict) else {}
+                if ib.get("per_send") is not None:
                     resp_body["initial_chunk"] = {
-                        "instances_created": cres["body"].get("instances_created", 0),
-                        "folders_created": cres["body"].get("folders_created", 0),
+                        "success": ib.get("success"),
+                        "partial": ib.get("partial"),
+                        "instances_created": ib.get("instances_created", 0),
+                        "folders_created": ib.get("folders_created", 0),
+                        "per_send": ib.get("per_send", []),
+                        "message": ib.get("message"),
+                        "status_code": cres.get("status_code"),
                     }
             return json.dumps(resp_body)
 
@@ -5113,9 +5372,12 @@ def _create_campaign_core(user_id, data, admin_id=None):
             if not allowed_instances:
                 print(f"⚠️ [Uazapi] Campanha {campaign_id}: nenhuma instância disponível (limite diário ou sem Uazapi).")
             else:
+                from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
+
                 n_inst = len(allowed_instances)
-                per_instance_limit = min(30, -(-daily_limit // n_inst))
-                total_limit = daily_limit
+                per_instance_limit, total_limit = uazapi_initial_chunk_distribution_limits(
+                    daily_limit, n_inst
+                )
 
                 conn = get_db_connection()
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5914,17 +6176,50 @@ def sync_campaign_uazapi_stats(campaign_id):
         return json.dumps({"error": str(e)}), 500
 
 
+def _initial_chunk_materialization_outcomes(created_ids):
+    """
+    AC13: após materializar ``force_send_ids``, resume estado por ``send_id``/``instance_id``.
+    Retorna (per_send, partial, all_failed).
+    """
+    if not created_ids:
+        return [], False, False
+    from utils.continue_initial_chunk_report import summarize_initial_chunk_materialization_rows
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, instance_id, status, uazapi_folder_id
+                FROM campaign_stage_sends
+                WHERE id = ANY(%s)
+                ORDER BY instance_id NULLS LAST, id
+                """,
+                (list(created_ids),),
+            )
+            rows = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    return summarize_initial_chunk_materialization_rows([dict(r) for r in rows])
+
+
 def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initial-chunk", cancel_scheduled=False):
     """
     Agenda campaign_stage_sends (initial) e materializa na hora via worker_cadence (force_send_ids).
     cancel_scheduled: se True, cancela chunks agendados (status=scheduled) antes de criar novo.
     Retorna dict: ok (bool), status_code, body (dict JSON-serializável).
+
+    Instância ocupada: ``INITIAL_CHUNK_ACTIVE_SEND_STATUSES`` (utils.limits), alinhado a
+    ``schedule_next_initial_chunk``. Após materialização com sucesso, a linha costuma ficar
+    ``running`` na BD mesmo quando a API Uazapi reporta a pasta como ``queued``.
     """
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT c.id, c.name, c.use_uazapi_sender, c.enable_cadence, c.delay_min_minutes, c.delay_max_minutes
+                """SELECT c.id, c.name, c.use_uazapi_sender, c.enable_cadence, c.delay_min_minutes, c.delay_max_minutes,
+                          c.daily_limit, c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday
                    FROM campaigns c
                    WHERE c.id = %s AND c.user_id = %s""",
                 (campaign_id, user_id),
@@ -5966,16 +6261,22 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             conn.close()
             return {"ok": False, "status_code": 400, "body": {"error": "Nenhuma instância Uazapi vinculada"}}
 
-        from utils.limits import can_create_campaign_today
+        from utils.campaign_send_policy import INITIAL_CHUNK_DAILY_QUOTA_POLICY
+        from utils.limits import check_initial_chunk_daily_quota_for_campaign
 
-        allowed = [i for i in instances if can_create_campaign_today(i["instance_id"])]
-        if not allowed:
+        if not check_initial_chunk_daily_quota_for_campaign(campaign_id):
             conn.close()
             return {
                 "ok": False,
                 "status_code": 429,
-                "body": {"error": "Limite diário por instância atingido. Tente após meia-noite BRT."},
+                "body": {
+                    "error": "Limite diário de envios iniciais atingido para hoje (BRT).",
+                    "code": "initial_chunk_daily_quota_exceeded",
+                    "quota_policy": INITIAL_CHUNK_DAILY_QUOTA_POLICY,
+                },
             }
+
+        allowed = list(instances)
 
         # cancel_scheduled: cancela chunks agendados para liberar slot imediato
         if cancel_scheduled:
@@ -5998,9 +6299,13 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 SELECT instance_id FROM campaign_stage_sends
                 WHERE campaign_id = %s AND stage = 'initial'
                   AND instance_id = ANY(%s)
-                  AND status IN ('scheduled', 'running', 'partial', 'queued')
+                  AND status = ANY(%s)
                 """,
-                (campaign_id, [i["instance_id"] for i in allowed]),
+                (
+                    campaign_id,
+                    [i["instance_id"] for i in allowed],
+                    list(INITIAL_CHUNK_ACTIVE_SEND_STATUSES),
+                ),
             )
             busy_instances = {r["instance_id"] for r in (cur.fetchall() or [])}
         allowed = [i for i in allowed if i["instance_id"] not in busy_instances]
@@ -6064,7 +6369,35 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             }
 
         # Um clique = chunks para todas as instâncias. Materialize atribui leads distintos por instância (chunks[0]→inst1, chunks[1]→inst2).
-        scheduled_for = datetime.utcnow() + timedelta(seconds=30)
+        from worker_cadence import MATERIALIZE_LOOKAHEAD_MIN
+        from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
+
+        camp_win = {
+            "send_hour_start": campaign.get("send_hour_start"),
+            "send_hour_end": campaign.get("send_hour_end"),
+            "send_saturday": campaign.get("send_saturday"),
+            "send_sunday": campaign.get("send_sunday"),
+        }
+        now_utc = datetime.utcnow()
+        if is_campaign_send_window(camp_win):
+            scheduled_for = now_utc + timedelta(seconds=30)
+        else:
+            try:
+                scheduled_for = next_valid_send_utc_naive(
+                    camp_win, now_utc, margin_minutes=int(MATERIALIZE_LOOKAHEAD_MIN)
+                )
+            except ValueError as e:
+                conn.close()
+                print(f"[UAZAPI] {log_label} campaign_id={campaign_id}: janela de envio inválida: {e}")
+                return {
+                    "ok": False,
+                    "status_code": 400,
+                    "body": {
+                        "error": "Janela de envio da campanha é inválida ou não permite agendamento nos próximos dias.",
+                        "code": "campaign_send_window_invalid",
+                    },
+                }
+
         created_ids = []
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for inst in sorted(allowed, key=lambda x: x.get("instance_id") or 0):
@@ -6072,10 +6405,10 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                     """
                     SELECT id FROM campaign_stage_sends
                     WHERE campaign_id = %s AND stage = 'initial' AND instance_id = %s
-                      AND status IN ('scheduled', 'running', 'partial')
+                      AND status = ANY(%s)
                     LIMIT 1
                     """,
-                    (campaign_id, inst["instance_id"]),
+                    (campaign_id, inst["instance_id"], list(INITIAL_CHUNK_ACTIVE_SEND_STATUSES)),
                 )
                 if cur.fetchone():
                     continue  # Instância já tem chunk ativo — evita duplicação
@@ -6125,26 +6458,70 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             mat_err = str(ex)
             print(f"[UAZAPI] {log_label} materialização imediata falhou (worker pode concluir): {ex}")
 
-        print(
-            f"[UAZAPI] {log_label} campaign_id={campaign_id}: "
-            f"{len(created_ids)} instâncias, scheduled_for={scheduled_for}, folders_created={folders_created}"
-        )
-        body = {
-            "success": True,
-            "scheduled_for": scheduled_for.isoformat(),
-            "instances_created": len(created_ids),
-            "folders_created": folders_created,
-            "message": (
+        per_send, partial, all_failed = _initial_chunk_materialization_outcomes(created_ids)
+        failed_instances = [
+            p["instance_id"] for p in per_send if p.get("outcome") == "failed" and p.get("instance_id") is not None
+        ]
+        pending_instances = [
+            p["instance_id"]
+            for p in per_send
+            if p.get("outcome") == "scheduled_pending_worker" and p.get("instance_id") is not None
+        ]
+
+        if mat_err:
+            ok_success = False
+            status_code = 502
+            msg = f"Materialização imediata falhou ({mat_err}); chunks gravados — o worker cadence pode concluir."
+        elif all_failed:
+            ok_success = False
+            status_code = 502
+            msg = (
+                "Nenhuma instância obteve pasta na Uazapi nesta tentativa. "
+                f"Instâncias com falha: {failed_instances}. Verifique tokens e limites."
+                if failed_instances
+                else "Nenhuma instância obteve pasta na Uazapi nesta tentativa."
+            )
+        elif partial:
+            ok_success = False
+            status_code = 207
+            msg = (
+                "Resultado parcial: algumas instâncias materializaram e outras não. "
+                f"Verifique per_send (pastas OK vs falha vs ainda agendadas). "
+                f"folders_created={folders_created}, instances={len(created_ids)}."
+            )
+        else:
+            ok_success = True
+            status_code = 200
+            msg = (
                 f"Campanha criada na Uazapi ({folders_created} folder(s))."
                 if folders_created > 0
                 else (
                     "Agendamento salvo; o worker cadence materializará em breve."
-                    if not mat_err
-                    else f"Materialização adiada ({mat_err}); o worker tentará na janela habitual."
+                    if not pending_instances
+                    else (
+                        "Chunks agendados; o worker cadence materializará quando a janela UTC permitir "
+                        f"(instâncias: {pending_instances})."
+                    )
                 )
-            ),
+            )
+
+        print(
+            f"[UAZAPI] {log_label} campaign_id={campaign_id}: "
+            f"{len(created_ids)} instâncias, scheduled_for={scheduled_for}, folders_created={folders_created}, "
+            f"partial={partial}, all_failed={all_failed}, status_code={status_code}"
+        )
+        body = {
+            "success": ok_success,
+            "partial": partial,
+            "scheduled_for": scheduled_for.isoformat(),
+            "instances_created": len(created_ids),
+            "folders_created": folders_created,
+            "per_send": per_send,
+            "message": msg,
         }
-        return {"ok": True, "status_code": 200, "body": body}
+        if mat_err:
+            body["materialize_error"] = mat_err
+        return {"ok": ok_success, "status_code": status_code, "body": body}
     except Exception as e:
         print(f"Erro ao continuar chunk inicial campanha {campaign_id}: {e}")
         return {"ok": False, "status_code": 500, "body": {"error": str(e)}}

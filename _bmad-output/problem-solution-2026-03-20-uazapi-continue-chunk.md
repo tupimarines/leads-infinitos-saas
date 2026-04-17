@@ -64,6 +64,6 @@
 
 ## 6. Riscos / notas
 
-- **Limite diário:** `can_create_campaign_today` ainda pode marcar send como `failed` se cota esgotada.  
+- **Limite diário (atualizado 2026-04):** `can_create_campaign_today` é sempre `True` em `utils/limits.py`; o gate real de cota em destrave/materialize é `check_initial_chunk_daily_quota_for_campaign` e afins (ver `tech-spec-recuperacao-scheduled-stale-worker-cadence-uazapi.md`).  
 - **Duplicata 15 min:** dedupe por instância evita spam de INSERTs.  
 - **Import `worker_cadence` no `app`:** aceitável; alternativa futura seria extrair materialização para `utils/`.

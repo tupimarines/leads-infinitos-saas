@@ -188,7 +188,7 @@ Campanhas UAZAPI em blocos (`campaign_stage_sends`) podem ficar **running** com 
 
 **Continuação** (`schedule_next_initial_chunk` em `worker_cadence.py`):
 
-- Com leads `pending` + `current_step = 1`, insere novas linhas `campaign_stage_sends` com `status = 'scheduled'` para materialização posterior — isto **espalha o mesmo teto diário** ao longo do tempo e janelas, em harmonia com `can_create_campaign_today` por instância.
+- Com leads `pending` + `current_step = 1`, insere novas linhas `campaign_stage_sends` com `status = 'scheduled'` para materialização posterior — isto **espalha o mesmo teto diário** (`campaigns.daily_limit` + distribuição por instância) ao longo do tempo e janelas. **Não** confundir com `can_create_campaign_today` (sempre `True` no código; ver `tech-spec-recuperacao-scheduled-stale-worker-cadence-uazapi.md`, glossário §4).
 
 **Requisito de produto:** o **limite diário da campanha** (`campaigns.daily_limit`) deve continuar a ser o **teto** agregado de envios iniciais no dia, **mesmo** com vários chunks por causa de delays — o desenho atual já corta leads com `LIMIT daily_limit` na query inicial; chunks seguintes consomem o restante **pendente** até esgotar o funil inicial.
 
@@ -279,7 +279,7 @@ Se o `folder_id` for **órfão** na API mas o send continuar **`running`**, a in
 
 - [x] **AC1:** Given `campaign_stage_sends` em `running` com `folder_id` ausente de `listfolders` **e** `list_messages(Scheduled, page=1)` a devolver **`None`**, when `sync_campaign_leads_from_uazapi` corre, then o send passa a **`failed`** e **não** bloqueia `schedule_next_initial_chunk` na mesma instância. *(Com `list_folders` com sucesso — lista utilizável; ver AC5 se `list_folders` falhar.)*
 
-- [ ] **AC2:** Given campanha com `daily_limit = 30` e vários chunks `initial` ao longo do dia, when os chunks completam com sucesso, then o número de leads iniciais enviados no dia **não excede** o teto definido pela combinação de `LIMIT daily_limit` na criação + regras de `can_create_campaign_today` (comportamento atual documentado; regressão coberta por teste manual ou teste de integração leve se existir harness).
+- [ ] **AC2:** Given campanha com `daily_limit = 30` e vários chunks `initial` ao longo do dia, when os chunks completam com sucesso, then o número de leads iniciais enviados no dia **não excede** o teto definido por `LIMIT daily_limit` na criação + política de cota TD-12 (`check_initial_chunk_daily_quota_for_campaign` / plano; **não** `can_create_campaign_today`, que é sempre `True` no código). Regressão coberta por teste manual ou integração leve se existir harness.
 
 - [ ] **AC3:** Given sync normal com pasta existente, when `listfolders` devolve `log_sucess`, then `campaign_stage_sends.success_count` e UI refletem agregados alinhados a `min(log_sucess, planned_count)` conforme lógica existente em `sync_uazapi.py`.
 

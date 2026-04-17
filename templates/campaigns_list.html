@@ -409,11 +409,22 @@
                 body: JSON.stringify(forceCancel ? { cancel_scheduled: true } : {})
             });
             const data = await res.json();
-            if (res.ok && data.success) {
+            if (res.ok && data.success && !data.partial) {
                 if (typeof showToast === 'function') {
                     showToast(data.message || 'Próximo chunk agendado. Envio em ~30 seg (worker cadence precisa estar rodando).', 'success');
                 } else {
                     alert(data.message || 'Próximo chunk agendado. Envio em ~30 seg (worker cadence precisa estar rodando).');
+                }
+                await updateCampaignStats(campaignId);
+            } else if (res.ok && (res.status === 207 || data.partial)) {
+                const detail = Array.isArray(data.per_send)
+                    ? data.per_send.map((p) => `instância ${p.instance_id}: ${p.outcome}`).join('; ')
+                    : '';
+                const msg = (data.message || 'Resultado parcial entre instâncias Uazapi.') + (detail ? ` (${detail})` : '');
+                if (typeof showToast === 'function') {
+                    showToast(msg, 'warning');
+                } else {
+                    alert(msg);
                 }
                 await updateCampaignStats(campaignId);
             } else if (res.status === 409 && !forceCancel && confirm('Há chunk agendado. Cancelar agendamento e criar para envio imediato?')) {

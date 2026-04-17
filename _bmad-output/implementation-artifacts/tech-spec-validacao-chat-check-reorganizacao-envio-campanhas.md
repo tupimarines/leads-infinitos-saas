@@ -169,6 +169,7 @@ curl --request POST \
   - File: `utils/limits.py`
   - Action: `get_sent_today_count(user_id)` — count por user_id; `get_sent_today_count_by_instance(instance_id)` ou `can_create_campaign_today(instance_id)` — retorna True se instância ainda não criou campanha hoje (ou após meia-noite). Nova campanha só liberada após meia-noite BRT (F2).
   - Notes: 1 campanha por instância por dia.
+  - **Nota (2026-04, T11 tech-spec recuperação):** O texto da Action acima é legado de desenho antigo. Em código atual, `can_create_campaign_today` em `utils/limits.py` **sempre retorna `True`**; cotas e tetos reais estão em `check_initial_chunk_daily_quota_for_campaign` / `get_user_daily_limit` + `campaigns.daily_limit` (ver `utils/campaign_send_policy.py` e `tech-spec-recuperacao-scheduled-stale-worker-cadence-uazapi.md`, glossário).
 
 - [x] **Task 5: Aplicar limite na criação de campanha Uazapi**
   - File: `app.py` (bloco ~3690–3705)
