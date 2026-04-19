@@ -27,7 +27,7 @@ INITIAL_CHUNK_ACTIVE_SEND_STATUSES = ("scheduled", "running", "partial", "queued
 
 # Fonte única de regras de plano.
 # validity_days: dias até expiração (a partir da data de aplicação ao usuário).
-# starter_trial: 7 dias; demais planos: 365 dias.
+# starter_trial: 7 dias; 1 instância; 100 extrações/mês; 10 disparos/dia/instância; demais planos: 365 dias.
 PLAN_POLICY = {
     "starter": {
         "instance_limit": 1,
@@ -37,9 +37,9 @@ PLAN_POLICY = {
         "validity_days": 365,
     },
     "starter_trial": {
-        "instance_limit": 2,
-        "monthly_extraction_limit": 210,
-        "daily_sends_per_instance_default": 15,
+        "instance_limit": 1,
+        "monthly_extraction_limit": 100,
+        "daily_sends_per_instance_default": 10,
         "infinite_daily_options": (),
         "validity_days": 7,
     },
