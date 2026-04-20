@@ -1022,147 +1022,6 @@ def _require_provision_secret():
     return None
 
 
-@app.route("/api/provision/user", methods=["POST"])
-def api_provision_user():
-    """
-    Cria usuário por e-mail (server-to-server). Autenticação: ver PROVISION_API_SECRET.
-    Body JSON: email (obrigatório), password (opcional; se omitido ou vazio, gera e devolve uma vez).
-    """
-    auth_err = _require_provision_secret()
-    if auth_err is not None:
-        return auth_err
-
-    if not request.is_json:
-        return jsonify({"error": "invalid_request", "message": "Content-Type deve ser application/json."}), 400
-
-    data = request.get_json(silent=True) or {}
-    email = (data.get("email") or "").strip().lower()
-    if not email:
-        return jsonify({"error": "invalid_request", "message": "Campo email é obrigatório."}), 400
-
-    if User.get_by_email(email):
-        return jsonify({"error": "email_already_registered"}), 409
-
-    raw_password = data.get("password")
-    if raw_password is None or (isinstance(raw_password, str) and not raw_password.strip()):
-        password_plain = secrets.token_urlsafe(12)
-        password_generated = True
-    else:
-        password_plain = raw_password if isinstance(raw_password, str) else str(raw_password)
-        password_generated = False
-
-    user = User.create(email, password_plain)
-
-    body = {"user_id": user.id, "email": user.email}
-    if password_generated:
-        body["password"] = password_plain
-    else:
-        body["password_set"] = True
-    return jsonify(body), 201
-
-
-@app.route("/api/provision/license", methods=["POST"])
-def api_provision_license():
-    """
-    Aplica licença a usuário existente por e-mail (server-to-server). Autenticação: ver PROVISION_API_SECRET.
-    Body JSON: email (obrigatório), license_type (opcional; default starter_trial).
-    Revoga licenças do usuário e insere a nova na mesma transação (um único get_db_connection).
-    """
-    auth_err = _require_provision_secret()
-    if auth_err is not None:
-        return auth_err
-
-    if not request.is_json:
-        return jsonify({"error": "invalid_request", "message": "Content-Type deve ser application/json."}), 400
-
-    data = request.get_json(silent=True) or {}
-    email = (data.get("email") or "").strip().lower()
-    if not email:
-        return jsonify({"error": "invalid_request", "message": "Campo email é obrigatório."}), 400
-
-    raw_lt = data.get("license_type")
-    if raw_lt is None:
-        license_type_input = "starter_trial"
-    else:
-        if not isinstance(raw_lt, str):
-            return jsonify({"error": "invalid_request", "message": "Campo license_type deve ser string."}), 400
-        license_type_input = raw_lt.strip().lower()
-        if not license_type_input:
-            license_type_input = "starter_trial"
-
-    license_type = resolve_license_type(license_type_input, allow_legacy_fallback=False)
-    if not license_type or license_type not in ACTIVE_LICENSE_TYPES:
-        allowed_plans = ", ".join(ACTIVE_LICENSE_TYPES)
-        return (
-            jsonify(
-                {
-                    "error": "invalid_license_type",
-                    "message": f"Plano inválido: '{license_type_input}'. Use apenas: {allowed_plans}.",
-                    "allowed_license_types": list(ACTIVE_LICENSE_TYPES),
-                }
-            ),
-            400,
-        )
-
-    user = User.get_by_email(email)
-    if not user:
-        return jsonify({"error": "user_not_found", "message": "Usuário não encontrado para este email."}), 404
-
-    purchase_id = f"MANUAL-{secrets.token_hex(8)}"
-    product_id = "MANUAL-GRANT"
-    purchase_date = datetime.utcnow().isoformat()
-    purchase_dt = datetime.fromisoformat(purchase_date.replace("Z", "+00:00"))
-    policy = get_plan_policy(license_type)
-    validity_days = int(policy.get("validity_days", 365))
-    expires_at = purchase_dt + timedelta(days=validity_days)
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE licenses SET status = 'cancelled' WHERE user_id = %s",
-                (user.id,),
-            )
-            cur.execute(
-                """
-                INSERT INTO licenses
-                (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    user.id,
-                    purchase_id,
-                    product_id,
-                    license_type,
-                    purchase_date,
-                    expires_at.isoformat(),
-                ),
-            )
-            row = cur.fetchone()
-            new_id = row[0]
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"Erro ao provisionar licença: {e}")
-        return jsonify({"error": "server_error", "message": "Erro ao criar licença."}), 500
-    finally:
-        conn.close()
-
-    return (
-        jsonify(
-            {
-                "license_id": new_id,
-                "user_id": user.id,
-                "email": user.email,
-                "license_type": license_type,
-                "status": "active",
-            }
-        ),
-        201,
-    )
-
-
 def _admin_stale_flush_rate_allow(user_id: int) -> bool:
     """T10: até 15 POST / minuto por admin (Redis)."""
     try:
@@ -2101,6 +1960,147 @@ def load_user(user_id: str):
         return User.get_by_id(int(user_id))
     except Exception:
         return None
+
+
+@app.route("/api/provision/user", methods=["POST"])
+def api_provision_user():
+    """
+    Cria usuário por e-mail (server-to-server). Autenticação: ver PROVISION_API_SECRET.
+    Body JSON: email (obrigatório), password (opcional; se omitido ou vazio, gera e devolve uma vez).
+    """
+    auth_err = _require_provision_secret()
+    if auth_err is not None:
+        return auth_err
+
+    if not request.is_json:
+        return jsonify({"error": "invalid_request", "message": "Content-Type deve ser application/json."}), 400
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "invalid_request", "message": "Campo email é obrigatório."}), 400
+
+    if User.get_by_email(email):
+        return jsonify({"error": "email_already_registered"}), 409
+
+    raw_password = data.get("password")
+    if raw_password is None or (isinstance(raw_password, str) and not raw_password.strip()):
+        password_plain = secrets.token_urlsafe(12)
+        password_generated = True
+    else:
+        password_plain = raw_password if isinstance(raw_password, str) else str(raw_password)
+        password_generated = False
+
+    user = User.create(email, password_plain)
+
+    body = {"user_id": user.id, "email": user.email}
+    if password_generated:
+        body["password"] = password_plain
+    else:
+        body["password_set"] = True
+    return jsonify(body), 201
+
+
+@app.route("/api/provision/license", methods=["POST"])
+def api_provision_license():
+    """
+    Aplica licença a usuário existente por e-mail (server-to-server). Autenticação: ver PROVISION_API_SECRET.
+    Body JSON: email (obrigatório), license_type (opcional; default starter_trial).
+    Revoga licenças do usuário e insere a nova na mesma transação (um único get_db_connection).
+    """
+    auth_err = _require_provision_secret()
+    if auth_err is not None:
+        return auth_err
+
+    if not request.is_json:
+        return jsonify({"error": "invalid_request", "message": "Content-Type deve ser application/json."}), 400
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "invalid_request", "message": "Campo email é obrigatório."}), 400
+
+    raw_lt = data.get("license_type")
+    if raw_lt is None:
+        license_type_input = "starter_trial"
+    else:
+        if not isinstance(raw_lt, str):
+            return jsonify({"error": "invalid_request", "message": "Campo license_type deve ser string."}), 400
+        license_type_input = raw_lt.strip().lower()
+        if not license_type_input:
+            license_type_input = "starter_trial"
+
+    license_type = resolve_license_type(license_type_input, allow_legacy_fallback=False)
+    if not license_type or license_type not in ACTIVE_LICENSE_TYPES:
+        allowed_plans = ", ".join(ACTIVE_LICENSE_TYPES)
+        return (
+            jsonify(
+                {
+                    "error": "invalid_license_type",
+                    "message": f"Plano inválido: '{license_type_input}'. Use apenas: {allowed_plans}.",
+                    "allowed_license_types": list(ACTIVE_LICENSE_TYPES),
+                }
+            ),
+            400,
+        )
+
+    user = User.get_by_email(email)
+    if not user:
+        return jsonify({"error": "user_not_found", "message": "Usuário não encontrado para este email."}), 404
+
+    purchase_id = f"MANUAL-{secrets.token_hex(8)}"
+    product_id = "MANUAL-GRANT"
+    purchase_date = datetime.utcnow().isoformat()
+    purchase_dt = datetime.fromisoformat(purchase_date.replace("Z", "+00:00"))
+    policy = get_plan_policy(license_type)
+    validity_days = int(policy.get("validity_days", 365))
+    expires_at = purchase_dt + timedelta(days=validity_days)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE licenses SET status = 'cancelled' WHERE user_id = %s",
+                (user.id,),
+            )
+            cur.execute(
+                """
+                INSERT INTO licenses
+                (user_id, hotmart_purchase_id, hotmart_product_id, license_type, purchase_date, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    user.id,
+                    purchase_id,
+                    product_id,
+                    license_type,
+                    purchase_date,
+                    expires_at.isoformat(),
+                ),
+            )
+            row = cur.fetchone()
+            new_id = row[0]
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao provisionar licença: {e}")
+        return jsonify({"error": "server_error", "message": "Erro ao criar licença."}), 500
+    finally:
+        conn.close()
+
+    return (
+        jsonify(
+            {
+                "license_id": new_id,
+                "user_id": user.id,
+                "email": user.email,
+                "license_type": license_type,
+                "status": "active",
+            }
+        ),
+        201,
+    )
 
 
 # Inicializa o banco na carga da aplicação (Flask 3 removeu before_first_request)
