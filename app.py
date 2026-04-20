@@ -48,6 +48,7 @@ from functools import wraps
 import pytz
 from utils.limits import (
     INITIAL_CHUNK_ACTIVE_SEND_STATUSES,
+    LEGACY_LICENSE_TYPE_FALLBACK,
     PLAN_POLICY,
     INFINITE_DAILY_SEND_OPTIONS,
     get_plan_policy,
@@ -483,6 +484,23 @@ def _init_db_body() -> None:
                 END LOOP;
             END $$;
         """)
+        cur.execute(
+            "ALTER TABLE licenses DROP CONSTRAINT IF EXISTS licenses_license_type_check;"
+        )
+        # Garantir que nenhuma linha viole o novo CHECK (legado semestral/anual ou lixo → planos válidos).
+        cur.execute(
+            "UPDATE licenses SET license_type = lower(trim(license_type)) WHERE license_type IS NOT NULL;"
+        )
+        for legacy_key, resolved in LEGACY_LICENSE_TYPE_FALLBACK.items():
+            cur.execute(
+                "UPDATE licenses SET license_type = %s WHERE license_type = %s",
+                (resolved, legacy_key.lower()),
+            )
+        allowed_license_types = tuple(PLAN_POLICY.keys())
+        cur.execute(
+            "UPDATE licenses SET license_type = %s WHERE license_type::text NOT IN %s",
+            ("starter", allowed_license_types),
+        )
         cur.execute("""
             ALTER TABLE licenses ADD CONSTRAINT licenses_license_type_check
             CHECK (license_type IN ('starter', 'starter_trial', 'pro', 'scale', 'infinite'));
