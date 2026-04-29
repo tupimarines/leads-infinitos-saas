@@ -239,6 +239,16 @@ def _init_db_body() -> None:
             );
             """
         )
+        cur.execute(
+            """
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_e164 TEXT;
+            """
+        )
     
         # Adicionar coluna is_admin se não existir (migração)
         print("➡️ Adicionando coluna is_admin se necessário...")
@@ -426,6 +436,11 @@ def _init_db_body() -> None:
                 status TEXT DEFAULT 'disconnected',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE instances ADD COLUMN IF NOT EXISTS last_disconnect_notify_at TIMESTAMPTZ;
             """
         )
 
@@ -718,6 +733,8 @@ def _init_db_body() -> None:
             ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS delay_max_minutes INTEGER;
             ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS message_variations JSONB;
             ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS fu_rollover_done BOOLEAN DEFAULT FALSE;
+            ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS last_materialize_error TEXT;
+            ALTER TABLE campaign_stage_sends ADD COLUMN IF NOT EXISTS materialize_attempt_count INTEGER DEFAULT 0;
             CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_campaign_stage
                 ON campaign_stage_sends(campaign_id, stage);
             CREATE INDEX IF NOT EXISTS idx_campaign_stage_sends_folder_id
@@ -2922,7 +2939,7 @@ def campaign_kanban_data(campaign_id):
                 with conn_sync.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         """SELECT 1 FROM campaign_stage_sends
-                           WHERE campaign_id = %s AND status IN ('scheduled', 'running', 'partial')
+                           WHERE campaign_id = %s AND status IN ('scheduled', 'waiting_reconnect', 'running', 'partial')
                            LIMIT 1""",
                         (campaign_id,),
                     )
@@ -6114,7 +6131,7 @@ def get_campaign_stats(campaign_id):
             if campaign.get('use_uazapi_sender') and campaign.get('enable_cadence'):
                 with conn_stage.cursor() as cur_sched:
                     cur_sched.execute(
-                        "SELECT 1 FROM campaign_stage_sends WHERE campaign_id = %s AND stage = 'initial' AND status = 'scheduled' LIMIT 1",
+                        "SELECT 1 FROM campaign_stage_sends WHERE campaign_id = %s AND stage = 'initial' AND status IN ('scheduled', 'waiting_reconnect') LIMIT 1",
                         (campaign_id,),
                     )
                     has_scheduled_chunk = cur_sched.fetchone() is not None
@@ -6443,7 +6460,7 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
                 cur.execute(
                     """
                     UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW()
-                    WHERE campaign_id = %s AND stage = 'initial' AND status = 'scheduled'
+                    WHERE campaign_id = %s AND stage = 'initial' AND status IN ('scheduled', 'waiting_reconnect')
                     """,
                     (campaign_id,),
                 )

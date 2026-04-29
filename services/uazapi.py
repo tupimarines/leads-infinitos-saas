@@ -295,11 +295,20 @@ class UazapiService:
                 url, json=payload, headers=headers, timeout=30
             )
             if response.status_code != 200:
+                err_body: Any = None
+                try:
+                    err_body = response.json()
+                except Exception:
+                    err_body = {"raw": (getattr(response, "text", None) or "")[:8000]}
                 print(
                     f"❌ [Uazapi] create_advanced_campaign Status: {response.status_code}"
                 )
                 print(f"❌ [Uazapi] create_advanced_campaign Body: {response.text}")
-            response.raise_for_status()
+                return {
+                    "uazapi_request_failed": True,
+                    "http_status": response.status_code,
+                    "error_body": err_body,
+                }
             data = response.json()
             if os.environ.get("UAZAPI_DEBUG", "").strip().lower() in ("1", "true", "yes"):
                 try:
@@ -312,7 +321,23 @@ class UazapiService:
             print(f"❌ [Uazapi] Error creating advanced campaign: {e}")
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
-            return None
+            status = None
+            err_body: Any = None
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    status = e.response.status_code
+                except Exception:
+                    status = None
+                try:
+                    err_body = e.response.json()
+                except Exception:
+                    err_body = (getattr(e.response, "text", None) or str(e))[:4000]
+            return {
+                "uazapi_request_failed": True,
+                "http_status": status,
+                "error_body": err_body,
+                "exception": str(e)[:2000],
+            }
 
     def edit_campaign(
         self, token: str, folder_id: str, action: str

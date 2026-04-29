@@ -19,11 +19,18 @@ INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
 # campaign_stage_sends (stage initial): só estes status bloqueiam novo chunk na mesma instância
 # (worker_cadence.schedule_next_initial_chunk, _continue_initial_chunk_core busy check).
 # failed/done não entram — após pasta órfã (sync → failed), a instância volta a poder receber chunk.
+# waiting_reconnect: instância desconectada; materialização pausada até reconexão.
 #
 # TD-7 / T8: inclui ``queued`` para alinhar com ``app.py`` (legado ou futuro). Após ``create_advanced_campaign``
 # bem-sucedido, o worker grava ``status='running'`` na BD mesmo quando a API Uazapi devolve ``status=queued``
 # na pasta — ``queued`` aqui é estado de *linha* em campaign_stage_sends, não o status remoto da API.
-INITIAL_CHUNK_ACTIVE_SEND_STATUSES = ("scheduled", "running", "partial", "queued")
+INITIAL_CHUNK_ACTIVE_SEND_STATUSES = (
+    "scheduled",
+    "running",
+    "partial",
+    "queued",
+    "waiting_reconnect",
+)
 
 # Fonte única de regras de plano.
 # validity_days: dias até expiração (a partir da data de aplicação ao usuário).

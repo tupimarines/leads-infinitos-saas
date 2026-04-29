@@ -15,6 +15,8 @@ def classify_initial_chunk_send_row(row: dict) -> str:
     has_folder = fid is not None and str(fid).strip() != ""
     if st == "failed":
         return "failed"
+    if st == "waiting_reconnect":
+        return "waiting_reconnect"
     if has_folder or st in ("running", "partial", "queued"):
         return "materialized"
     if st == "scheduled":
@@ -48,7 +50,12 @@ def summarize_initial_chunk_materialization_rows(
             }
         )
 
-    relevant = kinds & {"materialized", "failed", "scheduled_pending_worker"}
+    relevant = kinds & {
+        "materialized",
+        "failed",
+        "scheduled_pending_worker",
+        "waiting_reconnect",
+    }
     partial = len(relevant) > 1
     all_failed = bool(per_send) and all(p["outcome"] == "failed" for p in per_send)
     return per_send, partial, all_failed

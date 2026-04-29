@@ -916,7 +916,7 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
                JOIN instances i ON i.id = css.instance_id
                WHERE css.campaign_id = %s
                  AND css.uazapi_folder_id IS NOT NULL
-                 AND css.status IN ('scheduled', 'running', 'partial', 'done')""",
+              AND css.status IN ('scheduled', 'running', 'partial', 'waiting_reconnect')
             (campaign_id,),
         )
         stage_sends = cur.fetchall() or []

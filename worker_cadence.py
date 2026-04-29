@@ -66,10 +66,14 @@ from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_sen
 from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
 # Slot matinal automático do chunk initial: ``cadence_next_initial_send_slot`` em
 # ``utils/initial_chunk_schedule_target.py`` (sucessor de ``_next_initial_send_slot``).
-from utils.initial_chunk_schedule_target import (
-    cadence_next_send_datetime,
-    uazapi_same_day_initial_chunk_after_unlock_enabled,
-    resolve_initial_chunk_schedule_target,
+from utils.uazapi_error_taxonomy import (
+    classify_create_advanced_error,
+    format_last_error_for_db,
+)
+from utils.uazapi_support_notify import (
+    get_instance_status_cached,
+    is_instance_disconnected_status,
+    maybe_send_disconnect_support_whatsapp,
 )
 
 # Chatwoot Config
@@ -94,6 +98,25 @@ VERIFY_FOLDER_AFTER_SECONDS = 180  # list_folders 3 min após create_advanced_ca
 
 # Fila de verificação pós-create: (send_id, folder_id, token, verify_at)
 _verify_folder_queue = []
+
+
+def _next_retry_utc_for_materialize(camp_win, now_utc_naive, attempt_count):
+    """
+    Backoff exponencial (cap 30 min) alinhado à janela BRT: se cair fora, usa
+    next_valid_send_utc_naive a partir de agora.
+    """
+    m = 2 ** min(max(0, int(attempt_count or 0)), 4)
+    m = max(1, min(int(m), 30))
+    cand = now_utc_naive + timedelta(minutes=m)
+    if getattr(cand, "tzinfo", None) is None:
+        br = pytz.UTC.localize(cand).astimezone(BRAZIL_TZ)
+    else:
+        br = cand.astimezone(BRAZIL_TZ)
+    if is_campaign_send_window(camp_win, now_brazil=br):
+        return cand
+    return next_valid_send_utc_naive(
+        camp_win, now_utc_naive, margin_minutes=0
+    )
 
 
 def _reconcile_find_before_rollover_enabled():
@@ -783,14 +806,15 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
                        css.status, i.apikey,
                        css.delay_min_minutes, css.delay_max_minutes, css.message_variations, css.lead_ids,
+                       css.materialize_attempt_count,
                        c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max,
                        c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender,
-                       c.daily_limit
+                       c.daily_limit, c.user_id
                 FROM campaign_stage_sends css
                 JOIN campaigns c ON c.id = css.campaign_id
                 JOIN instances i ON i.id = css.instance_id
                 WHERE css.id = ANY(%s)
-                  AND css.status = 'scheduled'
+                  AND css.status IN ('scheduled', 'waiting_reconnect')
                   AND css.uazapi_folder_id IS NULL
                   AND css.scheduled_for IS NOT NULL
                 ORDER BY css.scheduled_for ASC, css.id ASC
@@ -805,13 +829,14 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 SELECT css.id, css.campaign_id, css.stage, css.instance_id, css.scheduled_for,
                        css.status, i.apikey,
                        css.delay_min_minutes, css.delay_max_minutes, css.message_variations, css.lead_ids,
+                       css.materialize_attempt_count,
                        c.delay_min_minutes AS campaign_delay_min, c.delay_max_minutes AS campaign_delay_max,
                        c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.use_uazapi_sender,
-                       c.daily_limit
+                       c.daily_limit, c.user_id
                 FROM campaign_stage_sends css
                 JOIN campaigns c ON c.id = css.campaign_id
                 JOIN instances i ON i.id = css.instance_id
-                WHERE css.status = 'scheduled'
+                WHERE css.status IN ('scheduled', 'waiting_reconnect')
                   AND css.uazapi_folder_id IS NULL
                   AND css.scheduled_for IS NOT NULL
                   AND css.scheduled_for <= ((NOW() AT TIME ZONE 'UTC') + (%s * INTERVAL '1 minute'))
@@ -986,7 +1011,6 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 "send_sunday": send.get("send_sunday"),
             }
             if send.get("use_uazapi_sender") and not is_campaign_send_window(camp_win):
-                sched_for = send.get("scheduled_for") or scheduled_for
                 if sched_for:
                     rem_sec = (sched_for - now_utc_naive).total_seconds()
                     within_materialize = (
@@ -1022,7 +1046,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                             """
                             UPDATE campaign_stage_sends
                             SET status = 'failed', updated_at = NOW()
-                            WHERE id = %s AND status = 'scheduled'
+                            WHERE id = %s AND status IN ('scheduled', 'waiting_reconnect')
                             """,
                             (send_id,),
                         )
@@ -1040,7 +1064,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                         """
                         UPDATE campaign_stage_sends
                         SET scheduled_for = %s, updated_at = NOW()
-                        WHERE id = %s AND status = 'scheduled'
+                        WHERE id = %s AND status IN ('scheduled', 'waiting_reconnect')
                         """,
                         (next_sf, send_id),
                     )
@@ -1110,16 +1134,59 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 conn.commit()
                 continue
 
-            delay_fallback_min = int(send.get("delay_min_minutes") or send.get("campaign_delay_min") or 5)
-            delay_fallback_max = int(send.get("delay_max_minutes") or send.get("campaign_delay_max") or 15)
+            # Reserva: persistir lead_ids + planned_count antes de POST (retomada e exclusão)
+            with conn.cursor() as cur:
+                pl = [c["id"] for c in chunk if c and c.get("id") is not None]
+                cur.execute(
+                    """
+                    UPDATE campaign_stage_sends
+                    SET lead_ids = %s,
+                        planned_count = %s,
+                        message_variations = %s,
+                        status = 'scheduled',
+                        updated_at = NOW()
+                    WHERE id = %s AND uazapi_folder_id IS NULL
+                    """,
+                    (json.dumps(pl), len(pl), Json(step_msgs), send_id),
+                )
+            conn.commit()
+            reloaded = dict(send)
+            reloaded['materialize_attempt_count'] = int(
+                (send.get("materialize_attempt_count") or 0) or 0
+            )
+            reloaded["lead_ids"] = pl
+
+            delay_fallback_min = int(
+                reloaded.get("delay_min_minutes")
+                or reloaded.get("campaign_delay_min")
+                or 5
+            )
+            delay_fallback_max = int(
+                reloaded.get("delay_max_minutes")
+                or reloaded.get("campaign_delay_max")
+                or 15
+            )
             if delay_fallback_max < delay_fallback_min:
                 delay_fallback_max = delay_fallback_min
+            reloaded["delay_min_minutes"] = delay_fallback_min
+            reloaded["delay_max_minutes"] = delay_fallback_max
+            rechunk = [c for c in chunk if c.get("id") in set(pl)]
+            if not rechunk and pl:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE campaign_stage_sends SET status = 'failed', last_materialize_error = %s, updated_at = NOW() WHERE id = %s",
+                        (json.dumps({"error": "reserved_leads_mismatch"}), send_id),
+                    )
+                conn.commit()
+                break
 
-            use_pacing = bool(send.get("use_uazapi_sender")) and stage == "initial" and len(chunk) >= 2
+            use_pacing = (
+                bool(reloaded.get("use_uazapi_sender")) and stage == "initial" and len(rechunk) >= 2
+            )
             if use_pacing:
-                pacing_plan = build_pacing_segments_for_leads(chunk)
+                pacing_plan = build_pacing_segments_for_leads(rechunk)
             else:
-                pacing_plan = [(tuple(chunk), delay_fallback_min, delay_fallback_max, 0)]
+                pacing_plan = [(tuple(rechunk), delay_fallback_min, delay_fallback_max, 0)]
 
             t_chain = now_utc_naive
             prev_sub, prev_dmin, prev_dmax, prev_gap = None, None, None, 0
@@ -1129,6 +1196,76 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
 
             for seg_i, (sub_chunk_t, dmin, dmax, gap_after) in enumerate(pacing_plan):
                 sub_chunk = list(sub_chunk_t)
+                if (
+                    seg_i == 0
+                    and sub_chunk
+                    and send.get("use_uazapi_sender")
+                ):
+                    iid = send.get("instance_id")
+                    st_payload = get_instance_status_cached(
+                        uazapi_service, int(iid), (token or "").strip()
+                    )
+                    if is_instance_disconnected_status(st_payload):
+                        uid = send.get("user_id")
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "uazapi_materialize_blocked_disconnected",
+                                    "campaign_id": campaign_id,
+                                    "send_id": send_id,
+                                    "instance_id": iid,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                UPDATE campaign_stage_sends
+                                SET status = 'waiting_reconnect',
+                                    scheduled_for = %s,
+                                    last_materialize_error = %s,
+                                    materialize_attempt_count = %s,
+                                    updated_at = NOW()
+                                WHERE id = %s
+                                """,
+                                (
+                                    now_utc_naive + timedelta(minutes=2),
+                                    format_last_error_for_db(
+                                        {
+                                            "uazapi_request_failed": True,
+                                            "error_body": "instance_status_disconnected",
+                                        },
+                                        "no_session",
+                                    ),
+                                    int((reloaded.get("materialize_attempt_count") or 0) or 0) + 1,
+                                    send_id,
+                                ),
+                            )
+                        conn.commit()
+                        if uid:
+                            try:
+                                maybe_send_disconnect_support_whatsapp(
+                                    conn,
+                                    uazapi_service,
+                                    campaign_id=campaign_id,
+                                    user_id=int(uid),
+                                    instance_id=int(iid),
+                                )
+                            except Exception as _ex:
+                                print(
+                                    json.dumps(
+                                        {
+                                            "event": "uazapi_support_notify_ex",
+                                            "error": str(_ex)[:400],
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                    flush=True,
+                                )
+                        break
+
                 messages, lead_ids = _build_messages_for_sub(sub_chunk, step_msgs)
                 if not messages:
                     print(
@@ -1190,13 +1327,121 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                     info=f"Campaign {campaign_id} {stage} inst {send.get('instance_id')} seg0",
                 )
                 folder_id = (result or {}).get("folder_id") or (result or {}).get("folderId")
+                cat, _msg, _http = classify_create_advanced_error(result)
                 if not result or not folder_id:
-                    err_msg = (result or {}).get("error") or (result or {}).get("message") or str(result)
-                    print(f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: Uazapi create_advanced_campaign falhou. folder_id={folder_id} err={err_msg}")
+                    err_msg = (result or {}).get("error") or (result or {}).get("message")
+                    if err_msg is None and isinstance(result, dict) and result.get(
+                        "uazapi_request_failed"
+                    ):
+                        err_msg = str(
+                            (result.get("error_body") or result.get("exception") or "")
+                        )[:500]
+                    print(
+                        f"  ❌ [Materialize] campaign_id={campaign_id} inst={send.get('instance_id')}: "
+                        f"Uazapi create_advanced_campaign falhou. folder_id={folder_id} err={err_msg!s} class={cat}"
+                    )
+                    le = format_last_error_for_db(result, cat)
+                    ac = int((reloaded.get("materialize_attempt_count") or 0) or 0)
+                    uid = send.get("user_id")
+                    if cat == "no_session" and uid:
+                        try:
+                            maybe_send_disconnect_support_whatsapp(
+                                conn,
+                                uazapi_service,
+                                campaign_id=campaign_id,
+                                user_id=int(uid),
+                                instance_id=int(send.get("instance_id") or 0),
+                            )
+                        except Exception as _ex:
+                            print(
+                                json.dumps(
+                                    {
+                                        "event": "uazapi_support_notify_ex",
+                                        "error": str(_ex)[:400],
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                flush=True,
+                            )
+                    if cat == "no_session":
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                UPDATE campaign_stage_sends
+                                SET status = 'waiting_reconnect',
+                                    scheduled_for = %s,
+                                    last_materialize_error = %s,
+                                    materialize_attempt_count = %s,
+                                    updated_at = NOW()
+                                WHERE id = %s
+                                """,
+                                (
+                                    now_utc_naive + timedelta(minutes=2),
+                                    le,
+                                    ac + 1,
+                                    send_id,
+                                ),
+                            )
+                        conn.commit()
+                        break
+                    if cat in (
+                        "transient_http",
+                        "empty_response",
+                        "server_error",
+                    ) and ac < 5:
+                        try:
+                            next_sf = _next_retry_utc_for_materialize(
+                                camp_win, now_utc_naive, ac
+                            )
+                        except ValueError as vex:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    UPDATE campaign_stage_sends
+                                    SET status = 'failed',
+                                        last_materialize_error = %s,
+                                        materialize_attempt_count = %s,
+                                        updated_at = NOW()
+                                    WHERE id = %s
+                                    """,
+                                    (
+                                        (le or "")[:1500]
+                                        + json.dumps(
+                                            {"next_valid_error": str(vex)},
+                                            ensure_ascii=False,
+                                        )[:200],
+                                        ac + 1,
+                                        send_id,
+                                    ),
+                                )
+                            conn.commit()
+                            break
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                UPDATE campaign_stage_sends
+                                SET status = 'scheduled',
+                                    scheduled_for = %s,
+                                    last_materialize_error = %s,
+                                    materialize_attempt_count = %s,
+                                    updated_at = NOW()
+                                WHERE id = %s
+                                """,
+                                (next_sf, le, ac + 1, send_id),
+                            )
+                        conn.commit()
+                        break
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW() WHERE id = %s",
-                            (send_id,),
+                            """
+                            UPDATE campaign_stage_sends
+                            SET status = 'failed',
+                                last_materialize_error = %s,
+                                materialize_attempt_count = %s,
+                                updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (le, ac + 1, send_id),
                         )
                     conn.commit()
                     break
@@ -1223,6 +1468,8 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                             delay_max_minutes = %s,
                             message_variations = %s,
                             status = 'running',
+                            last_materialize_error = NULL,
+                            materialize_attempt_count = 0,
                             updated_at = NOW()
                         WHERE id = %s
                         """,
@@ -1256,7 +1503,56 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
     return {"folders_created": folders_created}
 
 
-def _process_verify_folder_queue():
+def _resume_waiting_reconnect_stage_sends(conn):
+    """
+    Tenta reativar ``waiting_reconnect`` quando a instância Uazapi volta a ``connected``,
+    puxa ``get_status`` e promove a linha a ``scheduled`` (mantém reserva em lead_ids).
+    """
+    if not uazapi_service:
+        return
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT css.id, css.instance_id, i.apikey
+            FROM campaign_stage_sends css
+            JOIN instances i ON i.id = css.instance_id
+            WHERE css.status = 'waiting_reconnect'
+              AND css.uazapi_folder_id IS NULL
+              AND css.scheduled_for <= (NOW() AT TIME ZONE 'UTC')
+            LIMIT 30
+            """
+        )
+        rows = cur.fetchall() or []
+    for r in rows:
+        sid = r.get("id")
+        iid = r.get("instance_id")
+        tok = (r.get("apikey") or "").strip()
+        st = get_instance_status_cached(
+            uazapi_service, int(iid or 0), tok
+        )
+        if st and not is_instance_disconnected_status(st):
+            nxt = datetime.utcnow() + timedelta(seconds=30)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaign_stage_sends
+                    SET status = 'scheduled', scheduled_for = %s, updated_at = NOW()
+                    WHERE id = %s AND status = 'waiting_reconnect'
+                    """,
+                    (nxt, sid),
+                )
+            conn.commit()
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_waiting_reconnect_resumed",
+                        "send_id": sid,
+                        "instance_id": iid,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
     """
     Processa fila de verificação: 3 min após create_advanced_campaign, chama list_folders
     e confirma se folder existe e status em (queued, scheduled, sending). Log único por send.
@@ -1367,6 +1663,9 @@ def process_cadence():
     while True:
         try:
             conn = get_db_connection()
+
+            # Reativar waiting_reconnect quando a instância Uazapi reconecta
+            _resume_waiting_reconnect_stage_sends(conn)
 
             # T7: recovery de ``scheduled`` initial sem pasta (TTL) antes do materialize — F1
             _recover_stale_scheduled_initial_uazapi_sends(conn)
