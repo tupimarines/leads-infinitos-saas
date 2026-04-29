@@ -10,6 +10,11 @@
             <p class="text-gray-400">Todas as campanhas do sistema</p>
         </div>
         <div class="flex gap-4">
+            <button type="button" onclick="openForceChunkModal()"
+                class="btn bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                title="Forçar novo chunk inicial (Uazapi + cadência) com leads ainda pendentes">
+                ⚡ Forçar chunk (Uazapi)
+            </button>
             <a href="{{ url_for('admin_new_campaign') }}"
                class="btn bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium transition-colors">
                 + Nova Campanha
@@ -129,6 +134,44 @@
     </div>
 </div>
 
+<!-- Modal: forçar chunk inicial (admin) -->
+<div id="force-chunk-modal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4 bg-black/80"
+    onclick="if(event.target===this) closeForceChunkModal()">
+    <div class="bg-gray-900 border border-violet-600/40 rounded-xl max-w-lg w-full shadow-2xl"
+        onclick="event.stopPropagation()">
+        <div class="px-5 py-4 border-b border-gray-700">
+            <h2 class="text-lg font-semibold text-white">Forçar chunk inicial (Uazapi)</h2>
+            <p class="text-sm text-gray-400 mt-1">Cancela envios iniciais agendados/retomada e cria pastas de envio
+                imediato, apenas para a etapa 1, com os leads que ainda não tiveram mensagem.</p>
+        </div>
+        <div class="px-5 py-4 space-y-4 text-sm text-gray-300">
+            <div>
+                <label class="block text-gray-400 mb-1">ID da campanha *</label>
+                <input type="number" id="force-campaign-id" min="1"
+                    class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white"
+                    placeholder="ex.: 210" />
+            </div>
+            <div>
+                <label class="block text-gray-400 mb-1">Confirmação: nome exato (opcional)</label>
+                <input type="text" id="force-confirm-name"
+                    class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white"
+                    placeholder="Cole o nome completo se quiser evitar enganos" />
+            </div>
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="force-cancel-scheduled" checked class="rounded border-gray-600" />
+                <span>Cancelar chunks iniciais agendados/retomada (recomendado p/ destravar)</span>
+            </label>
+            <pre id="force-chunk-output" class="hidden text-xs bg-black/50 border border-gray-700 rounded p-3 max-h-64 overflow-y-auto text-left whitespace-pre-wrap break-words"></pre>
+        </div>
+        <div class="px-5 py-3 border-t border-gray-700 flex justify-end gap-2">
+            <button type="button" onclick="closeForceChunkModal()"
+                class="px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-white">Cancelar</button>
+            <button type="button" id="force-chunk-submit" onclick="submitForceChunk()"
+                class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-medium">Executar</button>
+        </div>
+    </div>
+</div>
+
 <!-- Modal detalhes (superadmin) -->
 <div id="campaign-detail-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/70"
     onclick="if(event.target===this) closeCampaignDetail()">
@@ -147,6 +190,7 @@
 
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
+    const ADMIN_CSRF = {{ csrf_token|tojson }};
     function esc(s) {
         if (s === null || s === undefined) return '';
         const d = document.createElement('div');
@@ -160,11 +204,73 @@
         m.classList.remove('flex');
     }
 
+    function openForceChunkModal() {
+        document.getElementById('force-chunk-output').classList.add('hidden');
+        document.getElementById('force-chunk-output').textContent = '';
+        const m = document.getElementById('force-chunk-modal');
+        m.classList.remove('hidden');
+        m.classList.add('flex');
+        document.getElementById('force-campaign-id').focus();
+    }
+
+    function closeForceChunkModal() {
+        const m = document.getElementById('force-chunk-modal');
+        m.classList.add('hidden');
+        m.classList.remove('flex');
+    }
+
+    async function submitForceChunk() {
+        const idEl = document.getElementById('force-campaign-id');
+        const out = document.getElementById('force-chunk-output');
+        const cid = parseInt(idEl.value, 10);
+        if (!cid || cid < 1) {
+            out.classList.remove('hidden');
+            out.textContent = 'Informe um ID de campanha válido.';
+            return;
+        }
+        const body = {
+            campaign_id: cid,
+            cancel_scheduled: document.getElementById('force-cancel-scheduled').checked,
+            confirm_name: (document.getElementById('force-confirm-name').value || '').trim(),
+        };
+        if (ADMIN_CSRF) body.csrf_token = ADMIN_CSRF;
+        const btn = document.getElementById('force-chunk-submit');
+        btn.disabled = true;
+        out.classList.remove('hidden');
+        out.textContent = 'A executar...';
+        try {
+            const res = await fetch('/api/admin/campaigns/force-initial-chunk', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ADMIN_CSRF || '' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            const text = JSON.stringify(data, null, 2);
+            if (!res.ok) {
+                out.textContent = 'Erro HTTP ' + res.status + ':\n' + text;
+                console.error('force-initial-chunk', data);
+                return;
+            }
+            out.textContent = text;
+        } catch (e) {
+            out.textContent = 'Falha de rede: ' + e.message;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
+        const fm = document.getElementById('force-chunk-modal');
+        if (fm && !fm.classList.contains('hidden')) {
+            e.preventDefault();
+            closeForceChunkModal();
+            return;
+        }
         const m = document.getElementById('campaign-detail-modal');
-        if (!m || m.classList.contains('hidden')) return;
-        closeCampaignDetail();
+        if (m && !m.classList.contains('hidden')) {
+            closeCampaignDetail();
+        }
     });
 
     async function openCampaignDetail(id) {
@@ -180,6 +286,8 @@
                 body.innerHTML = '<p class="text-red-400">' + esc(data.error || 'Erro ao carregar') + '</p>';
                 return;
             }
+            const fc = document.getElementById('force-campaign-id');
+            if (fc) fc.value = id;
             body.innerHTML = renderCampaignDetail(data);
         } catch (err) {
             body.innerHTML = '<p class="text-red-400">' + esc(err.message) + '</p>';

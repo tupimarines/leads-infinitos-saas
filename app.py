@@ -3304,7 +3304,8 @@ def admin_campaigns():
     return render_template('admin/campaigns.html',
                          campaigns=campaigns,
                          status_filter=status_filter,
-                         counts=counts)
+                         counts=counts,
+                         csrf_token=session.get('csrf_token', ''))
 
 
 @app.route('/api/admin/campaigns/<int:campaign_id>/detail', methods=['GET'])
@@ -4077,6 +4078,152 @@ def admin_flush_stale_initial_chunk(campaign_id):
         return jsonify({"error": "server_error", "message": str(e)}), 500
     finally:
         conn.close()
+
+
+def _uazapi_instance_status_summary(payload):
+    """Retorna (label, code) para a UI: connected|disconnected|unknown."""
+    if not payload or not isinstance(payload, dict):
+        return "unknown", None
+    inst = payload.get("instance")
+    if isinstance(inst, dict):
+        st = (inst.get("status") or inst.get("state") or "").lower()
+    else:
+        st = (payload.get("status") or payload.get("state") or "").lower()
+    if st in ("disconnected", "close", "closed", "logout", "offline"):
+        return "disconnected", st or None
+    if st in ("connected", "open", "ready", "synchronized"):
+        return "connected", st or None
+    if st in ("connecting",):
+        return "connecting", st or None
+    return "unknown", st or None
+
+
+@app.route("/api/admin/campaigns/force-initial-chunk", methods=["POST"])
+@login_required
+@admin_required
+def admin_force_initial_chunk():
+    """
+    Admin: verifica get_status das instâncias Uazapi vinculadas e chama
+    ``_continue_initial_chunk_core`` (cancel_scheduled opcional) para forçar novo chunk
+    com leads pendentes ainda sem envio na etapa inicial.
+    """
+    csrf_err = _verify_json_csrf()
+    if csrf_err:
+        return csrf_err
+    data = request.get_json(silent=True) or {}
+    try:
+        campaign_id = int(data.get("campaign_id") or 0)
+    except (TypeError, ValueError):
+        campaign_id = 0
+    if campaign_id < 1:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "invalid_campaign_id",
+                    "message": "Informe o ID numérico da campanha.",
+                }
+            ),
+            400,
+        )
+    cancel_scheduled = data.get("cancel_scheduled", True) is not False
+    confirm_name = (data.get("confirm_name") or "").strip()
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT c.id, c.name, c.user_id FROM campaigns c WHERE c.id = %s",
+                (campaign_id,),
+            )
+            camp_row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not camp_row:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "not_found",
+                    "message": "Campanha não encontrada.",
+                }
+            ),
+            404,
+        )
+    if confirm_name and (camp_row.get("name") or "").strip() != confirm_name:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "name_mismatch",
+                    "message": "O nome completo da campanha não confere (confirmação de segurança).",
+                }
+            ),
+            400,
+        )
+
+    uazapi = UazapiService()
+    instance_checks = []
+    conn2 = get_db_connection()
+    try:
+        with conn2.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT i.id AS instance_id, i.name AS instance_name, i.apikey
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                  AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                  AND i.apikey IS NOT NULL
+                ORDER BY i.id ASC
+                """,
+                (campaign_id,),
+            )
+            insts = cur.fetchall() or []
+    finally:
+        conn2.close()
+    for ins in insts:
+        token = (ins.get("apikey") or "").strip()
+        st_payload = uazapi.get_status(token) if token else None
+        label, code = _uazapi_instance_status_summary(st_payload)
+        instance_checks.append(
+            {
+                "instance_id": ins.get("instance_id"),
+                "instance_name": ins.get("instance_name"),
+                "connection": label,
+                "status_code": code,
+            }
+        )
+
+    owner_id = int(camp_row["user_id"])
+    r = _continue_initial_chunk_core(
+        campaign_id,
+        owner_id,
+        log_label="admin-force-initial-chunk",
+        cancel_scheduled=cancel_scheduled,
+    )
+    body = r.get("body") or {}
+    ok = bool(r.get("ok"))
+    sc = int(r.get("status_code") or 500)
+    print(
+        f"[admin-force-initial-chunk] campaign_id={campaign_id} admin_user={current_user.id} "
+        f"ok={ok} http={sc} cancel_scheduled={cancel_scheduled} result_keys={list(body.keys()) if isinstance(body, dict) else 'n/a'}"
+    )
+    return (
+        jsonify(
+            {
+                "ok": ok,
+                "status_code": sc,
+                "campaign_id": campaign_id,
+                "campaign_name": camp_row.get("name"),
+                "cancel_scheduled": cancel_scheduled,
+                "instance_status": instance_checks,
+                "result": body,
+            }
+        ),
+        sc,
+    )
 
 
 @app.route('/api/admin/campaigns/<int:campaign_id>/leads', methods=['GET'])
