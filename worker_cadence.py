@@ -1011,6 +1011,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                 "send_sunday": send.get("send_sunday"),
             }
             if send.get("use_uazapi_sender") and not is_campaign_send_window(camp_win):
+                sched_for = send.get("scheduled_for") or scheduled_for
                 if sched_for:
                     rem_sec = (sched_for - now_utc_naive).total_seconds()
                     within_materialize = (
