@@ -335,7 +335,11 @@
                     <label class="block text-sm font-semibold text-gray-300">
                         🚀 Envio Inteligente
                     </label>
+                    {% if is_super_admin and use_message_outbox %}
+                    <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa envio individual na fila do sistema: entre mensagens, <strong class="text-gray-300">ritmo aleatório definido pelo sistema</strong> (sem campo neste formulário para ajustar o intervalo entre disparos).</p>
+                    {% else %}
                     <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa ritmo humanizado automático (pausas variadas entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).</p>
+                    {% endif %}
                     <p class="text-xs text-gray-500 mt-2">Os envios <strong class="text-gray-300">não rodam fora</strong> da faixa definida em <strong class="text-emerald-300">Horário de envio</strong>, nem em finais de semana, a menos que você ative os toggles de sábado/domingo.</p>
                     <p class="text-xs text-amber-400/90 mt-3">✓ A lista será validada automaticamente antes do envio (números sem WhatsApp removidos).</p>
                 </div>

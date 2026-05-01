@@ -189,6 +189,23 @@
                     </div>
                 </div>
 
+                <!-- Ritmo entre envios Uazapi (Fase 1 / copy canónica) -->
+                <div class="glass-panel p-5 rounded-xl"
+                    style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
+                    <label class="block text-sm font-semibold text-gray-300 mb-1">🚀 Envio via WhatsApp (Uazapi)</label>
+                    {% if is_super_admin and use_message_outbox %}
+                    <p class="text-xs text-gray-500 mt-2">
+                        Entre um disparo e outro, o intervalo segue um <strong class="text-gray-300">ritmo aleatório definido pelo sistema</strong>.
+                        Não há campo neste formulário para editar segundos ou minutos entre mensagens individuais — o valor é definido pelo servidor na criação da campanha.
+                    </p>
+                    {% else %}
+                    <p class="text-xs text-gray-500 mt-2">
+                        Ao marcar pelo menos uma instância compatível, o disparo usa ritmo humanizado automático (pausas variadas entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).
+                    </p>
+                    {% endif %}
+                    <p class="text-xs text-gray-500 mt-2">Os envios respeitam a faixa em <strong class="text-emerald-300">Horário de envio</strong> e fins de semana conforme os toggles.</p>
+                </div>
+
                 <!-- ============================================ -->
                 <!-- Limite diário de mensagens -->
                 <!-- ============================================ -->
@@ -471,6 +488,31 @@
                         </svg>
                     </button>
                     <p id="feedback" class="text-center mt-4 text-sm font-medium hidden"></p>
+
+                    <!-- Task 8: polling GET outbox-state (2–5 s + backoff em 429) — só aparece se API autorizar (superadmin + USE_MESSAGE_OUTBOX) -->
+                    <div id="outboxMonitorRoot" class="hidden mt-6 glass-panel p-5 rounded-xl text-left border border-blue-500/20">
+                        <h3 class="text-lg font-semibold text-white mb-1">Fila de envio (outbox)</h3>
+                        <p class="text-xs text-gray-500 mb-3">
+                            Atualização automática a cada 2–5 s (aleatório). Se o servidor responder &quot;muitas requisições&quot; (429), o intervalo aumenta temporariamente.
+                        </p>
+                        <p id="outboxMonitorMeta" class="text-xs text-gray-400 mb-2"></p>
+                        <div id="outboxStats" class="text-sm text-gray-300 mb-3 font-mono"></div>
+                        <div id="outboxAttempts" class="text-xs text-gray-400 max-h-48 overflow-y-auto font-mono mb-4 whitespace-pre-wrap border border-white/5 rounded-lg p-2 bg-black/20"></div>
+                        <div class="flex flex-wrap gap-2">
+                            <button type="button" id="outboxPauseBtn"
+                                class="text-sm px-3 py-2 rounded-lg border border-amber-500/40 text-amber-200 hover:bg-amber-500/10 transition-colors">
+                                Pausar campanha
+                            </button>
+                            <button type="button" id="outboxResumeBtn"
+                                class="text-sm px-3 py-2 rounded-lg border border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10 transition-colors">
+                                Retomar campanha
+                            </button>
+                            <button type="button" id="outboxStopPollBtn"
+                                class="text-sm px-3 py-2 rounded-lg border border-gray-500/40 text-gray-300 hover:bg-white/5 transition-colors">
+                                Parar atualização e ir para lista
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
             </form>
@@ -479,9 +521,183 @@
 </div>
 
 <script>
+    const PAGE_CSRF = {{ (session.get('csrf_token') or '') | tojson }};
+
     const maxTemplates = 5;
     const container = document.getElementById('templates-container');
     const addBtn = document.getElementById('addTemplateBtn');
+
+    // --- Task 8: polling outbox-state (intervalo 2–5 s, backoff em 429) ---
+    const outboxPollState = {
+        timer: null,
+        campaignId: null,
+        sinceId: 0,
+        sinceAttemptId: 0,
+        backoff: 1,
+        lines: []
+    };
+
+    function outboxRandomPollMs() {
+        return 2000 + Math.floor(Math.random() * 3001);
+    }
+
+    function outboxNextDelayMs() {
+        const base = outboxRandomPollMs();
+        return Math.min(60000, Math.floor(base * outboxPollState.backoff));
+    }
+
+    function clearOutboxPoll() {
+        if (outboxPollState.timer) {
+            clearTimeout(outboxPollState.timer);
+            outboxPollState.timer = null;
+        }
+    }
+
+    function renderOutboxPanel(data) {
+        const statsEl = document.getElementById('outboxStats');
+        const metaEl = document.getElementById('outboxMonitorMeta');
+        const attemptsEl = document.getElementById('outboxAttempts');
+        const camp = data.campaign || {};
+        metaEl.textContent = `Campanha #${camp.id || outboxPollState.campaignId} · status: ${camp.status || '—'} · sent_today: ${camp.sent_today ?? '—'}`;
+        const counts = data.outbox_counts_by_status || {};
+        statsEl.textContent = Object.keys(counts).length
+            ? Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join('  |  ')
+            : '(sem linhas na fila outbox)';
+
+        const attempts = data.attempts || [];
+        attempts.forEach((a) => {
+            const line = `[#${a.id}] outbox=${a.outbox_id} attempt=${a.attempt_no} http=${a.http_status} ${a.outcome || ''} ${a.latency_ms != null ? a.latency_ms + 'ms' : ''}`;
+            outboxPollState.lines.push(line);
+        });
+        if (outboxPollState.lines.length > 80) {
+            outboxPollState.lines = outboxPollState.lines.slice(-80);
+        }
+        attemptsEl.textContent = outboxPollState.lines.join('\n');
+        attemptsEl.scrollTop = attemptsEl.scrollHeight;
+    }
+
+    async function outboxPollTick() {
+        const id = outboxPollState.campaignId;
+        if (!id) return;
+        const url = `/api/admin/campaigns/${id}/outbox-state?since_id=${outboxPollState.sinceId}&since_attempt_id=${outboxPollState.sinceAttemptId}`;
+        try {
+            const res = await fetch(url, { method: 'GET', credentials: 'same-origin' });
+            if (res.status === 429) {
+                outboxPollState.backoff = Math.min(16, outboxPollState.backoff * 2);
+            } else if (res.ok) {
+                outboxPollState.backoff = 1;
+                const data = await res.json();
+                renderOutboxPanel(data);
+                const c = data.cursor || {};
+                if (typeof c.since_id === 'number') outboxPollState.sinceId = c.since_id;
+                if (typeof c.since_attempt_id === 'number') outboxPollState.sinceAttemptId = c.since_attempt_id;
+            } else if (res.status === 401 || res.status === 403) {
+                clearOutboxPoll();
+                return;
+            }
+        } catch (e) {
+            outboxPollState.backoff = Math.min(16, outboxPollState.backoff * 2);
+            console.warn('[outbox poll]', e);
+        }
+        outboxPollState.timer = setTimeout(outboxPollTick, outboxNextDelayMs());
+    }
+
+    async function tryStartOutboxMonitor(campaignId) {
+        clearOutboxPoll();
+        outboxPollState.campaignId = campaignId;
+        outboxPollState.sinceId = 0;
+        outboxPollState.sinceAttemptId = 0;
+        outboxPollState.backoff = 1;
+        outboxPollState.lines = [];
+
+        let res;
+        try {
+            res = await fetch(
+                `/api/admin/campaigns/${campaignId}/outbox-state?since_id=0&since_attempt_id=0`,
+                { method: 'GET', credentials: 'same-origin' }
+            );
+        } catch (e) {
+            console.warn('[outbox monitor]', e);
+            outboxPollState.campaignId = null;
+            return false;
+        }
+        if (res.status === 401 || res.status === 403) {
+            outboxPollState.campaignId = null;
+            return false;
+        }
+        if (!res.ok) {
+            outboxPollState.campaignId = null;
+            return false;
+        }
+        let data;
+        try {
+            data = await res.json();
+        } catch (e) {
+            console.warn('[outbox monitor] JSON', e);
+            outboxPollState.campaignId = null;
+            return false;
+        }
+        document.getElementById('outboxMonitorRoot').classList.remove('hidden');
+        const c = data.cursor || {};
+        if (typeof c.since_id === 'number') outboxPollState.sinceId = c.since_id;
+        if (typeof c.since_attempt_id === 'number') outboxPollState.sinceAttemptId = c.since_attempt_id;
+        renderOutboxPanel(data);
+        outboxPollState.timer = setTimeout(outboxPollTick, outboxNextDelayMs());
+        return true;
+    }
+
+    function wireOutboxMonitorActions() {
+        const stopBtn = document.getElementById('outboxStopPollBtn');
+        if (stopBtn && !stopBtn.dataset.wired) {
+            stopBtn.dataset.wired = '1';
+            stopBtn.addEventListener('click', () => {
+                clearOutboxPoll();
+                window.location.href = '/admin/campaigns';
+            });
+        }
+        const pauseBtn = document.getElementById('outboxPauseBtn');
+        if (pauseBtn && !pauseBtn.dataset.wired) {
+            pauseBtn.dataset.wired = '1';
+            pauseBtn.addEventListener('click', async () => {
+                const cid = outboxPollState.campaignId;
+                if (!cid || !PAGE_CSRF) return;
+                try {
+                    const res = await fetch(`/api/admin/campaigns/${cid}/outbox/pause`, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': PAGE_CSRF },
+                        body: JSON.stringify({ csrf_token: PAGE_CSRF })
+                    });
+                    const j = await res.json().catch(() => ({}));
+                    alert(res.ok ? (j.message || 'Pausada.') : (j.message || res.status));
+                } catch (e) {
+                    alert('Erro: ' + e.message);
+                }
+            });
+        }
+        const resumeBtn = document.getElementById('outboxResumeBtn');
+        if (resumeBtn && !resumeBtn.dataset.wired) {
+            resumeBtn.dataset.wired = '1';
+            resumeBtn.addEventListener('click', async () => {
+                const cid = outboxPollState.campaignId;
+                if (!cid || !PAGE_CSRF) return;
+                try {
+                    const res = await fetch(`/api/admin/campaigns/${cid}/outbox/resume`, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': PAGE_CSRF },
+                        body: JSON.stringify({ csrf_token: PAGE_CSRF })
+                    });
+                    const j = await res.json().catch(() => ({}));
+                    alert(res.ok ? (j.message || 'Retomada.') : (j.message || res.status));
+                } catch (e) {
+                    alert('Erro: ' + e.message);
+                }
+            });
+        }
+    }
+
+    window.addEventListener('beforeunload', () => clearOutboxPoll());
 
     // ============================================================
     // CASCATA DE DROPDOWNS
@@ -893,6 +1109,17 @@
                 feedback.textContent = `✅ Campanha criada com sucesso! ${json.leads_count || ''} leads.`;
                 feedback.className = 'text-center mt-4 text-sm font-medium text-green-400';
                 feedback.classList.remove('hidden');
+                wireOutboxMonitorActions();
+                const cid = json.campaign_id;
+                if (cid) {
+                    const monitoring = await tryStartOutboxMonitor(cid);
+                    if (monitoring) {
+                        feedback.textContent += ' Monitor da fila outbox ativo abaixo; use «Parar atualização» quando quiser voltar à lista.';
+                        btn.disabled = false;
+                        btn.innerHTML = originalText;
+                        return;
+                    }
+                }
                 setTimeout(() => { window.location.href = '/admin/campaigns'; }, 1500);
             } else {
                 throw new Error(json.error || 'Erro desconhecido');

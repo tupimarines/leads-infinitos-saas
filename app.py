@@ -10,6 +10,7 @@ from flask import (
     jsonify,
     Response,
     session,
+    has_request_context,
 )
 from flask_login import (
     LoginManager,
@@ -61,7 +62,11 @@ from utils.lead_numeric_parse import coerce_lead_numeric_fields
 
 load_dotenv()
 
-from utils.config import SUPER_ADMIN_EMAILS
+from utils.config import (
+    EXPOSE_PROMETHEUS_METRICS,
+    SUPER_ADMIN_EMAILS,
+    USE_MESSAGE_OUTBOX,
+)
 
 # PROVISION_API_SECRET: token server-to-server para POST /api/provision/* (usuário e licença).
 # Em produção, defina um segredo forte no ambiente antes de expor essas rotas.
@@ -159,6 +164,8 @@ def _init_db_lock_hot_tables(cur) -> None:
     want = (
         "campaign_instances",
         "campaign_leads",
+        "campaign_message_outbox",
+        "campaign_send_attempts",
         "campaigns",
         "campaign_stage_sends",
         "instances",
@@ -768,6 +775,61 @@ def _init_db_body() -> None:
             """
         )
 
+        # Fila outbox: envio unitário Uazapi (Postgres v1; tech-spec envio-individual-fila-intercalada)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_message_outbox (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                campaign_lead_id INTEGER NOT NULL REFERENCES campaign_leads(id) ON DELETE CASCADE,
+                instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                stage TEXT NOT NULL,
+                step_priority INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                queued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                next_run_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                idempotency_key TEXT NOT NULL,
+                uazapi_track_id TEXT,
+                payload_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS campaign_send_attempts (
+                id SERIAL PRIMARY KEY,
+                outbox_id INTEGER NOT NULL REFERENCES campaign_message_outbox(id) ON DELETE CASCADE,
+                attempt_no INTEGER NOT NULL,
+                http_status INTEGER,
+                uazapi_response TEXT,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER,
+                started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP
+            );
+            COMMENT ON TABLE campaign_message_outbox IS
+                'Fila de envio 1 mensagem/lead Uazapi. Cooldown entre envios: colunas ADR-2 em campaigns (ex.: outbox_delay_* em segundos); não usar delay_min_minutes/delay_max_minutes do legado como segundos outbox.';
+            COMMENT ON COLUMN campaign_message_outbox.next_run_at IS
+                'Momento mínimo para o worker fazer claim; unidade: mesmo relógio que o restante do app (timestamps sem tz).';
+            COMMENT ON COLUMN campaign_message_outbox.payload_summary IS
+                'JSONB sem PII (ex.: tipo de mídia, flags); não telefone nem corpo da mensagem.';
+            COMMENT ON COLUMN campaign_send_attempts.uazapi_response IS
+                'Evidência HTTP truncada no worker; evitar PII em volume.';
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_message_outbox_idempotency_key
+                ON campaign_message_outbox (idempotency_key);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_message_outbox_lead_stage
+                ON campaign_message_outbox (campaign_lead_id, stage);
+            CREATE INDEX IF NOT EXISTS idx_campaign_message_outbox_status_next_run
+                ON campaign_message_outbox (status, next_run_at);
+            CREATE INDEX IF NOT EXISTS idx_campaign_message_outbox_instance_next_run
+                ON campaign_message_outbox (instance_id, next_run_at);
+            CREATE INDEX IF NOT EXISTS idx_campaign_message_outbox_campaign_updated
+                ON campaign_message_outbox (campaign_id, updated_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_send_attempts_outbox_attempt
+                ON campaign_send_attempts (outbox_id, attempt_no);
+            CREATE INDEX IF NOT EXISTS idx_campaign_send_attempts_outbox
+                ON campaign_send_attempts (outbox_id);
+            """
+        )
+
         # ============================================================
         # END CADENCE FEATURE MIGRATIONS
         # ============================================================
@@ -800,6 +862,18 @@ def _init_db_body() -> None:
         cur.execute(
             """
             ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS created_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL DEFAULT NULL;
+            """
+        )
+
+        # ADR-2: cooldown outbox em segundos (não reutilizar delay_*_minutes do legado como segundos)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS outbox_delay_min_seconds INTEGER;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS outbox_delay_max_seconds INTEGER;
+            COMMENT ON COLUMN campaigns.outbox_delay_min_seconds IS
+                'Limite inferior (s) do intervalo aleatório entre envios Uazapi outbox; definido na criação da campanha.';
+            COMMENT ON COLUMN campaigns.outbox_delay_max_seconds IS
+                'Limite superior (s) do intervalo aleatório entre envios Uazapi outbox; definido na criação da campanha.';
             """
         )
 
@@ -1050,6 +1124,94 @@ def _admin_stale_flush_rate_allow(user_id: int) -> bool:
     except Exception as exc:
         print(f"[admin_flush_stale] rate limit redis error: {exc}")
         return True
+
+
+def _admin_outbox_poll_rate_allow(user_id: int) -> bool:
+    """Task 7 / AC6: polling GET outbox-state — até 120 req/min por admin (Redis)."""
+    try:
+        key = f"admin:outbox:poll:{int(user_id)}"
+        n = redis_conn.incr(key)
+        if n == 1:
+            redis_conn.expire(key, 60)
+        return n <= 120
+    except Exception as exc:
+        print(f"[admin_outbox_poll] rate limit redis error: {exc}")
+        return True
+
+
+def _admin_outbox_mutate_rate_allow(user_id: int) -> bool:
+    """Task 7: POST pause/resume outbox — até 30 req/min por admin (Redis)."""
+    try:
+        key = f"admin:outbox:mutate:{int(user_id)}"
+        n = redis_conn.incr(key)
+        if n == 1:
+            redis_conn.expire(key, 60)
+        return n <= 30
+    except Exception as exc:
+        print(f"[admin_outbox_mutate] rate limit redis error: {exc}")
+        return True
+
+
+def _phase1_outbox_operator_is_superadmin(admin_id):
+    """
+    Fase 1 (ADR-4): criar/processar fila outbox exige operador em SUPER_ADMIN_EMAILS e flag no env.
+    ``created_by_admin_id`` na campanha é só auditoria — não entra neste gate.
+
+    Em pedido HTTP, exige ``current_user.id == admin_id`` e ``is_super_admin()`` (anti-confusão de sessão).
+    Sem contexto de pedido (p.ex. scripts), infere pelo email do utilizador ``admin_id`` na BD.
+    """
+    if admin_id is None:
+        return False
+    if has_request_context() and getattr(current_user, "is_authenticated", False):
+        if current_user.id != admin_id:
+            return False
+        return is_super_admin()
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT email FROM users WHERE id = %s", (admin_id,))
+            row = cur.fetchone()
+        return bool(row and row[0] and row[0] in SUPER_ADMIN_EMAILS)
+    finally:
+        conn.close()
+
+
+def _require_message_outbox_phase1_api():
+    """
+    Fase 1 fila outbox: superadmin por email + USE_MESSAGE_OUTBOX (tech-spec ADR-4 / F17).
+    Retorna None se autorizado; caso contrário (response, status_code).
+    """
+    if not current_user.is_authenticated:
+        return jsonify({"error": "unauthorized", "message": "Autenticação necessária."}), 401
+    if not is_super_admin():
+        return (
+            jsonify(
+                {
+                    "error": "forbidden",
+                    "message": "Fila outbox (fase 1): apenas superadmin.",
+                }
+            ),
+            403,
+        )
+    if not USE_MESSAGE_OUTBOX:
+        return (
+            jsonify(
+                {
+                    "error": "forbidden",
+                    "message": "USE_MESSAGE_OUTBOX não está ativo no ambiente.",
+                }
+            ),
+            403,
+        )
+    return None
+
+
+def _isoformat_dt(dt):
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        return dt.isoformat()
+    return str(dt)
 
 
 def is_super_admin(user=None):
@@ -2230,6 +2392,16 @@ def logout():
 @app.route("/healthz", methods=["GET"]) 
 def healthz():
     return "ok", 200
+
+
+@app.route("/metrics", methods=["GET"])
+def prometheus_metrics():
+    """Prometheus (Task 14); desligado por omissão — ver ``EXPOSE_PROMETHEUS_METRICS``."""
+    if not EXPOSE_PROMETHEUS_METRICS:
+        abort(404)
+    from utils.outbox_prometheus import flask_metrics_response
+
+    return flask_metrics_response()
 
 
 @app.route("/scrape", methods=["POST"]) 
@@ -3441,6 +3613,301 @@ def admin_campaign_detail_api(campaign_id):
     )
 
 
+@app.route("/api/admin/campaigns/<int:campaign_id>/outbox-state", methods=["GET"])
+@login_required
+def admin_campaign_outbox_state(campaign_id):
+    """
+    Polling da fila Postgres ``campaign_message_outbox`` + tentativas (tech-spec §7, AC6).
+    Query: ``since_id`` (cursor de id outbox), ``since_attempt_id``, ``updated_after`` (ISO-8601).
+    """
+    gate = _require_message_outbox_phase1_api()
+    if gate:
+        return gate
+    if not _admin_outbox_poll_rate_allow(current_user.id):
+        return (
+            jsonify(
+                {
+                    "error": "rate_limited",
+                    "message": "Muitas requisições de polling. Aguarde ou aumente o intervalo.",
+                }
+            ),
+            429,
+        )
+
+    since_id = request.args.get("since_id", default=0)
+    since_attempt_id = request.args.get("since_attempt_id", default=0)
+    try:
+        since_id = max(0, int(since_id))
+        since_attempt_id = max(0, int(since_attempt_id))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_cursor", "message": "since_id e since_attempt_id devem ser inteiros."}), 400
+
+    updated_after_raw = (request.args.get("updated_after") or "").strip()
+    updated_after_ts = None
+    if updated_after_raw:
+        try:
+            s = updated_after_raw
+            if s.endswith("Z"):
+                s = s[:-1]
+            updated_after_ts = datetime.fromisoformat(s)
+        except ValueError:
+            return jsonify({"error": "invalid_updated_after", "message": "Use ISO-8601 para updated_after."}), 400
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, name, status, sent_today, use_uazapi_sender, uazapi_folder_id,
+                       scheduled_start, created_at
+                FROM campaigns
+                WHERE id = %s
+                """,
+                (campaign_id,),
+            )
+            camp = cur.fetchone()
+            if not camp:
+                return jsonify({"error": "not_found", "message": "Campanha não encontrada."}), 404
+
+            cur.execute(
+                """
+                SELECT status, COUNT(*)::int AS n
+                FROM campaign_message_outbox
+                WHERE campaign_id = %s
+                GROUP BY status
+                """,
+                (campaign_id,),
+            )
+            outbox_status_counts = {r["status"]: r["n"] for r in (cur.fetchall() or [])}
+
+            cur.execute(
+                """
+                SELECT id, campaign_id, campaign_lead_id, instance_id, stage, step_priority, status,
+                       queued_at, next_run_at, idempotency_key, uazapi_track_id, payload_summary,
+                       created_at, updated_at
+                FROM campaign_message_outbox
+                WHERE campaign_id = %s
+                  AND (
+                    id > %s
+                    OR (%s IS NOT NULL AND updated_at > %s)
+                  )
+                ORDER BY id ASC
+                LIMIT 400
+                """,
+                (campaign_id, since_id, updated_after_ts, updated_after_ts),
+            )
+            outbox_rows = cur.fetchall() or []
+
+            cur.execute(
+                """
+                SELECT a.id, a.outbox_id, a.attempt_no, a.http_status, a.outcome, a.latency_ms,
+                       a.started_at, a.finished_at
+                FROM campaign_send_attempts a
+                INNER JOIN campaign_message_outbox o ON o.id = a.outbox_id
+                WHERE o.campaign_id = %s AND a.id > %s
+                ORDER BY a.id ASC
+                LIMIT 400
+                """,
+                (campaign_id, since_attempt_id),
+            )
+            attempt_rows = cur.fetchall() or []
+
+        def ser_outbox(r):
+            d = dict(r)
+            for k in ("queued_at", "next_run_at", "created_at", "updated_at"):
+                if k in d:
+                    d[k] = _isoformat_dt(d[k])
+            if d.get("payload_summary") is not None and hasattr(d["payload_summary"], "__iter__"):
+                if not isinstance(d["payload_summary"], (dict, list)):
+                    d["payload_summary"] = str(d["payload_summary"])
+            return d
+
+        def ser_attempt(r):
+            d = dict(r)
+            for k in ("started_at", "finished_at"):
+                if k in d:
+                    d[k] = _isoformat_dt(d[k])
+            return d
+
+        c = dict(camp)
+        for k in ("scheduled_start", "created_at"):
+            if k in c:
+                c[k] = _isoformat_dt(c[k])
+
+        max_oid = max((r["id"] for r in outbox_rows), default=since_id)
+        max_aid = max((r["id"] for r in attempt_rows), default=since_attempt_id)
+
+        return jsonify(
+            {
+                "campaign": c,
+                "outbox_counts_by_status": outbox_status_counts,
+                "outbox": [ser_outbox(r) for r in outbox_rows],
+                "attempts": [ser_attempt(r) for r in attempt_rows],
+                "cursor": {
+                    "since_id": max_oid,
+                    "since_attempt_id": max_aid,
+                    "server_time": datetime.utcnow().isoformat() + "Z",
+                },
+            }
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/campaigns/<int:campaign_id>/outbox/pause", methods=["POST"])
+@login_required
+def admin_campaign_outbox_pause(campaign_id):
+    """Pausa campanha (worker outbox não envia enquanto ``status`` ≠ running/pending). CSRF obrigatório."""
+    gate = _require_message_outbox_phase1_api()
+    if gate:
+        return gate
+    csrf_err = _verify_json_csrf()
+    if csrf_err:
+        return csrf_err
+    if not _admin_outbox_mutate_rate_allow(current_user.id):
+        return (
+            jsonify(
+                {
+                    "error": "rate_limited",
+                    "message": "Muitas requisições. Tente novamente em um minuto.",
+                }
+            ),
+            429,
+        )
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_id, use_uazapi_sender, uazapi_folder_id
+                FROM campaigns WHERE id = %s
+                """,
+                (campaign_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "not_found", "message": "Campanha não encontrada."}), 404
+
+        st = (row.get("status") or "").strip()
+        if st not in ("running", "pending"):
+            return (
+                jsonify(
+                    {
+                        "error": "conflict",
+                        "message": "Só é possível pausar campanha em running ou pending.",
+                        "status": st,
+                    }
+                ),
+                409,
+            )
+
+        if row.get("use_uazapi_sender") and row.get("uazapi_folder_id"):
+            success, err = _uazapi_control_campaign(
+                campaign_id, int(row["user_id"]), "stop", admin_mode=True
+            )
+            if not success:
+                return jsonify({"error": "uazapi_control_failed", "message": err or "Falha na API Uazapi."}), 500
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE campaigns SET status = 'paused' WHERE id = %s AND status IN ('running', 'pending')",
+                    (campaign_id,),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return (
+                        jsonify({"error": "conflict", "message": "Estado da campanha mudou; recarregue."}),
+                        409,
+                    )
+            conn.commit()
+
+        return jsonify({"success": True, "status": "paused"})
+    except Exception as e:
+        conn.rollback()
+        print(f"[admin_outbox_pause] {e}")
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/campaigns/<int:campaign_id>/outbox/resume", methods=["POST"])
+@login_required
+def admin_campaign_outbox_resume(campaign_id):
+    """Retoma campanha pausada (status ``running``). CSRF obrigatório."""
+    gate = _require_message_outbox_phase1_api()
+    if gate:
+        return gate
+    csrf_err = _verify_json_csrf()
+    if csrf_err:
+        return csrf_err
+    if not _admin_outbox_mutate_rate_allow(current_user.id):
+        return (
+            jsonify(
+                {
+                    "error": "rate_limited",
+                    "message": "Muitas requisições. Tente novamente em um minuto.",
+                }
+            ),
+            429,
+        )
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_id, use_uazapi_sender, uazapi_folder_id
+                FROM campaigns WHERE id = %s
+                """,
+                (campaign_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "not_found", "message": "Campanha não encontrada."}), 404
+
+        st = (row.get("status") or "").strip()
+        if st != "paused":
+            return (
+                jsonify(
+                    {
+                        "error": "conflict",
+                        "message": "Só é possível retomar campanha pausada.",
+                        "status": st,
+                    }
+                ),
+                409,
+            )
+
+        if row.get("use_uazapi_sender") and row.get("uazapi_folder_id"):
+            success, err = _uazapi_control_campaign(
+                campaign_id, int(row["user_id"]), "continue", admin_mode=True
+            )
+            if not success:
+                return jsonify({"error": "uazapi_control_failed", "message": err or "Falha na API Uazapi."}), 500
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE campaigns SET status = 'running' WHERE id = %s AND status = 'paused'",
+                    (campaign_id,),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return (
+                        jsonify({"error": "conflict", "message": "Estado da campanha mudou; recarregue."}),
+                        409,
+                    )
+            conn.commit()
+
+        return jsonify({"success": True, "status": "running"})
+    except Exception as e:
+        conn.rollback()
+        print(f"[admin_outbox_resume] {e}")
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/api/admin/campaigns/<int:campaign_id>', methods=['DELETE'])
 @login_required
 @admin_required
@@ -3646,7 +4113,12 @@ def admin_validate_csv():
 @login_required
 @admin_required
 def admin_new_campaign():
-    return render_template('admin/campaigns_new.html', plan_daily_limit=30)
+    return render_template(
+        'admin/campaigns_new.html',
+        plan_daily_limit=30,
+        use_message_outbox=USE_MESSAGE_OUTBOX,
+        is_super_admin=is_super_admin(),
+    )
 
 
 @app.route('/admin/campaigns/<int:campaign_id>/edit')
@@ -4856,10 +5328,11 @@ def new_campaign():
     
     plan_daily_limit = get_user_daily_limit(current_user.id)
     
-    return render_template('campaigns_new.html', 
+    return render_template('campaigns_new.html',
                            instances=user_instances,
                            is_super_admin=is_super_admin(),
-                           plan_daily_limit=plan_daily_limit)
+                           plan_daily_limit=plan_daily_limit,
+                           use_message_outbox=USE_MESSAGE_OUTBOX)
 
 @app.route('/api/scraping-jobs')
 @login_required
@@ -5354,7 +5827,7 @@ def upload_csv_leads():
         return json.dumps({'error': str(e)}), 500
 
 def _create_campaign_core(user_id, data, admin_id=None):
-    """Helper reutilizável: cria campanha para user_id. admin_id se criado pelo superadmin."""
+    """Cria campanha para ``user_id``. Se ``admin_id`` veio do painel admin, grava ``created_by_admin_id`` (auditoria). Fila outbox (Fase 1): só com ``USE_MESSAGE_OUTBOX`` e operador superadmin (``_phase1_outbox_operator_is_superadmin``); ver ADR-4 em ``utils/config.py``."""
     def extract_phone_from_whatsapp_link(link):
         """Helper to extract phone from whatsapp link"""
         if not link: return None
@@ -5560,12 +6033,37 @@ def _create_campaign_core(user_id, data, admin_id=None):
                 daily_limit = max(5, min(int(_submitted), plan_limit)) if _submitted is not None else plan_limit
             except (ValueError, TypeError):
                 daily_limit = plan_limit
+
+            # ADR-2 / fila outbox: intervalo de cooldown (s) sorteado na criação e persistido.
+            # Produto: 600–900 s (10–15 min). Legado delay_min/max_minutes permanece em minutos para chunks/pacing antigo.
+            _dlo = random.randint(600, 900)
+            _dhi = random.randint(600, 900)
+            outbox_delay_min_seconds, outbox_delay_max_seconds = min(_dlo, _dhi), max(_dlo, _dhi)
+
             cur.execute(
                 """
-                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday, created_by_admin_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
+                INSERT INTO campaigns (user_id, name, message_template, daily_limit, scheduled_start, status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday, created_by_admin_id, outbox_delay_min_seconds, outbox_delay_max_seconds)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at
                 """,
-                (user_id, name, message_template_json, daily_limit, scheduled_start, initial_status, rotation_mode, use_uazapi_sender, delay_min_minutes, delay_max_minutes, send_hour_start, send_hour_end, send_saturday, send_sunday, admin_id)
+                (
+                    user_id,
+                    name,
+                    message_template_json,
+                    daily_limit,
+                    scheduled_start,
+                    initial_status,
+                    rotation_mode,
+                    use_uazapi_sender,
+                    delay_min_minutes,
+                    delay_max_minutes,
+                    send_hour_start,
+                    send_hour_end,
+                    send_saturday,
+                    send_sunday,
+                    admin_id,
+                    outbox_delay_min_seconds,
+                    outbox_delay_max_seconds,
+                ),
             )
             row = cur.fetchone()
             campaign_id = row[0]
@@ -5705,15 +6203,22 @@ def _create_campaign_core(user_id, data, admin_id=None):
             conn.commit()
             conn.close()
         
-        # 6. Uazapi: se use_uazapi_sender, distribuir leads em chunks de 30 por instância (assíncronas)
+        # 6. Uazapi: se use_uazapi_sender, distribuir leads em chunks de 30 por instância (assíncronas).
+        # ``USE_MESSAGE_OUTBOX``: Task 6 / ADR-4 — flag + operador superadmin: enfileirar ``campaign_message_outbox``
+        # sem ``create_advanced_campaign``; ``next_run_at`` inicial respeita ``scheduled_start``.
         if use_uazapi_sender:
+            use_message_outbox = USE_MESSAGE_OUTBOX
+            use_outbox_enqueue = use_message_outbox and _phase1_outbox_operator_is_superadmin(admin_id)
             from utils.limits import can_create_campaign_today
             from utils.sync_uazapi import _normalize_phone_for_api
 
             instances = _get_uazapi_instances_for_campaign(campaign_id, user_id)
             allowed_instances = [inst for inst in instances if can_create_campaign_today(inst['instance_id'])]
             if not allowed_instances:
-                print(f"⚠️ [Uazapi] Campanha {campaign_id}: nenhuma instância disponível (limite diário ou sem Uazapi).")
+                print(
+                    f"⚠️ [Uazapi] Campanha {campaign_id}: nenhuma instância disponível "
+                    f"(limite diário ou sem Uazapi). use_message_outbox={use_message_outbox}"
+                )
             else:
                 from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
 
@@ -5777,115 +6282,185 @@ def _create_campaign_core(user_id, data, admin_id=None):
                     leads = cur.fetchall()
                 conn.close()
 
-                def _chunk(lst, n):
-                    return [lst[i:i + n] for i in range(0, len(lst), n)]
-
-                lead_chunks = _chunk(leads, per_instance_limit)
-                from utils.uazapi_pacing import default_inter_message_delay_range_minutes
-
-                d_lo, d_hi = default_inter_message_delay_range_minutes()
-                delay_min_sec = int(d_lo * 60)
-                delay_max_sec = int(d_hi * 60)
-                scheduled_for_param = None
-                if scheduled_start:
-                    try:
-                        dt = datetime.fromisoformat(scheduled_start.replace('Z', '+00:00'))
-                        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-                        delta_min = (dt - now).total_seconds() / 60
-                        if delta_min > 0:
-                            scheduled_for_param = max(1, int(delta_min))
-                    except Exception:
-                        pass
-
-                uazapi = UazapiService()
-                sends_created = []
-                errors = []
-                for idx, chunk in enumerate(lead_chunks):
-                    if idx >= len(allowed_instances):
-                        break
-                    inst = allowed_instances[idx]
-                    token = inst.get('apikey')
-                    if not token:
-                        continue
-
-                    messages = []
-                    lead_ids = []
-                    for lead in chunk:
-                        msg_text = random.choice(variations)
-                        if lead.get('name'):
-                            msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name']).replace("{{nome}}", lead['name']).replace("{{name}}", lead['name'])
-                        raw = lead.get('phone') or lead.get('whatsapp_link')
-                        phone = _normalize_phone_for_api(raw)
-                        if not phone:
-                            continue
-                        if media_file_data and step1_media_path:
-                            messages.append({"number": phone, "type": step1_media_type, "file": media_file_data, "text": msg_text})
-                        else:
-                            messages.append({"number": phone, "type": "text", "text": msg_text})
-                        lead_ids.append(lead['id'])
-
-                    if not messages:
-                        continue
-
-                    payload_summary = {"campaign_id": campaign_id, "leads": len(messages), "instance_id": inst['instance_id']}
-                    print(f"[UAZAPI] create_advanced_campaign payload: {json.dumps(payload_summary)}")
-                    result = uazapi.create_advanced_campaign(
-                        token, delay_min_sec, delay_max_sec, messages,
-                        info=name, scheduled_for=scheduled_for_param
+                if use_outbox_enqueue and leads:
+                    parsed_ss = (
+                        _parse_iso_datetime_local(scheduled_start)
+                        if scheduled_start
+                        else None
                     )
-                    if result and result.get('folder_id'):
-                        print(f"[UAZAPI] create_advanced_campaign OK campaign_id={campaign_id} inst={inst['instance_id']} folder_id={result['folder_id']}")
-                        instance_remote_jid = _resolve_uazapi_remote_jid(uazapi, token)
-                        sends_created.append({
-                            "instance_id": inst['instance_id'],
-                            "instance_remote_jid": instance_remote_jid,
-                            "folder_id": result['folder_id'],
-                            "lead_ids": lead_ids,
-                            "planned_count": len(lead_ids),
-                        })
+                    now_utc = datetime.utcnow()
+                    if parsed_ss:
+                        next_run_at_val = max(now_utc, parsed_ss)
                     else:
-                        errors.append(f"Instância {inst['instance_id']}: falha ao criar campanha")
-
-                if sends_created:
-                    all_lead_ids = [lid for s in sends_created for lid in s['lead_ids']]
-                    first_folder_id = sends_created[0]['folder_id']
-                    conn = get_db_connection()
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        for send in sends_created:
+                        next_run_at_val = now_utc
+                    n_allowed = len(allowed_instances)
+                    conn_o = get_db_connection()
+                    try:
+                        with conn_o.cursor() as cur:
+                            for i, lead in enumerate(leads):
+                                if rotation_mode == "round_robin":
+                                    inst = allowed_instances[i % n_allowed]
+                                else:
+                                    inst = allowed_instances[0]
+                                lead_id = int(lead["id"])
+                                instance_id = int(inst["instance_id"])
+                                idempotency_key = f"campaign-{campaign_id}-lead-{lead_id}-initial"
+                                payload_summary = json.dumps(
+                                    {
+                                        "stage": "initial",
+                                        "enqueue": "create_campaign",
+                                        "rotation_mode": rotation_mode,
+                                    }
+                                )
+                                cur.execute(
+                                    """
+                                    INSERT INTO campaign_message_outbox (
+                                        campaign_id, campaign_lead_id, instance_id,
+                                        stage, step_priority, status, queued_at,
+                                        next_run_at, idempotency_key, payload_summary
+                                    )
+                                    VALUES (
+                                        %s, %s, %s, 'initial', 0, 'pending',
+                                        NOW(), %s, %s, %s::jsonb
+                                    )
+                                    """,
+                                    (
+                                        campaign_id,
+                                        lead_id,
+                                        instance_id,
+                                        next_run_at_val,
+                                        idempotency_key,
+                                        payload_summary,
+                                    ),
+                                )
+                            lead_ids_out = [int(x["id"]) for x in leads]
                             cur.execute(
-                                "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
-                                (send['instance_id'], campaign_id)
+                                """
+                                UPDATE campaign_leads
+                                SET current_step = 1
+                                WHERE campaign_id = %s AND id = ANY(%s)
+                                """,
+                                (campaign_id, lead_ids_out),
                             )
-                            cur.execute(
-                                """INSERT INTO campaign_stage_sends
-                                   (campaign_id, stage, instance_id, instance_remote_jid, uazapi_folder_id, status, planned_count, lead_ids)
-                                   VALUES (%s, 'initial', %s, %s, %s, 'running', %s, %s)""",
-                                (
-                                    campaign_id,
-                                    send['instance_id'],
-                                    send.get('instance_remote_jid'),
-                                    send['folder_id'],
-                                    send['planned_count'],
-                                    json.dumps(send['lead_ids']),
-                                ),
-                            )
-                        cur.execute(
-                            "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
-                            (first_folder_id, json.dumps(all_lead_ids) if all_lead_ids else None, campaign_id)
-                        )
-                        # UAZAPI: create_advanced_campaign só cria a pasta na fila — não confirma entrega.
-                        # Nunca marcar status=sent em lote aqui (bug: UI "Enviado" para todos com chunk partial).
-                        # campaign_leads ficam pending até sync + message_find (ou fluxo legado explícito).
-                        cur.execute(
-                            """UPDATE campaign_leads SET current_step = 1 WHERE campaign_id = %s AND id = ANY(%s)""",
-                            (campaign_id, all_lead_ids)
-                        )
-                    conn.commit()
-                    conn.close()
-                    if errors:
-                        print(f"⚠️ [UAZAPI] Campanha {campaign_id}: {len(sends_created)} sub-campanhas criadas; erros: {errors}")
+                        conn_o.commit()
+                    finally:
+                        conn_o.close()
+                    print(
+                        f"[UAZAPI] Outbox enqueue campaign_id={campaign_id} "
+                        f"rows={len(leads)} next_run_at={next_run_at_val.isoformat()} "
+                        f"(create_advanced_campaign skipped)"
+                    )
                 else:
-                    print(f"⚠️ [UAZAPI] Campanha {campaign_id}: nenhuma sub-campanha criada. Erros: {errors}")
+
+                    def _chunk(lst, n):
+                        return [lst[i:i + n] for i in range(0, len(lst), n)]
+
+                    lead_chunks = _chunk(leads, per_instance_limit)
+                    from utils.uazapi_pacing import default_inter_message_delay_range_minutes
+
+                    d_lo, d_hi = default_inter_message_delay_range_minutes()
+                    delay_min_sec = int(d_lo * 60)
+                    delay_max_sec = int(d_hi * 60)
+                    scheduled_for_param = None
+                    if scheduled_start:
+                        try:
+                            dt = datetime.fromisoformat(scheduled_start.replace('Z', '+00:00'))
+                            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                            delta_min = (dt - now).total_seconds() / 60
+                            if delta_min > 0:
+                                scheduled_for_param = max(1, int(delta_min))
+                        except Exception:
+                            pass
+
+                    uazapi = UazapiService()
+                    sends_created = []
+                    errors = []
+                    for idx, chunk in enumerate(lead_chunks):
+                        if idx >= len(allowed_instances):
+                            break
+                        inst = allowed_instances[idx]
+                        token = inst.get('apikey')
+                        if not token:
+                            continue
+
+                        messages = []
+                        lead_ids = []
+                        for lead in chunk:
+                            msg_text = random.choice(variations)
+                            if lead.get('name'):
+                                msg_text = msg_text.replace("{nome}", lead['name']).replace("{name}", lead['name']).replace("{{nome}}", lead['name']).replace("{{name}}", lead['name'])
+                            raw = lead.get('phone') or lead.get('whatsapp_link')
+                            phone = _normalize_phone_for_api(raw)
+                            if not phone:
+                                continue
+                            if media_file_data and step1_media_path:
+                                messages.append({"number": phone, "type": step1_media_type, "file": media_file_data, "text": msg_text})
+                            else:
+                                messages.append({"number": phone, "type": "text", "text": msg_text})
+                            lead_ids.append(lead['id'])
+
+                        if not messages:
+                            continue
+
+                        payload_summary = {"campaign_id": campaign_id, "leads": len(messages), "instance_id": inst['instance_id'], "use_message_outbox": use_message_outbox}
+                        print(f"[UAZAPI] create_advanced_campaign payload: {json.dumps(payload_summary)}")
+                        result = uazapi.create_advanced_campaign(
+                            token, delay_min_sec, delay_max_sec, messages,
+                            info=name, scheduled_for=scheduled_for_param
+                        )
+                        if result and result.get('folder_id'):
+                            print(f"[UAZAPI] create_advanced_campaign OK campaign_id={campaign_id} inst={inst['instance_id']} folder_id={result['folder_id']}")
+                            instance_remote_jid = _resolve_uazapi_remote_jid(uazapi, token)
+                            sends_created.append({
+                                "instance_id": inst['instance_id'],
+                                "instance_remote_jid": instance_remote_jid,
+                                "folder_id": result['folder_id'],
+                                "lead_ids": lead_ids,
+                                "planned_count": len(lead_ids),
+                            })
+                        else:
+                            errors.append(f"Instância {inst['instance_id']}: falha ao criar campanha")
+
+                    if sends_created:
+                        all_lead_ids = [lid for s in sends_created for lid in s['lead_ids']]
+                        first_folder_id = sends_created[0]['folder_id']
+                        conn = get_db_connection()
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            for send in sends_created:
+                                cur.execute(
+                                    "INSERT INTO uazapi_instance_sends (instance_id, campaign_id) VALUES (%s, %s)",
+                                    (send['instance_id'], campaign_id)
+                                )
+                                cur.execute(
+                                    """INSERT INTO campaign_stage_sends
+                                       (campaign_id, stage, instance_id, instance_remote_jid, uazapi_folder_id, status, planned_count, lead_ids)
+                                       VALUES (%s, 'initial', %s, %s, %s, 'running', %s, %s)""",
+                                    (
+                                        campaign_id,
+                                        send['instance_id'],
+                                        send.get('instance_remote_jid'),
+                                        send['folder_id'],
+                                        send['planned_count'],
+                                        json.dumps(send['lead_ids']),
+                                    ),
+                                )
+                            cur.execute(
+                                "UPDATE campaigns SET uazapi_folder_id = %s, uazapi_last_send_lead_ids = %s, status = 'running' WHERE id = %s",
+                                (first_folder_id, json.dumps(all_lead_ids) if all_lead_ids else None, campaign_id)
+                            )
+                            # UAZAPI: create_advanced_campaign só cria a pasta na fila — não confirma entrega.
+                            # Nunca marcar status=sent em lote aqui (bug: UI "Enviado" para todos com chunk partial).
+                            # campaign_leads ficam pending até sync + message_find (ou fluxo legado explícito).
+                            cur.execute(
+                                """UPDATE campaign_leads SET current_step = 1 WHERE campaign_id = %s AND id = ANY(%s)""",
+                                (campaign_id, all_lead_ids)
+                            )
+                        conn.commit()
+                        conn.close()
+                        if errors:
+                            print(f"⚠️ [UAZAPI] Campanha {campaign_id}: {len(sends_created)} sub-campanhas criadas; erros: {errors}")
+                    else:
+                        print(f"⚠️ [UAZAPI] Campanha {campaign_id}: nenhuma sub-campanha criada. Erros: {errors}")
         
         return json.dumps({'success': True, 'campaign_id': campaign_id, 'leads_count': len(valid_leads)})
         

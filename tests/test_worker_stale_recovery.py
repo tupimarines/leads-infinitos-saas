@@ -1,6 +1,8 @@
 """T7: recovery de ``scheduled`` initial Uazapi sem pasta (TTL), antes do materialize."""
 
 import datetime as dt
+import json
+import logging
 import types
 from unittest.mock import MagicMock, patch
 
@@ -126,6 +128,47 @@ def test_stale_recovery_respects_only_campaign_id_in_sql(monkeypatch):
     params = select_cur.execute.call_args[0][1]
     assert "AND css.campaign_id = %s" in sql
     assert 99 in params
+
+
+def test_message_outbox_tick_skips_when_feature_disabled(monkeypatch):
+    """Alinhado à tech-spec (flag off): ``process_message_outbox_tick`` não consulta o BD."""
+    monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
+    import importlib
+    import utils.config as cfg
+    importlib.reload(cfg)
+    import worker_message_outbox as wmo
+    importlib.reload(wmo)
+
+    conn = MagicMock()
+    wmo.process_message_outbox_tick(conn)
+    conn.cursor.assert_not_called()
+
+    importlib.reload(cfg)
+    importlib.reload(wmo)
+
+
+def test_outbox_attempt_structured_log_has_required_fields(caplog):
+    """Task 11: evento por tentativa — JSON com ids, latência, outcome; sem PII."""
+    import worker_message_outbox as wmo
+
+    caplog.set_level(logging.INFO)
+    wmo._log_outbox_attempt_event(
+        campaign_id=10,
+        outbox_id=20,
+        instance_id=30,
+        latency_ms=150,
+        outcome="sent",
+        http_status=200,
+    )
+    assert caplog.records
+    payload = json.loads(caplog.records[0].message)
+    assert payload["event"] == "campaign_outbox_send_attempt"
+    assert payload["campaign_id"] == 10
+    assert payload["outbox_id"] == 20
+    assert payload["instance_id"] == 30
+    assert payload["latency_ms"] == 150
+    assert payload["outcome"] == "sent"
+    assert payload["http_status"] == 200
 
 
 def test_stale_recovery_mark_failed_dry_run(monkeypatch, fake_row):

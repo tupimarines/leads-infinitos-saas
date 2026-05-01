@@ -61,7 +61,7 @@ from utils.uazapi_pacing import (
 )
 from utils.cadence_uazapi import merge_fu1_into_campaign_db
 
-from utils.config import SUPER_ADMIN_EMAILS
+from utils.config import SUPER_ADMIN_EMAILS, USE_MESSAGE_OUTBOX
 from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
 from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
 # Slot matinal automático do chunk initial: ``cadence_next_initial_send_slot`` em
@@ -75,6 +75,9 @@ from utils.uazapi_support_notify import (
     is_instance_disconnected_status,
     maybe_send_disconnect_support_whatsapp,
 )
+
+from worker_message_outbox import process_message_outbox_tick
+from utils.outbox_prometheus import maybe_start_outbox_metrics_http_server
 
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
@@ -1659,6 +1662,7 @@ def _sync_active_stage_folders(conn):
 
 def process_cadence():
     print("🔄 Starting Intelligent Cadence Worker...")
+    maybe_start_outbox_metrics_http_server()
     last_stage_sync_at = None
 
     while True:
@@ -1670,6 +1674,10 @@ def process_cadence():
 
             # T7: recovery de ``scheduled`` initial sem pasta (TTL) antes do materialize — F1
             _recover_stale_scheduled_initial_uazapi_sends(conn)
+
+            # Outbox Uazapi (ADR-5): claim → HTTP → persistência; só com flag (utils.config)
+            if USE_MESSAGE_OUTBOX:
+                process_message_outbox_tick(conn)
 
             # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)
             _materialize_scheduled_stage_sends(conn)

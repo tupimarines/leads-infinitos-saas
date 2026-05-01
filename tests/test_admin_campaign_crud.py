@@ -9,11 +9,37 @@ import os
 import sys
 import json
 import tempfile
+import importlib
+from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch, MagicMock
 import pytest
+
+
+def _reload_outbox_modules(monkeypatch, enabled: bool):
+    """Alinha ``USE_MESSAGE_OUTBOX`` em utils.config, app e worker_message_outbox (import-time)."""
+    if enabled:
+        monkeypatch.setenv("USE_MESSAGE_OUTBOX", "1")
+    else:
+        monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
+    import utils.config as cfg
+    importlib.reload(cfg)
+    import app as app_mod
+    importlib.reload(app_mod)
+    import worker_message_outbox as wmo
+    importlib.reload(wmo)
+    return app_mod, wmo
+
+
+@contextmanager
+def use_message_outbox_env(monkeypatch):
+    """Feature flag on para testes outbox; restaura estado ao sair (Task 10 tech-spec)."""
+    _reload_outbox_modules(monkeypatch, True)
+    import app as app_mod
+    yield app_mod
+    _reload_outbox_modules(monkeypatch, False)
 
 
 @pytest.fixture
@@ -187,6 +213,158 @@ def test_admin_create_campaign(
         assert leads_count > 0, "No leads populated"
 
     print(f"✅ test_admin_create_campaign passed — campaign {campaign_id}, {leads_count} leads")
+
+
+def test_outbox_state_returns_403_when_use_message_outbox_disabled(
+    db_conn, ensure_admin_user,
+):
+    """AC / §7: polling outbox exige ``USE_MESSAGE_OUTBOX`` no ambiente."""
+    admin_id = ensure_admin_user
+    from app import app
+    app.config['TESTING'] = True
+    app.config['LOGIN_DISABLED'] = True
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(admin_id)
+        res = client.get('/api/admin/campaigns/1/outbox-state')
+    assert res.status_code == 403
+    body = res.get_json(silent=True) or {}
+    assert 'USE_MESSAGE_OUTBOX' in (body.get('message') or '')
+
+
+def test_superadmin_outbox_create_skips_advanced_api_and_enqueues_outbox(
+    db_conn, ensure_admin_user, ensure_target_user,
+    ensure_instance, ensure_scraping_job, monkeypatch,
+):
+    """
+    Flag on + superadmin: não chama ``create_advanced_campaign``; persiste ``campaign_message_outbox``.
+    """
+    from psycopg2.extras import RealDictCursor
+
+    admin_id = ensure_admin_user
+    target_user_id = ensure_target_user
+    instance_id = ensure_instance
+    job_id = ensure_scraping_job
+
+    with use_message_outbox_env(monkeypatch):
+        with patch('services.uazapi.UazapiService.create_advanced_campaign') as mock_adv:
+            with patch('utils.limits.can_create_campaign_today', return_value=True):
+                app_mod = __import__('app', fromlist=['app'])
+                flask_app = app_mod.app
+                flask_app.config['TESTING'] = True
+                flask_app.config['LOGIN_DISABLED'] = True
+
+                with flask_app.test_client() as client:
+                    with client.session_transaction() as sess:
+                        sess['_user_id'] = str(admin_id)
+
+                    payload = {
+                        'user_id': target_user_id,
+                        'name': 'Outbox Test Campaign',
+                        'job_id': job_id,
+                        'message_templates': ['Olá {nome}, outbox!'],
+                        'instance_ids': [instance_id],
+                        'use_uazapi_sender': True,
+                        'rotation_mode': 'single',
+                        'send_hour_start': 8,
+                        'send_hour_end': 20,
+                        'send_saturday': False,
+                        'send_sunday': False,
+                    }
+                    res = client.post(
+                        '/api/admin/campaigns',
+                        data=json.dumps(payload),
+                        content_type='application/json',
+                    )
+
+                assert res.status_code in (200, 201), res.get_data(as_text=True)
+                mock_adv.assert_not_called()
+
+                data = json.loads(res.get_data(as_text=True))
+                campaign_id = data.get('campaign_id') or data.get('id')
+                assert campaign_id
+
+                with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM campaign_message_outbox WHERE campaign_id = %s AND status = 'pending'",
+                        (campaign_id,),
+                    )
+                    assert cur.fetchone()['n'] >= 1
+
+
+def test_outbox_tick_writes_attempt_and_marks_sent(
+    db_conn, ensure_admin_user, ensure_target_user,
+    ensure_instance, ensure_scraping_job, monkeypatch,
+):
+    """Worker: um tick com mock HTTP 200 grava ``campaign_send_attempts`` e outbox ``sent``."""
+    from psycopg2.extras import RealDictCursor
+
+    admin_id = ensure_admin_user
+    target_user_id = ensure_target_user
+    instance_id = ensure_instance
+    job_id = ensure_scraping_job
+
+    with use_message_outbox_env(monkeypatch):
+        with patch('utils.limits.can_create_campaign_today', return_value=True):
+            with patch('utils.limits.check_initial_chunk_daily_quota_for_campaign', return_value=True):
+                app_mod = __import__('app', fromlist=['app'])
+                flask_app = app_mod.app
+                flask_app.config['TESTING'] = True
+                flask_app.config['LOGIN_DISABLED'] = True
+
+                with flask_app.test_client() as client:
+                    with client.session_transaction() as sess:
+                        sess['_user_id'] = str(admin_id)
+                    payload = {
+                        'user_id': target_user_id,
+                        'name': 'Outbox Tick Campaign',
+                        'job_id': job_id,
+                        'message_templates': ['Ping {nome}'],
+                        'instance_ids': [instance_id],
+                        'use_uazapi_sender': True,
+                        'rotation_mode': 'single',
+                        'send_hour_start': 8,
+                        'send_hour_end': 20,
+                        'send_saturday': True,
+                        'send_sunday': True,
+                    }
+                    res = client.post(
+                        '/api/admin/campaigns',
+                        data=json.dumps(payload),
+                        content_type='application/json',
+                    )
+                assert res.status_code in (200, 201), res.get_data(as_text=True)
+                data = json.loads(res.get_data(as_text=True))
+                campaign_id = data.get('campaign_id') or data.get('id')
+                assert campaign_id
+
+                import worker_message_outbox as wmo
+
+                with patch.object(wmo, 'is_campaign_send_window', return_value=True):
+                    with patch.object(
+                        wmo.uazapi_service,
+                        'send_text_idempotent',
+                        return_value={'messageId': 'x'},
+                    ):
+                        wmo.process_message_outbox_tick(db_conn)
+
+                with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT o.id, o.status FROM campaign_message_outbox o
+                        WHERE o.campaign_id = %s ORDER BY o.id LIMIT 1
+                        """,
+                        (campaign_id,),
+                    )
+                    row = cur.fetchone()
+                    assert row and row['status'] == 'sent'
+
+                    cur.execute(
+                        "SELECT outcome FROM campaign_send_attempts WHERE outbox_id = %s ORDER BY id DESC LIMIT 1",
+                        (row['id'],),
+                    )
+                    att = cur.fetchone()
+                    assert att and att['outcome'] == 'sent'
 
 
 def test_admin_new_campaign_page_loads(db_conn, ensure_admin_user):

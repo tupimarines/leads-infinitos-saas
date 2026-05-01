@@ -5,12 +5,53 @@ Usado pelo superadmin para criar instâncias, conectar, verificar status,
 deletar e enviar mensagens. URL base via UAZAPI_URL; admintoken via UAZAPI_ADMIN_TOKEN.
 """
 
+import base64
 import json
 import os
 import time
 from typing import Any, Optional, Tuple
 
 import requests
+
+
+def _parse_timeout_seconds(
+    env_name: str, default: int, *, minimum: int = 5, maximum: int = 600
+) -> int:
+    """Lê timeout em segundos a partir de env; valores inválidos usam default."""
+    raw = (os.environ.get(env_name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw, 10)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, v))
+
+
+def _resolve_media_file_value(file: str) -> Optional[str]:
+    """
+    Converte path local em data URL base64; mantém URL/http/data: como estão.
+    Retorna None se path local não existir.
+    """
+    if file.startswith(("http://", "https://", "data:")):
+        return file
+    if os.path.isfile(file):
+        with open(file, "rb") as f:
+            data = f.read()
+        b64 = base64.b64encode(data).decode("utf-8")
+        ext = os.path.splitext(file)[1].lower()
+        mime_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".mp4": "video/mp4",
+            ".webm": "video/webm",
+        }
+        mime = mime_map.get(ext, "application/octet-stream")
+        return f"data:{mime};base64,{b64}"
+    print(f"❌ [Uazapi] send_media: arquivo não encontrado: {file}")
+    return None
 
 # Rate limit para log de 401: uma vez por instance_id a cada 5 min
 _401_log_last: dict[tuple, float] = {}
@@ -159,6 +200,47 @@ class UazapiService:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
             return None
 
+    def send_text_idempotent(
+        self,
+        token: str,
+        number: str,
+        text: str,
+        *,
+        track_id: str,
+        track_source: str,
+        timeout_seconds: int = 15,
+    ) -> Optional[dict[str, Any]]:
+        """
+        POST /send/text com track_id e track_source (idempotência / rastreio Uazapi).
+        Campos alinhados ao OpenAPI (snake_case).
+        """
+        url = f"{self.base_url}/send/text"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "number": number,
+            "text": text,
+            "track_id": track_id,
+            "track_source": track_source,
+        }
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=timeout_seconds
+            )
+            if response.status_code != 200:
+                print(f"❌ [Uazapi] send_text_idempotent Status: {response.status_code}")
+                print(f"❌ [Uazapi] send_text_idempotent Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error send_text_idempotent: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
+
     def send_media(
         self,
         token: str,
@@ -174,35 +256,15 @@ class UazapiService:
         file: path local (será convertido para base64), URL ou string base64.
         caption: legenda opcional.
         """
-        import base64
-
         url = f"{self.base_url}/send/media"
         headers = {
             "token": token,
             "Content-Type": "application/json",
         }
 
-        file_value = file
-        if not file.startswith(("http://", "https://", "data:")):
-            # Path local: ler e converter para base64
-            if os.path.isfile(file):
-                with open(file, "rb") as f:
-                    data = f.read()
-                b64 = base64.b64encode(data).decode("utf-8")
-                ext = os.path.splitext(file)[1].lower()
-                mime_map = {
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".png": "image/png",
-                    ".gif": "image/gif",
-                    ".mp4": "video/mp4",
-                    ".webm": "video/webm",
-                }
-                mime = mime_map.get(ext, "application/octet-stream")
-                file_value = f"data:{mime};base64,{b64}"
-            else:
-                print(f"❌ [Uazapi] send_media: arquivo não encontrado: {file}")
-                return None
+        file_value = _resolve_media_file_value(file)
+        if file_value is None:
+            return None
 
         payload: dict[str, Any] = {
             "number": number,
@@ -222,6 +284,62 @@ class UazapiService:
             return response.json()
         except requests.exceptions.RequestException as e:
             print(f"❌ [Uazapi] Error sending media: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"❌ [Uazapi] Response: {e.response.text}")
+            return None
+
+    def send_media_campaign(
+        self,
+        token: str,
+        number: str,
+        media_type: str,
+        file: str,
+        caption: str = "",
+        *,
+        track_id: str,
+        track_source: str,
+        timeout_seconds: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        POST /send/media com track_id e track_source (campanhas / outbox).
+        Timeout: ``timeout_seconds`` se definido; senão ``UAZAPI_SEND_MEDIA_TIMEOUT_SECONDS`` (default 30).
+        """
+        url = f"{self.base_url}/send/media"
+        headers = {
+            "token": token,
+            "Content-Type": "application/json",
+        }
+
+        file_value = _resolve_media_file_value(file)
+        if file_value is None:
+            return None
+
+        timeout = timeout_seconds
+        if timeout is None:
+            timeout = _parse_timeout_seconds(
+                "UAZAPI_SEND_MEDIA_TIMEOUT_SECONDS", default=30, minimum=5, maximum=600
+            )
+
+        payload: dict[str, Any] = {
+            "number": number,
+            "type": media_type,
+            "file": file_value,
+            "text": caption or "",
+            "track_id": track_id,
+            "track_source": track_source,
+        }
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=timeout
+            )
+            if response.status_code != 200:
+                print(f"❌ [Uazapi] send_media_campaign Status: {response.status_code}")
+                print(f"❌ [Uazapi] send_media_campaign Body: {response.text}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Uazapi] Error send_media_campaign: {e}")
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
             return None
