@@ -2,7 +2,7 @@
 """
 Aceitação alinhada à tech-spec ``envio-individual-fila-intercalada-campanhas``:
 AC6 (polling), AC7 (API fase 1 só superadmin), AC8 (offset migração), AC11 (sent_today),
-AC12 (pausa sem POST).
+AC12 (pausa: linhas dessa campanha não são enviadas pelo tick).
 
 AC1–AC3 e fluxo de criação outbox: ver ``test_admin_campaign_crud.py``.
 AC5 (quota diária): coberto aqui com mock de quota esgotada (defer sem POST).
@@ -458,7 +458,11 @@ def test_ac11_sent_today_increments_on_successful_tick(
 
 
 def test_ac12_paused_campaign_skips_outbox_post(db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch):
-    """AC12: campanha ``paused`` não dispara POST (mock nunca chamado)."""
+    """AC12: campanha ``paused`` não entra no SELECT do worker; outbox dessa campanha permanece sem tentativa.
+
+    O tick é global: outras filas ``pending`` podem ser processadas no mesmo ``process_message_outbox_tick``.
+    O mock com retorno JSON válido evita efeitos colaterais se o tick pegar outra campanha na BD de testes.
+    """
     _reload_outbox_modules(monkeypatch, True)
     uid = ensure_target_user
     iid = ensure_uazapi_instance
@@ -481,13 +485,37 @@ def test_ac12_paused_campaign_skips_outbox_post(db_conn, ensure_target_user, ens
         )
         db_conn.commit()
 
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id FROM campaign_message_outbox WHERE campaign_id = %s ORDER BY id DESC LIMIT 1",
+            (cid,),
+        )
+        paused_row = cur.fetchone()
+        assert paused_row
+        paused_outbox_id = int(paused_row["id"])
+
     import worker_message_outbox as wmo
 
     with patch.object(wmo, "is_campaign_send_window", return_value=True):
-        with patch.object(wmo.uazapi_service, "send_text_idempotent") as mock_send:
+        with patch.object(
+            wmo.uazapi_service,
+            "send_text_idempotent",
+            return_value={"messageId": "ac12-collateral-ok"},
+        ):
             with patch("utils.limits.check_initial_chunk_daily_quota_for_campaign", return_value=True):
                 wmo.process_message_outbox_tick(db_conn)
-    mock_send.assert_not_called()
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT status FROM campaign_message_outbox WHERE id = %s",
+            (paused_outbox_id,),
+        )
+        assert cur.fetchone()["status"] == "pending"
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM campaign_send_attempts WHERE outbox_id = %s",
+            (paused_outbox_id,),
+        )
+        assert int(cur.fetchone()["n"]) == 0
 
     monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
     importlib.reload(__import__("utils.config", fromlist=["cfg"]))

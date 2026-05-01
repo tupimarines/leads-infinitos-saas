@@ -301,7 +301,7 @@ def test_outbox_tick_writes_attempt_and_marks_sent(
     db_conn, ensure_admin_user, ensure_target_user,
     ensure_instance, ensure_scraping_job, monkeypatch,
 ):
-    """Worker: um tick com mock HTTP 200 grava ``campaign_send_attempts`` e outbox ``sent``."""
+    """Worker: com mock 200, após ticks sucessivos (fila global, 1 envio/tick) esta campanha fica com linha ``sent`` e tentativa."""
     from psycopg2.extras import RealDictCursor
 
     admin_id = ensure_admin_user
@@ -345,25 +345,32 @@ def test_outbox_tick_writes_attempt_and_marks_sent(
 
                 import worker_message_outbox as wmo
 
-                with patch.object(wmo, 'is_campaign_send_window', return_value=True):
-                    with patch.object(
-                        wmo.uazapi_service,
-                        'send_text_idempotent',
-                        return_value={'messageId': 'x'},
-                    ):
-                        wmo.process_message_outbox_tick(db_conn)
+                row = None
+                for _ in range(200):
+                    with patch.object(wmo, 'is_campaign_send_window', return_value=True):
+                        with patch.object(
+                            wmo.uazapi_service,
+                            'send_text_idempotent',
+                            return_value={'messageId': 'x'},
+                        ):
+                            wmo.process_message_outbox_tick(db_conn)
+                    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute(
+                            """
+                            SELECT o.id, o.status FROM campaign_message_outbox o
+                            WHERE o.campaign_id = %s AND o.status = 'sent' LIMIT 1
+                            """,
+                            (campaign_id,),
+                        )
+                        row = cur.fetchone()
+                    if row:
+                        break
+                assert row and row['status'] == 'sent', (
+                    "Nenhuma linha desta campanha passou a sent após 200 ticks; "
+                    "fila global ou janela/throttle podem estar a bloquear de forma persistente."
+                )
 
                 with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute(
-                        """
-                        SELECT o.id, o.status FROM campaign_message_outbox o
-                        WHERE o.campaign_id = %s ORDER BY o.id LIMIT 1
-                        """,
-                        (campaign_id,),
-                    )
-                    row = cur.fetchone()
-                    assert row and row['status'] == 'sent'
-
                     cur.execute(
                         "SELECT outcome FROM campaign_send_attempts WHERE outbox_id = %s ORDER BY id DESC LIMIT 1",
                         (row['id'],),
