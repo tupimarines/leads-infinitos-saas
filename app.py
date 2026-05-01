@@ -5883,9 +5883,7 @@ def _create_campaign_core(user_id, data, admin_id=None):
     # NEW: Validate scheduled_start if provided
     if scheduled_start:
         try:
-            from datetime import datetime
-            # Just validate format, don't check if future (browser already does this)
-            # Parse to ensure it's valid ISO format
+            # Validar formato ISO (datetime já importado no topo do módulo)
             datetime.fromisoformat(scheduled_start.replace('Z', ''))
         except Exception as e:
             return json.dumps({'error': f'Data inválida: {str(e)}'}), 400
