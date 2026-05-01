@@ -24,6 +24,7 @@ from utils.config import SUPER_ADMIN_EMAILS, USE_MESSAGE_OUTBOX
 from utils.limits import check_initial_chunk_daily_quota_for_campaign
 from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
 from utils.outbox_prometheus import observe_campaign_outbox_send_attempt
+from utils.uazapi_outbox_errors import classify_outbox_send_failure
 
 try:
     uazapi_service = UazapiService()
@@ -45,6 +46,30 @@ _CADENCE_OUTBOX_STAGES: tuple[tuple[str, int, int, int], ...] = (
 )
 
 _REAPER_MINUTES = int(os.environ.get("UAZAPI_OUTBOX_SENDING_REAPER_MINUTES", "20"))
+_OUTBOX_RETRY_BASE_SEC = int(os.environ.get("UAZAPI_OUTBOX_RETRY_BASE_SECONDS", "30"))
+_OUTBOX_RETRY_MAX_SEC = int(os.environ.get("UAZAPI_OUTBOX_RETRY_MAX_SECONDS", "3600"))
+
+
+def _outbox_retry_backoff_seconds(attempt_no: int) -> int:
+    """Backoff exponencial por número da tentativa (1-based), com teto."""
+    exp = max(0, attempt_no - 1)
+    raw = _OUTBOX_RETRY_BASE_SEC * (2**exp)
+    return min(_OUTBOX_RETRY_MAX_SEC, raw)
+
+
+def _result_json_for_classify(
+    response_body: Optional[str], audit_response_body: Any
+) -> Any:
+    if isinstance(audit_response_body, dict):
+        return audit_response_body
+    if isinstance(response_body, str) and response_body.strip():
+        try:
+            parsed = json.loads(response_body)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return None
 
 
 def _parse_message_template(raw: Any) -> list[str]:
@@ -757,7 +782,9 @@ def _persist_outcome(
     audit_request: Optional[dict] = None,
     audit_response_body: Any = None,
 ) -> None:
-    """Fase (C): tentativa + estado terminal; §6.1 só se ``success`` e HTTP 200 implícito."""
+    """Fase (C): tentativa + estado; §6.1 só promove lead/envio se ``success``.
+    Falhas classificadas como transitórias voltam a ``pending`` com ``next_run_at`` em backoff;
+    só ``terminal`` fecha a linha como ``failed``."""
     stage = (chosen.get("stage") or "initial").lower()
     enable_cadence = bool(chosen.get("enable_cadence"))
     instance_name = chosen.get("instance_name") or ""
@@ -780,6 +807,22 @@ def _persist_outcome(
         )
         attempt_no = int((cur.fetchone() or {}).get("m") or 0) + 1
 
+    result_json_classify = _result_json_for_classify(response_body, audit_response_body)
+    if success:
+        attempt_row_outcome = outcome
+    else:
+        kind = classify_outbox_send_failure(
+            http_status,
+            response_body,
+            result_json_classify,
+            None,
+        )
+        attempt_row_outcome = (
+            "failed_terminal"
+            if kind == "terminal"
+            else "retry_scheduled"
+        )
+
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -793,7 +836,7 @@ def _persist_outcome(
                     attempt_no,
                     http_status,
                     _truncate(response_body),
-                    outcome,
+                    attempt_row_outcome,
                     latency_ms,
                 ),
             )
@@ -842,15 +885,28 @@ def _persist_outcome(
                     (delta_sec, campaign_id, outbox_id),
                 )
             else:
-                cur.execute(
-                    """
-                    UPDATE campaign_message_outbox
-                    SET status = 'failed',
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (outbox_id,),
-                )
+                if attempt_row_outcome == "failed_terminal":
+                    cur.execute(
+                        """
+                        UPDATE campaign_message_outbox
+                        SET status = 'failed',
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (outbox_id,),
+                    )
+                else:
+                    delay_sec = _outbox_retry_backoff_seconds(attempt_no)
+                    cur.execute(
+                        """
+                        UPDATE campaign_message_outbox
+                        SET status = 'pending',
+                            next_run_at = NOW() + (%s * INTERVAL '1 second'),
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (delay_sec, outbox_id),
+                    )
 
         conn.commit()
         _log_outbox_attempt_event(
@@ -858,7 +914,7 @@ def _persist_outcome(
             outbox_id=outbox_id,
             instance_id=int(chosen.get("instance_id") or 0),
             latency_ms=latency_ms,
-            outcome=outcome,
+            outcome=attempt_row_outcome,
             http_status=http_status,
         )
         try:
@@ -875,7 +931,7 @@ def _persist_outcome(
                         "stage": stage,
                         "attempt_no": attempt_no,
                         "instance_id": int(chosen.get("instance_id") or 0),
-                        "outcome": outcome,
+                        "outcome": attempt_row_outcome,
                         "latency_ms": latency_ms,
                         "http_status": http_status,
                         "request": audit_request or {},

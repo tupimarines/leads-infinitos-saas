@@ -681,18 +681,30 @@
             resumeBtn.addEventListener('click', async () => {
                 const cid = outboxPollState.campaignId;
                 if (!cid || !PAGE_CSRF) return;
-                try {
-                    const res = await fetch(`/api/admin/campaigns/${cid}/outbox/resume`, {
-                        method: 'POST',
-                        credentials: 'same-origin',
-                        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': PAGE_CSRF },
-                        body: JSON.stringify({ csrf_token: PAGE_CSRF })
-                    });
-                    const j = await res.json().catch(() => ({}));
-                    alert(res.ok ? (j.message || 'Retomada.') : (j.message || res.status));
-                } catch (e) {
-                    alert('Erro: ' + e.message);
-                }
+                const resumeOnce = async (force) => {
+                    try {
+                        const res = await fetch(`/api/admin/campaigns/${cid}/outbox/resume`, {
+                            method: 'POST',
+                            credentials: 'same-origin',
+                            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': PAGE_CSRF },
+                            body: JSON.stringify({
+                                csrf_token: PAGE_CSRF,
+                                ...(force ? { confirm_resume_while_disconnected: true } : {}),
+                            }),
+                        });
+                        const j = await res.json().catch(() => ({}));
+                        if (res.status === 409 && j.requires_confirmation && !force) {
+                            if (confirm(j.message || 'A instância pode ainda estar desligada. Retomar mesmo assim?')) {
+                                return resumeOnce(true);
+                            }
+                            return;
+                        }
+                        alert(res.ok ? (j.message || 'Retomada.') : (j.message || j.error || res.status));
+                    } catch (e) {
+                        alert('Erro: ' + e.message);
+                    }
+                };
+                await resumeOnce(false);
             });
         }
     }

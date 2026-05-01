@@ -3,7 +3,7 @@ title: 'Desconexão WhatsApp — pausa de campanhas e retoma após reconexão (o
 slug: desconexao-whatsapp-pausa-retoma-campanhas
 created: '2026-05-01'
 status: ready-for-dev
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted: [1, 2, 3, 4, 5, 6, 7, 8, 9]
 tech_stack:
   - Python 3.x
   - Flask
@@ -15,6 +15,8 @@ files_to_modify:
   - worker_message_outbox.py
   - utils/uazapi_support_notify.py
   - utils/uazapi_error_taxonomy.py (ou novo módulo auxiliar)
+  - utils/uazapi_outbox_errors.py
+  - templates/campaigns_new.html (UX rotação multi-instância)
 code_patterns:
   - RealDictCursor em workers; SQL com `%s`
   - Feature flag `USE_MESSAGE_OUTBOX` em `utils.config`
@@ -50,6 +52,7 @@ Hoje o disparo via **fila outbox** (`campaign_message_outbox`) não tem um fluxo
 - Alterações em **`_persist_outcome`** e no fluxo **antes**/**depois** do HTTP para classificar erros.
 - **UI/API**: aviso ao utilizador (instância + contagem de campanhas); CTA **Retomar** alinhado ao fluxo existente de pause/resume em `app.py`.
 - Alinhamento com **`_resume_waiting_reconnect_stage_sends`** apenas a nível de **regras de produto e documentação** (sem obrigar refactor completo do legado).
+- **UX / produto — rotação entre instâncias** na criação da campanha (fluxo superadmin `campaigns_new.html`): reduzir casos em que o utilizador selecciona várias instâncias mas **só uma** envia porque `rotation_mode` ficou `single` (toggle **Rotação** desligado).
 
 **Out of scope (MVP explícito):**
 
@@ -68,6 +71,10 @@ Hoje o disparo via **fila outbox** (`campaign_message_outbox`) não tem um fluxo
 - **Falha**: ramo `else` em `_persist_outcome` faz `UPDATE campaign_message_outbox SET status = 'failed'` sem distinção de causa.
 - **Legado reconnect**: `_resume_waiting_reconnect_stage_sends` usa `get_instance_status_cached` e só promove para `scheduled` se **não** `is_instance_disconnected_status(st)` (`worker_cadence.py`).
 - **Taxonomia**: `utils/uazapi_error_taxonomy.py` classifica erros de `create_advanced_campaign`; pode servir de modelo para uma função **`classify_outbox_send_failure`** (corpo/HTTP/`None`).
+- **Rotação multi-instância (outbox)**:
+  - No **enqueue** (`app.py`, após criar campanha com `USE_MESSAGE_OUTBOX`): se `rotation_mode == 'round_robin'`, cada lead recebe `allowed_instances[i % n_allowed]`; se `'single'`, **todos** recebem `allowed_instances[0]`. `allowed_instances` vem de `_get_uazapi_instances_for_campaign` (**`ORDER BY i.id ASC`**) filtrado por `can_create_campaign_today`.
+  - No **worker** (`worker_message_outbox.py`): `_choose_outbox_row` / `_pick_instance_round_robin` só alternam entre instâncias quando há **várias linhas candidatas com o mesmo critério de ordenação** e **`rotation_mode == 'round_robin'`** — se todas as linhas outbox tiverem o **mesmo** `instance_id` (modo `single` no enqueue), o envio sai sempre dessa instância.
+  - **UI** (`templates/campaigns_new.html`): o toggle **Rotação** só é renderizado quando `is_super_admin` (bloco `{% if is_super_admin %}` ~linhas 714–727). O JavaScript (~1264–1270) faz `if (rotationToggle && rotationToggle.checked)` — para utilizadores **sem** superadmin, `getElementById('rotation_toggle')` é **`null`**, a condição falha e o payload envia **sempre** `rotation_mode: 'single'`, mesmo com **várias** instâncias marcadas. Isto explica rotação que «não funciona» independentemente do print ilustrativo.
 
 ### Files to Reference
 
@@ -77,7 +84,8 @@ Hoje o disparo via **fila outbox** (`campaign_message_outbox`) não tem um fluxo
 | `worker_cadence.py` | `_resume_waiting_reconnect_stage_sends`, ordem de chamadas no loop principal. |
 | `utils/uazapi_support_notify.py` | `get_instance_status_cached`, `is_instance_disconnected_status`, `maybe_send_disconnect_support_whatsapp`. |
 | `services/uazapi.py` | `get_status` → GET `/instance/status` (`connected` / `connecting` / `disconnected`). |
-| `app.py` | Rotas pause/resume campanha, `campaign_instances`, init DB `campaign_message_outbox`. |
+| `app.py` | Rotas pause/resume campanha, `campaign_instances`, init DB `campaign_message_outbox`; enqueue outbox inicial (`rotation_mode` + `allowed_instances[0]` vs módulo). |
+| `templates/campaigns_new.html` | Toggle **Rotação**, `data.rotation_mode` no POST `/api/campaigns`. |
 | `utils/uazapi_error_taxonomy.py` | Padrão de classificação `no_session`, `transient_http`, etc. |
 
 ### Technical Decisions
@@ -89,51 +97,62 @@ Hoje o disparo via **fila outbox** (`campaign_message_outbox`) não tem um fluxo
 | Estado outbox transitório | Preferir manter `pending` + `next_run_at` **ou** `status = 'waiting_instance'` | `failed` só para erros definitivos (template inválido, 4xx persistente, etc.). |
 | Onde correr saúde | Mesmo processo `worker_cadence` com intervalo configurável (env) | Menos moving parts; já existe `get_status` cache 60s. |
 | Idempotência | Manter `idempotency_key` / `track_id` como hoje | Mitiga duplo envio após retoma. |
+| Rotação “parece não funcionar” | Corrigir **gating superadmin** no toggle + clarificar UX quando `single`; opcional default `round_robin` se `len(instance_ids) > 1`. | Utilizador não–SA não tem `#rotation_toggle` → POST **sempre** `single`; marcar várias caixas **não** activa rotação. |
 
 ## Implementation Plan
 
 ### Tasks
 
-- [ ] **Task 1 — Migração PostgreSQL (campanhas + opcional outbox)**  
+- [x] **Task 1 — Migração PostgreSQL (campanhas + opcional outbox)**  
   - File: `app.py` (`_init_db_body` ou bloco de migrações existente) **e/ou** script `migrate_*.py` se o projecto preferir migração separada.  
   - Action: Adicionar colunas em `campaigns`: `pause_origin` TEXT, `pause_reason_code` TEXT, `system_paused_at` TIMESTAMP NULL (nomes finais podem ajustar-se ao estilo actual). Garantir compatibilidade com campanhas existentes (NULL = comportamento actual).  
   - Opcional: `campaign_message_outbox.status` permitir valor `'waiting_instance'` **ou** coluna `transient_hold` BOOLEAN + manter `pending`.  
   - Notes: Se existir CHECK/DROP em `campaigns.status` na BD real, validar se `'paused'` já é permitido (o código usa `'paused'` nas rotas; o CREATE inicial antigo pode divergir — confirmar em ambientes).
 
-- [ ] **Task 2 — Função de classificação de falha de envio outbox**  
+- [x] **Task 2 — Função de classificação de falha de envio outbox**  
   - File: novo `utils/uazapi_outbox_errors.py` **ou** extensão de `utils/uazapi_error_taxonomy.py`.  
   - Action: Implementar `classify_outbox_send_failure(http_status, response_body, result_json, exception_class) -> Literal['terminal', 'retry_backoff', 'instance_unreachable']` com regras alinhadas ao produto: `None`/timeout → `instance_unreachable` ou `retry_backoff`; corpo com “no session” / “desconect” → `instance_unreachable`; 502/503/504 → `retry_backoff`; 4xx claros → `terminal`.  
   - Notes: Documentar matriz num comentário curto no módulo.
 
-- [ ] **Task 3 — `_persist_outcome` ramificado**  
+- [x] **Task 3 — `_persist_outcome` ramificado**  
   - File: `worker_message_outbox.py`.  
   - Action: No ramo `else` (não sucesso), em vez de só `status='failed'`:  
     - Se `instance_unreachable` ou `retry_backoff`: repor ou manter `pending`, limpar `sending`, definir `next_run_at` (backoff exponencial com teto), incrementar contador opcional de tentativas; **não** marcar lead como `sent`.  
     - Se `terminal`: manter comportamento actual (`failed`).  
   - Notes: Garantir que `campaign_send_attempts` continua a registar **todas** as tentativas com `outcome` descritivo (`failed_terminal` vs `retry_scheduled`).
 
-- [ ] **Task 4 — Tick de saúde da instância + pausa em cascata**  
+- [x] **Task 4 — Tick de saúde da instância + pausa em cascata**  
   - File: `worker_cadence.py` (função nova, ex. `_pause_campaigns_for_disconnected_instances`) **ou** `utils/uazapi_support_notify.py` se preferir API pura.  
   - Action: Periodicamente (ex. a cada 60–120s ou a cada N iterações do loop): para cada `instance_id` que tenha pelo menos uma campanha `running`/`pending` com `use_uazapi_sender` e ligação em `campaign_instances`, chamar `get_instance_status_cached`. Se `is_instance_disconnected_status`: UPDATE `campaigns` SET `status='paused'`, `pause_origin='system'`, `pause_reason_code='instance_disconnected'`, `system_paused_at=NOW()` onde `id` em (campanhas afectadas) **e** `status IN ('running','pending')`.  
   - Notes: Idempotência do UPDATE; não apagar filas outbox.
 
-- [ ] **Task 5 — Detecção de reconexão + notificação**  
+- [x] **Task 5 — Detecção de reconexão + notificação**  
   - File: `utils/uazapi_support_notify.py` + `app.py` (flash/toast) ou template dashboard.  
   - Action: Manter registo do último estado por instância (memória worker ou coluna `instances.last_uazapi_status` + timestamp). Na transição disconnected→connected: limpar bloqueio lógico; opcionalmente enviar evento in-app (session flag) “Existem N campanhas pausadas por desconexão da instância X”. Reutilizar cooldown de `maybe_send_disconnect_support_whatsapp` onde fizer sentido **ou** mensagem distinta para reconexão (nova função irmã).  
   - Notes: Não enviar spam — um resumo por utilizador/instância por janela.
 
-- [ ] **Task 6 — Retoma segura (API + UI)**  
+- [x] **Task 6 — Retoma segura (API + UI)**  
   - File: `app.py`, templates relevantes (`templates/` campanha/dashboard).  
   - Action: Na rota de **resume** existente: se `pause_reason_code == 'instance_disconnected'`, validar `get_status` **ou** avisar risco e exigir confirmação. Ao retomar: `status='running'`, limpar `pause_reason_code` / `pause_origin` conforme política (ex. só limpar se origem sistema).  
   - Notes: Não alterar linhas outbox `sent`; `pending`/`waiting_instance` processam normalmente após `running`.
 
-- [ ] **Task 7 — Legado advanced (documentação + smoke)**  
+- [x] **Task 7 — Legado advanced (documentação + smoke)**  
   - File: comentário em `worker_cadence.py` ou doc em `_bmad-output/implementation-artifacts/` (apenas se necessário para equipa).  
   - Action: Parágrafo explícito: `waiting_reconnect` aplica-se a `campaign_stage_sends`; outbox usa `pending`/`waiting_instance` — ambos dependem de `get_status` para reconnect.
 
-- [ ] **Task 8 — Testes**  
+- [x] **Task 8 — Testes**  
   - File: `tests/test_outbox_disconnect_policy.py` (novo) ou ficheiro existente de worker.  
   - Action: Testes unitários para `classify_outbox_send_failure`; teste de integração leve com BD mock ou fixtures: falha transitória não produz `campaign_message_outbox.status='failed'`; campanha pausada sistema não é seleccionada pelo SELECT do tick.
+
+- [x] **Task 9 — UX e consistência da rotação multi-instância (`campaigns_new`)**  
+  - Files: `templates/campaigns_new.html`; opcionalmente `app.py` (validação ou campo na resposta de criação); testes e2e ou unitários do payload JSON.  
+  - Action (escolher **uma** combinação mínima, documentar a decisão no PR):  
+    0. **Bug estrutural (prioridade):** tornar `rotation_mode` configurável para **todos** os utilizadores que criam campanha com multi-instância — **ou** no HTML mostrar o toggle **fora** do `{% if is_super_admin %}`, **ou** no JS (sem toggle): `if (instanceIds.length > 1) data.rotation_mode = 'round_robin'` por defeito / conforme produto. Sem isto, utilizadores não–superadmin **nunca** enviam `round_robin` no POST.  
+    1. **Aviso explícito** quando existirem **≥2** checkboxes de instância marcados **e** modo efectivo for `single`: texto visível (ex. painel âmbar) a explicar que **todos os envios serão atribuídos à primeira instância elegível** (`allowed_instances[0]`, critério `ORDER BY i.id ASC` + quota diária), **não** alternando — para alternar, **activar Rotação** (quando existir) ou escolher política acima.  
+    2. **Default inteligente**: ao marcar a **segunda** instância, pré-ligar o toggle de Rotação **ou** definir `data.rotation_mode = 'round_robin'` quando `instanceCheckboxes.length > 1` (alinhado ao comportamento já usado em `templates/admin/campaigns_new.html` linha ~1052).  
+    3. **Opcional**: ao submeter com `instance_ids.length > 1` e `rotation_mode === 'single'`, pedir confirmação modal (“Tem a certeza que quer usar só uma instância?”).  
+  - **Decisão implementada (2026-05-01):** Item **0** — toggle **Rotação** visível para qualquer utilizador quando `instances|length > 1` (deixa de ser só `is_super_admin`), default **ON** (`checked`) alinhado a `admin/campaigns_new` (multi → round robin). Item **1** — painel âmbar `#rotation-single-warning` quando ≥2 instâncias seleccionadas e rotação desligada. Item **2** — `onInstanceIdsSelectionChange`: ao passar de menos de 2 para 2 ou mais caixas marcadas, reactiva o toggle de rotação. Item **3** não aplicado (opcional). Fallback no POST: sem toggle e várias instâncias → `round_robin`.  
+  - Notes: Se apenas **uma** instância passar `can_create_campaign_today`, `allowed_instances` tem um elemento — nesse caso o comportamento actual (um remetente) é esperado; a Task 9 não obriga mudança no worker se o problema for só quota — pode apenas acrescentar **hint** na UI quando o utilizador espera duas linhas activas. Não duplicar lógica de quota no front; foco em **`rotation_mode`** e expectativa do utilizador.
 
 ### Acceptance Criteria
 
@@ -150,6 +169,10 @@ Hoje o disparo via **fila outbox** (`campaign_message_outbox`) não tem um fluxo
 - [ ] **AC6:** Dado campanha pausada **manualmente** pelo utilizador (`pause_origin=user`), quando o job de saúde detecta desconexão, então o sistema **não** altera o estado para uma confusão com pausa sistema **ou** documenta regra explícita se produto quiser sobrescrever (escolher uma e testar).
 
 - [ ] **AC7:** Dado falha **terminal** real (ex. template em falta, telefone inválido já tratado), quando `_persist_outcome` corre, então comportamento permanece **failed** / lead não marcado como sucesso, como hoje.
+
+- [x] **AC8:** Dado o utilizador (**superadmin ou não**) na página **Nova campanha** com **duas ou mais** instâncias Uazapi seleccionadas, o fluxo permite que `rotation_mode = 'round_robin'` chegue ao `/api/campaigns` quando o produto pretender rotação (toggle visível **ou** regra JS documentada); e quando o modo efectivo for `single`, a interface deixa **explícito** que só uma instância remeterá — sem ambiguidade “marquei várias mas só uma envia”.
+
+- [ ] **AC9:** Dado `rotation_mode = 'round_robin'` e várias instâncias elegíveis no enqueue inicial, quando a campanha é criada com outbox, então existem linhas `campaign_message_outbox` com **`instance_id`** distribuídos por lead (`i % n_allowed`) conforme `app.py`, verificável por consulta SQL ou teste de integração.
 
 ### Additional Context
 
@@ -172,4 +195,5 @@ Hoje o disparo via **fila outbox** (`campaign_message_outbox`) não tem um fluxo
 
 ---
 
-**Próximo passo sugerido:** implementação em contexto fresco (`quick-dev` com este ficheiro), começando por Task 2–3 (classificação + `_persist_outcome`) em conjunto com Task 1 (schema).
+**Próximo passo sugerido:** implementação em contexto fresco (`quick-dev` com este ficheiro). Para **desconexão/reconexão**, começar por Task 2–3 com Task 1 (schema). Para o problema **“só uma instância envia”** com várias seleccionadas, priorizar **Task 9** (quick win de UX + alinhamento com `admin/campaigns_new`).  
+**Nota operacional:** o print foi **ilustrativo**; mesmo com intenção de rotação, o código actual pode enviar **sempre** `single` para utilizadores **sem** superadmin (toggle **Rotação** inexistente → `rotation_toggle === null` → ramo `else` no JS). **Superadmin** com toggle ON obtém `round_robin` no POST; aí sim o enqueue distribui `instance_id` por lead. Implementar **Task 9** item **0** para alinhar produto com comportamento. Quota diária (`can_create_campaign_today`) continua a poder reduzir `allowed_instances` a uma só linha — distinguir em suporte com query à BD / logs.

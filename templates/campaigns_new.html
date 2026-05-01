@@ -711,11 +711,11 @@
                             📱 Instâncias de WhatsApp
                             <span class="text-xs font-normal text-blue-400 ml-2">(Multi-instância)</span>
                         </label>
-                        {% if is_super_admin %}
-                        <div class="flex items-center gap-2">
+                        {% if instances|length > 1 %}
+                        <div class="flex items-center gap-2" title="Alternar envios entre as instâncias seleccionadas">
                             <span class="text-xs text-gray-400">Rotação</span>
                             <label class="relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="rotation_toggle" class="sr-only peer">
+                                <input type="checkbox" id="rotation_toggle" class="sr-only peer" checked>
                                 <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
                                     peer-checked:after:translate-x-full peer-checked:after:border-white 
                                     after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
@@ -750,9 +750,13 @@
                         {% endfor %}
                     </div>
 
+                    <div id="rotation-single-warning" class="hidden mt-3 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-100 text-xs leading-relaxed">
+                        <strong class="text-amber-200">Modo uma instância:</strong> com várias caixas marcadas, todos os envios usarão apenas a <strong>primeira instância elegível</strong> (ordem fixa por ID; a quota diária pode deixar só uma linha activa). Para repartir pelas várias linhas, active <strong>Rotação</strong> acima.
+                    </div>
+
                     <p id="rotation-info" class="text-xs text-gray-500 mt-2">
                         {% if instances|length > 1 %}
-                        Selecione as instâncias para esta campanha. Ative a rotação para alternar entre elas.
+                        Selecione as instâncias para esta campanha. Com rotação activa, os leads alternam entre as linhas; desligada, usa-se só a primeira elegível.
                         {% else %}
                         Instância única selecionada automaticamente.
                         {% endif %}
@@ -1261,9 +1265,13 @@
         const instanceIds = Array.from(instanceCheckboxes).map(cb => parseInt(cb.value));
         data.instance_ids = instanceIds;
 
-        // Rotation mode (only if toggle exists, default single)
+        // rotation_mode: multi-instância na página tem toggle (default ON = round_robin); alinhado a admin quando várias linhas
         const rotationToggle = document.getElementById('rotation_toggle');
-        if (rotationToggle && rotationToggle.checked) {
+        if (instanceIds.length <= 1) {
+            data.rotation_mode = 'single';
+        } else if (rotationToggle && rotationToggle.checked) {
+            data.rotation_mode = 'round_robin';
+        } else if (!rotationToggle && instanceIds.length > 1) {
             data.rotation_mode = 'round_robin';
         } else {
             data.rotation_mode = 'single';
@@ -1385,6 +1393,29 @@
     // ============================================================
     // UAZAPI / instâncias
     // ============================================================
+    /** Rotação multi-instância: aviso âmbar em modo single; ao passar de 1 para 2+ instâncias marcadas, reactiva rotação por defeito. */
+    function updateRotationSingleWarning() {
+        const rotationToggle = document.getElementById('rotation_toggle');
+        const warnEl = document.getElementById('rotation-single-warning');
+        const n = document.querySelectorAll('input[name="instance_ids"]:checked').length;
+        if (warnEl && rotationToggle) {
+            warnEl.classList.toggle('hidden', !(n >= 2 && !rotationToggle.checked));
+        }
+    }
+
+    function onInstanceIdsSelectionChange() {
+        const rotationToggle = document.getElementById('rotation_toggle');
+        const n = document.querySelectorAll('input[name="instance_ids"]:checked').length;
+        if (typeof window._prevCampaignInstanceSelCount !== 'number') {
+            window._prevCampaignInstanceSelCount = n;
+        }
+        if (rotationToggle && window._prevCampaignInstanceSelCount < 2 && n >= 2) {
+            rotationToggle.checked = true;
+        }
+        window._prevCampaignInstanceSelCount = n;
+        updateRotationSingleWarning();
+    }
+
     function refreshUazapiUi() {
         const instanceLabels = document.querySelectorAll('.instance-checkbox-label');
         const uazapiHint = document.getElementById('uazapi-instance-hint');
@@ -1410,6 +1441,7 @@
         if (rolloverHint) {
             rolloverHint.classList.toggle('hidden', !(cadenceOn && useUazapi));
         }
+        updateRotationSingleWarning();
     }
 
     function updateUazapiCapacityPreview() {
@@ -1460,8 +1492,18 @@
 
     document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('input[name="instance_ids"]').forEach(cb => {
-            cb.addEventListener('change', refreshUazapiUi);
+            cb.addEventListener('change', () => {
+                onInstanceIdsSelectionChange();
+                refreshUazapiUi();
+            });
         });
+        const rotToggle = document.getElementById('rotation_toggle');
+        if (rotToggle) {
+            rotToggle.addEventListener('change', updateRotationSingleWarning);
+        }
+        window._prevCampaignInstanceSelCount = document.querySelectorAll('input[name="instance_ids"]:checked').length;
+        updateRotationSingleWarning();
+
         document.querySelectorAll('input[name="cadence_setup_mode"]').forEach(rb => {
             rb.addEventListener('change', refreshUazapiUi);
         });

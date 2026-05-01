@@ -74,6 +74,8 @@ from utils.uazapi_support_notify import (
     get_instance_status_cached,
     is_instance_disconnected_status,
     maybe_send_disconnect_support_whatsapp,
+    enqueue_reconnect_inapp_alert,
+    maybe_send_reconnect_support_whatsapp,
 )
 
 from worker_message_outbox import process_message_outbox_tick
@@ -98,6 +100,18 @@ CHATWOOT_ACCOUNT_ID = os.environ.get('CHATWOOT_ACCOUNT_ID', '2')
 
 CADENCE_POLL_INTERVAL = 30  # seconds (mais frequente para pegar scheduled_start e Continuar)
 SAFETY_BUFFER_MINUTES = 5
+
+
+def _parse_uazapi_disconnect_pause_check_interval_sec() -> int:
+    """Intervalo entre ticks de saúde que pausam campanhas por instância desligada (60–120s recomendado na spec)."""
+    raw = (os.environ.get("UAZAPI_DISCONNECT_PAUSE_CHECK_INTERVAL_SEC") or "90").strip()
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 90
+    return max(45, min(v, 600))
+
+
 # Janela UTC do materialize automático (`_materialize_scheduled_stage_sends`): mesma SSOT na query SQL
 # e no filtro `remaining` (segundos até scheduled_for). Ver docstring da função.
 MATERIALIZE_LOOKBACK_MIN = 15
@@ -1519,6 +1533,18 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
     return {"folders_created": folders_created}
 
 
+# --- Dual-run desconexão Uazapi (legado advanced vs fila outbox) ---
+# ``waiting_reconnect`` em ``campaign_stage_sends`` (fluxo advanced): o worker promove de
+# volta para ``scheduled`` quando ``get_instance_status_cached`` / ``get_status`` indica
+# instância ligada (``not is_instance_disconnected_status``).
+# A fila ``campaign_message_outbox`` (USE_MESSAGE_OUTBOX) não usa esse estado: falhas
+# transitórias/desconexão mantêm a linha em ``pending`` ou ``waiting_instance``, com
+# retry/backoff em ``_persist_outcome``; o elegível volta a ser claimado quando a
+# campanha está ``running`` e a instância responde de novo. Ambos os caminhos dependem
+# do mesmo sinal de saúde da instância (``get_status`` via cache) para destravar após
+# reconexão — ver também ``_uazapi_instance_health_tick`` (pausa sistema / alertas).
+
+
 def _resume_waiting_reconnect_stage_sends(conn):
     """
     Tenta reativar ``waiting_reconnect`` quando a instância Uazapi volta a ``connected``,
@@ -1569,6 +1595,9 @@ def _resume_waiting_reconnect_stage_sends(conn):
                 ),
                 flush=True,
             )
+
+
+def _process_verify_folder_queue():
     """
     Processa fila de verificação: 3 min após create_advanced_campaign, chama list_folders
     e confirma se folder existe e status em (queued, scheduled, sending). Log único por send.
@@ -1608,6 +1637,199 @@ def _resume_waiting_reconnect_stage_sends(conn):
             print(f"  ⚠️ [Verify] send_id={send_id}: list_folders falhou: {e}")
     for i in reversed(to_remove):
         _verify_folder_queue.pop(i)
+
+
+def _uazapi_instance_health_tick(conn) -> dict:
+    """
+    Task 4–5: health Uazapi por instância (campanhas running/pending ou pausadas por desconexão).
+    - Se desligado e há campanha ativa: pausa em cascata (mantém pause manual).
+    - Persiste ``worker_last_uazapi_disconnected``; na transição desligado→ligado notifica
+      (fila in-app + WhatsApp opcional, com cooldown).
+    """
+    if not uazapi_service:
+        return {"paused": 0, "reconnect_notified": 0}
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT i.id, i.apikey, i.name AS instance_name
+            FROM instances i
+            WHERE COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL AND BTRIM(i.apikey) <> ''
+              AND EXISTS (
+                SELECT 1 FROM campaign_instances ci
+                JOIN campaigns c ON c.id = ci.campaign_id
+                WHERE ci.instance_id = i.id
+                  AND COALESCE(c.use_uazapi_sender, false) = true
+                  AND (
+                    c.status IN ('running', 'pending')
+                    OR (
+                      c.status = 'paused'
+                      AND c.pause_origin = 'system'
+                      AND c.pause_reason_code = 'instance_disconnected'
+                    )
+                  )
+              )
+            ORDER BY i.id
+            """
+        )
+        rows = cur.fetchall() or []
+
+    disconnected_for_pause: list[int] = []
+    reconnect_notified = 0
+
+    for r in rows:
+        iid = r.get("id")
+        tok = (r.get("apikey") or "").strip()
+        inst_name = (r.get("instance_name") or "").strip()
+        try:
+            iid_int = int(iid)
+        except (TypeError, ValueError):
+            continue
+        if not tok:
+            continue
+
+        st = get_instance_status_cached(uazapi_service, iid_int, tok)
+        now_disc = is_instance_disconnected_status(st)
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT worker_last_uazapi_disconnected FROM instances WHERE id = %s",
+                (iid_int,),
+            )
+            prow = cur.fetchone()
+        prev = prow.get("worker_last_uazapi_disconnected") if prow else None
+
+        if prev is True and not now_disc:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT c.user_id, COUNT(*) AS n
+                    FROM campaigns c
+                    JOIN campaign_instances ci ON ci.campaign_id = c.id
+                    WHERE ci.instance_id = %s
+                      AND c.status = 'paused'
+                      AND c.pause_origin = 'system'
+                      AND c.pause_reason_code = 'instance_disconnected'
+                    GROUP BY c.user_id
+                    """,
+                    (iid_int,),
+                )
+                groups = cur.fetchall() or []
+            for g in groups:
+                uid = int(g["user_id"])
+                n = int(g["n"] or 0)
+                if n <= 0:
+                    continue
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT MIN(c.id) AS cid FROM campaigns c
+                        JOIN campaign_instances ci ON ci.campaign_id = c.id
+                        WHERE ci.instance_id = %s AND c.user_id = %s
+                          AND c.status = 'paused'
+                          AND c.pause_origin = 'system'
+                          AND c.pause_reason_code = 'instance_disconnected'
+                        """,
+                        (iid_int, uid),
+                    )
+                    cr = cur.fetchone()
+                cid = int(cr["cid"]) if cr and cr.get("cid") is not None else 0
+
+                enq = enqueue_reconnect_inapp_alert(
+                    conn,
+                    user_id=uid,
+                    instance_id=iid_int,
+                    instance_name=inst_name,
+                    campaign_count=n,
+                )
+                wa = maybe_send_reconnect_support_whatsapp(
+                    conn,
+                    uazapi_service,
+                    campaign_id=cid or iid_int,
+                    user_id=uid,
+                    instance_id=iid_int,
+                    instance_name=inst_name,
+                    n_campaigns=n,
+                    context={"enqueue": enq},
+                )
+                reconnect_notified += 1
+                print(
+                    json.dumps(
+                        {
+                            "event": "uazapi_instance_reconnect_transition",
+                            "instance_id": iid_int,
+                            "user_id": uid,
+                            "system_paused_campaigns": n,
+                            "inapp": enq,
+                            "whatsapp": wa,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM campaign_instances ci
+                JOIN campaigns c ON c.id = ci.campaign_id
+                WHERE ci.instance_id = %s
+                  AND c.status IN ('running', 'pending')
+                  AND COALESCE(c.use_uazapi_sender, false) = true
+                LIMIT 1
+                """,
+                (iid_int,),
+            )
+            has_active = cur.fetchone() is not None
+
+        if now_disc and has_active:
+            disconnected_for_pause.append(iid_int)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE instances SET worker_last_uazapi_disconnected = %s WHERE id = %s",
+                (now_disc, iid_int),
+            )
+
+    n_paused = 0
+    if disconnected_for_pause:
+        disconnected_ids = list(dict.fromkeys(disconnected_for_pause))
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaigns c
+                SET status = 'paused',
+                    pause_origin = 'system',
+                    pause_reason_code = 'instance_disconnected',
+                    system_paused_at = NOW()
+                WHERE c.id IN (
+                    SELECT DISTINCT ci.campaign_id
+                    FROM campaign_instances ci
+                    WHERE ci.instance_id = ANY(%s)
+                )
+                AND c.status IN ('running', 'pending')
+                AND COALESCE(c.use_uazapi_sender, false) = true
+                AND (c.pause_origin IS DISTINCT FROM 'user')
+                """,
+                (disconnected_ids,),
+            )
+            n_paused = cur.rowcount or 0
+        if n_paused:
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_system_pause_disconnected_instance",
+                        "instance_ids": disconnected_ids,
+                        "campaigns_paused": n_paused,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+
+    conn.commit()
+    return {"paused": int(n_paused), "reconnect_notified": int(reconnect_notified)}
 
 
 def _sync_active_stage_folders(conn):
@@ -1676,13 +1898,26 @@ def process_cadence():
     print("🔄 Starting Intelligent Cadence Worker...")
     maybe_start_outbox_metrics_http_server()
     last_stage_sync_at = None
+    last_disconnect_pause_check_mono: float | None = None
+    disconnect_pause_interval_sec = _parse_uazapi_disconnect_pause_check_interval_sec()
 
     while True:
         try:
             conn = get_db_connection()
 
-            # Reativar waiting_reconnect quando a instância Uazapi reconecta
+            # Legado advanced: ``campaign_stage_sends.status = waiting_reconnect`` → scheduled
+            # quando a instância volta (get_status). Outbox: linhas pending/waiting_instance no
+            # mesmo tick após campanha running — ver bloco "Dual-run desconexão" acima de
+            # ``_resume_waiting_reconnect_stage_sends``.
             _resume_waiting_reconnect_stage_sends(conn)
+
+            now_mono = time.monotonic()
+            if (
+                last_disconnect_pause_check_mono is None
+                or (now_mono - last_disconnect_pause_check_mono) >= disconnect_pause_interval_sec
+            ):
+                _uazapi_instance_health_tick(conn)
+                last_disconnect_pause_check_mono = now_mono
 
             # T7: recovery de ``scheduled`` initial sem pasta (TTL) antes do materialize — F1
             _recover_stale_scheduled_initial_uazapi_sends(conn)

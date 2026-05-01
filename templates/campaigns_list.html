@@ -105,6 +105,18 @@
         </a>
     </div>
 
+    {% if reconnect_alerts %}
+    <div class="mb-6 space-y-3" role="status" aria-live="polite">
+        {% for a in reconnect_alerts %}
+        <div
+            class="rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm text-gray-200 shadow-lg shadow-emerald-900/20">
+            <strong class="text-emerald-300">Instância WhatsApp ligada</strong>
+            <p class="mt-1 text-gray-300">{{ a.body_text }}</p>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     {% if campaigns %}
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {% for campaign in campaigns %}
@@ -472,20 +484,31 @@
         }
     }
 
-    // Função para pausar/continuar campanha
-    async function togglePause(campaignId) {
+    // Função para pausar/continuar campanha (Task 6: confirmação se instância ainda desligada)
+    async function togglePause(campaignId, options = {}) {
         try {
+            const payload = options.confirm
+                ? JSON.stringify({ confirm_resume_while_disconnected: true })
+                : JSON.stringify({});
             const response = await fetch(`/api/campaigns/${campaignId}/toggle_pause`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
-                }
+                },
+                body: payload
             });
 
             const data = await response.json();
 
+            if (response.status === 409 && data.requires_confirmation && !options.confirm) {
+                if (confirm(data.message || 'A instância pode ainda estar desligada. Retomar mesmo assim?')) {
+                    return togglePause(campaignId, { confirm: true });
+                }
+                return;
+            }
+
             if (data.error) {
-                alert('Erro: ' + data.error);
+                alert('Erro: ' + (data.message || data.error));
                 return;
             }
 

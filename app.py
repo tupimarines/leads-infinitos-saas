@@ -46,6 +46,7 @@ import io
 import csv
 from openai import OpenAI
 from functools import wraps
+from typing import Optional
 import pytz
 from utils.limits import (
     INITIAL_CHUNK_ACTIVE_SEND_STATUSES,
@@ -59,6 +60,11 @@ from utils.limits import (
 from utils.cadence_uazapi import iter_fu1_folder_ids, merge_fu1_folder_into_config, parse_cadence_config
 from utils.lead_numeric_parse import coerce_lead_numeric_fields
 from utils.campaign_dispatch_audit import append_dispatch_audit_event
+from utils.uazapi_support_notify import (
+    fetch_reconnect_inapp_alerts_for_user,
+    get_instance_status_cached,
+    is_instance_disconnected_status,
+)
 
 
 load_dotenv()
@@ -550,6 +556,48 @@ def _init_db_body() -> None:
             ALTER TABLE instances ADD COLUMN IF NOT EXISTS last_disconnect_notify_at TIMESTAMPTZ;
             """
         )
+        # Worker: último estado de desconexão Uazapi (transição → notificação de reconexão)
+        cur.execute(
+            """
+            ALTER TABLE instances ADD COLUMN IF NOT EXISTS worker_last_uazapi_disconnected BOOLEAN;
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reconnect_inapp_alerts (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                instance_name TEXT,
+                campaign_count INTEGER NOT NULL DEFAULT 0,
+                body_text TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reconnect_inapp_alerts_user_created
+            ON reconnect_inapp_alerts(user_id, created_at DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uazapi_reconnect_whatsapp_log (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                instance_id INTEGER NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_uazapi_reconnect_wa_user_inst_sent
+            ON uazapi_reconnect_whatsapp_log(user_id, instance_id, sent_at DESC);
+            """
+        )
 
         # Adicionar coluna api_provider (migração: MegaAPI vs Uazapi)
         cur.execute(
@@ -927,6 +975,23 @@ def _init_db_body() -> None:
                 ON campaign_send_attempts (outbox_id, attempt_no);
             CREATE INDEX IF NOT EXISTS idx_campaign_send_attempts_outbox
                 ON campaign_send_attempts (outbox_id);
+            """
+        )
+
+        # Pausa sistema vs utilizador (desconexão Uazapi — tech-spec desconexao-whatsapp)
+        cur.execute(
+            """
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS pause_origin TEXT;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS pause_reason_code TEXT;
+            ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS system_paused_at TIMESTAMP;
+            COMMENT ON COLUMN campaigns.pause_origin IS
+                'Origem da pausa: user, system, ou NULL (legado / não aplicável).';
+            COMMENT ON COLUMN campaigns.pause_reason_code IS
+                'Código quando pause_origin=system, ex.: instance_disconnected.';
+            COMMENT ON COLUMN campaigns.system_paused_at IS
+                'Registo de quando o sistema pausou a campanha (ex.: instância offline).';
+            COMMENT ON COLUMN campaign_message_outbox.status IS
+                'pending | sending | sent | failed; waiting_instance reservado para hold transitório.';
             """
         )
 
@@ -3079,9 +3144,18 @@ def api_account_instances():
 
 @app.route('/campaigns')
 @login_required
-def campaigns():
+def campaigns_list():
     user_campaigns = Campaign.get_by_user(current_user.id)
-    return render_template('campaigns_list.html', campaigns=user_campaigns)
+    conn = get_db_connection()
+    try:
+        reconnect_alerts = fetch_reconnect_inapp_alerts_for_user(conn, current_user.id)
+    finally:
+        conn.close()
+    return render_template(
+        'campaigns_list.html',
+        campaigns=user_campaigns,
+        reconnect_alerts=reconnect_alerts,
+    )
 
 
 @app.route('/campaigns/delete/<int:campaign_id>', methods=['POST'])
@@ -3090,7 +3164,7 @@ def delete_campaign(campaign_id):
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         flash("Campanha não encontrada.", "error")
-        return redirect(url_for('campaigns'))
+        return redirect(url_for('campaigns_list'))
 
     if campaign.use_uazapi_sender and campaign.uazapi_folder_id:
         success, err = _uazapi_control_campaign(campaign_id, current_user.id, 'delete')
@@ -3103,7 +3177,7 @@ def delete_campaign(campaign_id):
     else:
         flash("Erro ao excluir campanha.", "error")
 
-    return redirect(url_for('campaigns'))
+    return redirect(url_for('campaigns_list'))
 
 # --- Kanban Board Routes ---
 
@@ -3114,7 +3188,7 @@ def campaign_kanban(campaign_id):
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         flash("Campanha não encontrada.", "error")
-        return redirect(url_for('campaigns'))
+        return redirect(url_for('campaigns_list'))
     
     # Get total lead count
     conn = get_db_connection()
@@ -4081,6 +4155,7 @@ def admin_campaign_outbox_resume(campaign_id):
             429,
         )
 
+    body = request.get_json(silent=True) or {}
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -4108,6 +4183,10 @@ def admin_campaign_outbox_resume(campaign_id):
                 409,
             )
 
+        guard = _guard_resume_after_whatsapp_disconnect(conn, campaign_id, body)
+        if guard:
+            return guard
+
         if row.get("use_uazapi_sender") and row.get("uazapi_folder_id"):
             success, err = _uazapi_control_campaign(
                 campaign_id, int(row["user_id"]), "continue", admin_mode=True
@@ -4116,10 +4195,7 @@ def admin_campaign_outbox_resume(campaign_id):
                 return jsonify({"error": "uazapi_control_failed", "message": err or "Falha na API Uazapi."}), 500
         else:
             with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE campaigns SET status = 'running' WHERE id = %s AND status = 'paused'",
-                    (campaign_id,),
-                )
+                cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
                 if cur.rowcount == 0:
                     conn.rollback()
                     return (
@@ -5634,6 +5710,109 @@ def _uazapi_control_folder(campaign_id: int, user_id: int, folder_id: str, actio
         return False, str(e)
 
 
+def _sql_resume_running_clear_system_disconnect_pause():
+    """SET status=running e limpa metadados de pausa sistema por desconexão (Task 6)."""
+    return """
+        UPDATE campaigns SET
+            status = 'running',
+            pause_origin = CASE
+                WHEN pause_origin = 'system' AND pause_reason_code = 'instance_disconnected' THEN NULL
+                ELSE pause_origin END,
+            pause_reason_code = CASE
+                WHEN pause_origin = 'system' AND pause_reason_code = 'instance_disconnected' THEN NULL
+                ELSE pause_reason_code END,
+            system_paused_at = CASE
+                WHEN pause_origin = 'system' AND pause_reason_code = 'instance_disconnected' THEN NULL
+                ELSE system_paused_at END
+        WHERE id = %s AND status = 'paused'
+    """
+
+
+def _truthy_confirm_resume(body) -> bool:
+    if not body or not isinstance(body, dict):
+        return False
+    v = body.get("confirm_resume_while_disconnected")
+    if v is True:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return False
+
+
+def _guard_resume_after_whatsapp_disconnect(conn, campaign_id: int, body) -> Optional[tuple]:
+    """
+    Task 6: se a campanha foi pausada por ``instance_disconnected``, valida get_status
+    nas instâncias Uazapi da campanha; se ainda desligado ou estado indeterminado, exige
+    ``confirm_resume_while_disconnected`` no JSON.
+
+    Retorna None se pode continuar, ou (response, status_code) para devolver imediatamente.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT pause_reason_code FROM campaigns WHERE id = %s
+            """,
+            (campaign_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return (jsonify({"error": "not_found", "message": "Campanha não encontrada."}), 404)
+    pr = (row.get("pause_reason_code") or "").strip()
+    if pr != "instance_disconnected":
+        return None
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT i.id AS instance_id, i.apikey
+            FROM campaign_instances ci
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE ci.campaign_id = %s
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+              AND TRIM(i.apikey) <> ''
+            """,
+            (campaign_id,),
+        )
+        instances = cur.fetchall() or []
+
+    needs_confirm = False
+    if not instances:
+        needs_confirm = True
+    else:
+        uazapi = UazapiService()
+        for inst in instances:
+            iid = int(inst["instance_id"])
+            token = (inst.get("apikey") or "").strip()
+            st = get_instance_status_cached(uazapi, iid, token)
+            if st is None:
+                needs_confirm = True
+                break
+            if is_instance_disconnected_status(st):
+                needs_confirm = True
+                break
+
+    if not needs_confirm:
+        return None
+    if _truthy_confirm_resume(body):
+        return None
+
+    msg = (
+        "A instância WhatsApp ainda parece desligada ou o estado não pôde ser verificado. "
+        "Retomar agora pode gerar falhas de envio até reconectar. Confirme para continuar."
+    )
+    return (
+        jsonify(
+            {
+                "error": "instance_not_ready",
+                "message": msg,
+                "requires_confirmation": True,
+            }
+        ),
+        409,
+    )
+
+
 def _uazapi_control_campaign(campaign_id: int, user_id: int, action: str, admin_mode: bool = False):
     """
     Helper: executa action (stop|continue|delete) na Uazapi para campanha com use_uazapi_sender.
@@ -5679,7 +5858,7 @@ def _uazapi_control_campaign(campaign_id: int, user_id: int, action: str, admin_
             if action == 'stop':
                 cur.execute("UPDATE campaigns SET status = 'paused' WHERE id = %s", (campaign_id,))
             elif action == 'continue':
-                cur.execute("UPDATE campaigns SET status = 'running' WHERE id = %s", (campaign_id,))
+                cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
             elif action == 'delete':
                 cur.execute("DELETE FROM campaign_leads WHERE campaign_id = %s", (campaign_id,))
                 cur.execute("DELETE FROM campaign_instances WHERE campaign_id = %s", (campaign_id,))
@@ -5839,6 +6018,7 @@ def uazapi_messages(campaign_id):
 @login_required
 def toggle_campaign_pause(campaign_id):
     try:
+        data = request.get_json(silent=True) or {}
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT status, use_uazapi_sender, uazapi_folder_id, enable_cadence, cadence_config FROM campaigns WHERE id = %s AND user_id = %s", (campaign_id, current_user.id))
@@ -5861,6 +6041,15 @@ def toggle_campaign_pause(campaign_id):
             return json.dumps({"error": f"Não é possível pausar/continuar campanha com status '{current_status}'"}), 400
 
         action = 'stop' if new_status == 'paused' else 'continue'
+
+        if action == 'continue':
+            conn_g = get_db_connection()
+            try:
+                gr = _guard_resume_after_whatsapp_disconnect(conn_g, campaign_id, data)
+            finally:
+                conn_g.close()
+            if gr:
+                return gr
 
         # Se use_uazapi_sender, delegar para Uazapi API (principal + follow-ups se cadência)
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
@@ -5903,7 +6092,14 @@ def toggle_campaign_pause(campaign_id):
         # Comportamento atual para campanhas sem Uazapi principal
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("UPDATE campaigns SET status = %s WHERE id = %s", (new_status, campaign_id))
+            if new_status == 'running':
+                cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
+            else:
+                cur.execute("UPDATE campaigns SET status = %s WHERE id = %s", (new_status, campaign_id))
+            if new_status == 'running' and cur.rowcount == 0:
+                conn.rollback()
+                conn.close()
+                return json.dumps({"error": "Estado da campanha mudou; recarregue."}), 409
         conn.commit()
         conn.close()
 
@@ -6760,19 +6956,16 @@ def create_campaign():
     )
 
 
-@app.route("/campaigns")
-@login_required
-def campaigns_list():
-    """Página para visualizar lista de campanhas"""
-    campaigns = Campaign.get_by_user(current_user.id)
-    return render_template("campaigns_list.html", campaigns=campaigns)
-
-
 @app.route("/dashboard")
 @login_required
 def dashboard():
     """Página de dashboard geral"""
-    return render_template("dashboard.html")
+    conn = get_db_connection()
+    try:
+        reconnect_alerts = fetch_reconnect_inapp_alerts_for_user(conn, current_user.id)
+    finally:
+        conn.close()
+    return render_template("dashboard.html", reconnect_alerts=reconnect_alerts)
 
 
 @app.route("/jobs")
@@ -9230,7 +9423,7 @@ def edit_campaign(campaign_id):
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         flash("Campanha não encontrada.", "error")
-        return redirect(url_for('campaigns'))
+        return redirect(url_for('campaigns_list'))
     return render_template('campaigns_edit.html', campaign=campaign)
 
 

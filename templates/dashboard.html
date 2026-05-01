@@ -52,6 +52,18 @@
         <p class="text-gray-400 mt-2">Visão geral do seu desempenho</p>
     </div>
 
+    {% if reconnect_alerts %}
+    <div class="mb-6 space-y-3" role="status" aria-live="polite">
+        {% for a in reconnect_alerts %}
+        <div
+            class="rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm text-gray-200 shadow-lg shadow-emerald-900/20">
+            <strong class="text-emerald-300">Instância WhatsApp ligada</strong>
+            <p class="mt-1 text-gray-300">{{ a.body_text }}</p>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     <!-- Stats Grid -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
 
