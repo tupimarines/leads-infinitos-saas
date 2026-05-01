@@ -525,7 +525,7 @@ def test_ac12_paused_campaign_skips_outbox_post(db_conn, ensure_target_user, ens
 def test_ac5_daily_quota_defers_without_post(db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch):
     """AC5: quota initial esgotada para esta campanha → ``next_run_at`` adiado sem tentativa nesse ``outbox_id``.
 
-    O worker percorre a fila global (``ORDER BY step_priority, queued_at``); outras campanhas podem ser
+    O worker percorre a fila global (``step_priority``, ``csv_row_order``, ``next_run_at``, ``o.id``); outras campanhas podem ser
     servidas antes. Quota falha só para ``cid``; mock de envio com JSON válido evita efeito colateral
     se outra linha for enviada no mesmo ciclo de testes.
     """
@@ -594,3 +594,197 @@ def test_ac5_daily_quota_defers_without_post(db_conn, ensure_target_user, ensure
     monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
     importlib.reload(__import__("utils.config", fromlist=["cfg"]))
     importlib.reload(__import__("worker_message_outbox", fromlist=["wmo"]))
+
+
+def _insert_campaign_three_leads_csv_row_order_inverted_vs_id(
+    db_conn,
+    *,
+    user_id: int,
+    instance_id: int,
+    name: str,
+):
+    """
+    Três leads com ids crescentes L0<L1<L2 e ``csv_row_order`` (3, 1, 2) respectivamente.
+    Ordem de processamento esperada por CSV: L1 → L2 → L0 (valores 1, 2, 3).
+    """
+    from psycopg2.extras import RealDictCursor
+
+    msg = json.dumps(["Ordem CSV task 9."])
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO campaigns (
+                user_id, name, message_template, status,
+                use_uazapi_sender, rotation_mode,
+                send_hour_start, send_hour_end, send_saturday, send_sunday,
+                outbox_delay_min_seconds, outbox_delay_max_seconds,
+                sent_today, enable_cadence
+            )
+            VALUES (
+                %s, %s, %s, 'running',
+                true, 'single',
+                %s, %s, true, true,
+                5, 10,
+                0, false
+            )
+            RETURNING id
+            """,
+            (
+                user_id,
+                name,
+                msg,
+                ctd.DEFAULT_TEST_SEND_HOUR_START,
+                ctd.DEFAULT_TEST_SEND_HOUR_END,
+            ),
+        )
+        cid = cur.fetchone()["id"]
+        cur.execute(
+            "INSERT INTO campaign_instances (campaign_id, instance_id) VALUES (%s, %s)",
+            (cid, instance_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO campaign_steps (campaign_id, step_number, step_label, message_template)
+            VALUES (%s, 1, 'Inicial', %s::text)
+            """,
+            (cid, msg),
+        )
+        lead_ids = []
+        for i in range(3):
+            cur.execute(
+                """
+                INSERT INTO campaign_leads (campaign_id, phone, name, status)
+                VALUES (%s, %s, %s, 'pending')
+                RETURNING id
+                """,
+                (cid, f"5599999999{i:04d}", f"L{i}"),
+            )
+            lead_ids.append(int(cur.fetchone()["id"]))
+        cur.execute(
+            "UPDATE campaign_leads SET csv_row_order = %s WHERE id = %s",
+            (3, lead_ids[0]),
+        )
+        cur.execute(
+            "UPDATE campaign_leads SET csv_row_order = %s WHERE id = %s",
+            (1, lead_ids[1]),
+        )
+        cur.execute(
+            "UPDATE campaign_leads SET csv_row_order = %s WHERE id = %s",
+            (2, lead_ids[2]),
+        )
+        cur.execute(
+            "UPDATE campaign_leads SET send_batch = 1 WHERE campaign_id = %s",
+            (cid,),
+        )
+        db_conn.commit()
+    return cid, tuple(lead_ids)
+
+
+def test_task9_csv_row_order_enqueue_query_and_worker_select_order(
+    db_conn, ensure_target_user, ensure_uazapi_instance
+):
+    """Task 9: com csv_row_order (3,1,2) vs id crescente, enqueue e worker seguem 1→2→3 no CSV."""
+    from psycopg2.extras import RealDictCursor
+
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, lids = _insert_campaign_three_leads_csv_row_order_inverted_vs_id(
+        db_conn,
+        user_id=uid,
+        instance_id=iid,
+        name="Task9 csv order",
+    )
+    l0, l1, l2 = lids
+    assert l0 < l1 < l2
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            SELECT %s, cl.id, %s, 'initial', 0, 'pending', NOW(), NOW() - INTERVAL '1 minute',
+                   'k-' || cl.id::text, '{}'::jsonb
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s AND cl.status = 'pending'
+            """,
+            (cid, iid, cid),
+        )
+        db_conn.commit()
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id FROM campaign_leads
+            WHERE campaign_id = %s AND status = 'pending'
+            ORDER BY COALESCE(send_batch, 999) ASC,
+                     COALESCE(csv_row_order, id) ASC, id ASC
+            """,
+            (cid,),
+        )
+        enqueue_ids = [int(r["id"]) for r in cur.fetchall()]
+    assert enqueue_ids == [l1, l2, l0], enqueue_ids
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT o.campaign_lead_id
+            FROM campaign_message_outbox o
+            JOIN campaigns c ON c.id = o.campaign_id
+            JOIN campaign_leads cl ON cl.id = o.campaign_lead_id
+            JOIN instances i ON i.id = o.instance_id
+            WHERE o.status = 'pending'
+              AND o.next_run_at <= NOW()
+              AND c.status IN ('running', 'pending')
+              AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
+              AND o.campaign_id = %s
+            ORDER BY o.step_priority ASC,
+                     COALESCE(cl.csv_row_order, cl.id) ASC,
+                     cl.id ASC,
+                     o.next_run_at ASC,
+                     o.id ASC
+            LIMIT 5
+            """,
+            (cid,),
+        )
+        worker_order = [int(r["campaign_lead_id"]) for r in cur.fetchall()]
+    assert worker_order[0] == l1, worker_order
+    assert worker_order == [l1, l2, l0], worker_order
+
+
+def test_task9_dispatch_audit_jsonl_append_sanitizes_token(monkeypatch, tmp_path):
+    """Task 9: append JSONL em diretório temporário; ``apikey`` / Bearer não ficam em claro."""
+    import importlib
+
+    import utils.campaign_dispatch_audit as cda
+
+    secret = "ua-secret-token-xyz"
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+    importlib.reload(cda)
+    try:
+        cda.append_dispatch_event(
+            901,
+            77,
+            {
+                "outcome": "sent",
+                "request": {
+                    "kind": "text",
+                    "apikey": secret,
+                    "headers": {"Authorization": f"Bearer {secret}"},
+                },
+                "response": {"messageId": "m1"},
+            },
+        )
+        path = cda.dispatch_audit_jsonl_path(77, 901, ensure_parent=False)
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+        assert secret not in raw
+        assert "Bearer [REDACTED]" in raw or "[REDACTED]" in raw
+        line = raw.strip().splitlines()[0]
+        obj = json.loads(line)
+        assert obj["request"]["apikey"] == "[REDACTED]"
+    finally:
+        monkeypatch.delenv("STORAGE_DIR", raising=False)
+        importlib.reload(cda)

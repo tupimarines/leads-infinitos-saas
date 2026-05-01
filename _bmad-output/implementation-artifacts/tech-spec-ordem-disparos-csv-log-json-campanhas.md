@@ -3,7 +3,7 @@ title: 'Ordem de disparos alinhada ao CSV + log JSON de envios por campanha'
 slug: ordem-disparos-csv-log-json-campanhas
 created: '2026-05-01'
 status: ready-for-dev
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted: [1, 2, 3, 4, 5, 6, 7, 8, 9]
 tech_stack:
   - Python 3.x
   - Flask + Flask-Login
@@ -116,43 +116,43 @@ Operadores esperam que o disparo siga **estritamente a ordem das linhas do arqui
 
 ### Tasks
 
-- [ ] **Task 1:** Atribuir `send_batch` usando ordem CSV  
+- [x] **Task 1:** Atribuir `send_batch` usando ordem CSV  
   - File: `app.py`  
   - Action: Na seção 5b (~6329), trocar `ORDER BY id ASC` por `ORDER BY COALESCE(csv_row_order, id) ASC, id ASC` ao listar `pending_ids` antes do `UPDATE send_batch`.
 
-- [ ] **Task 2:** Selecionar leads para outbox e legado chunk com ordem CSV  
+- [x] **Task 2:** Selecionar leads para outbox e legado chunk com ordem CSV  
   - File: `app.py`  
   - Action: Substituir `ORDER BY COALESCE(send_batch, 999) ASC, id ASC` por `ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC` em todas as queries de leads para primeiro disparo (incl. ~6411 e ~7376 e equivalentes em continue-chunk / estágios se aplicável).
 
-- [ ] **Task 3:** Worker outbox — dequeue determinístico  
+- [x] **Task 3:** Worker outbox — dequeue determinístico  
   - File: `worker_message_outbox.py`  
   - Action: No `SELECT` principal (~298–319), `JOIN campaign_leads cl` já existe; acrescentar na `ORDER BY`: `o.step_priority ASC, COALESCE(cl.csv_row_order, cl.id) ASC, cl.id ASC, o.next_run_at ASC, o.id ASC` (ajustar ordem exata conforme produto: priorizar janela/throttle).  
   - Action: Ao inserir na outbox (`app.py`), definir **`queued_at`** incremental por campanha **ou** introduzir coluna opcional `enqueue_sequence SERIAL`/INTEGER preenchida na aplicação para eliminar empates restantes.
 
-- [ ] **Task 4:** Round-robin compatível com CSV  
+- [x] **Task 4:** Round-robin compatível com CSV  
   - File: `worker_message_outbox.py`  
   - Action: Implementar decisão ADR-O3 (flag ou `rotation_mode`): se estrito, **`chosen = candidates[0]`** após ordenar `candidates` por `(csv_row_order, lead_id)`; se não estrito, manter round-robin atual.
 
-- [ ] **Task 5:** Worker cadência / scripts  
+- [x] **Task 5:** Worker cadência / scripts  
   - Files: `worker_cadence.py`, `scripts/migrate_campaign_to_outbox.py`, `scripts/debug_uazapi_initial_flow.py`  
   - Action: Onde houver `ORDER BY COALESCE(send_batch…), id`, alinhar com `csv_row_order` como segundo critério após `send_batch`.
 
-- [ ] **Task 6:** Módulo de auditoria JSON  
+- [x] **Task 6:** Módulo de auditoria JSON  
   - New file sugerido: `utils/campaign_dispatch_audit.py`  
   - Action: Função `append_dispatch_event(campaign_id, user_id, event_dict)` que: sanitiza segredos; faz **append** JSONL com lock de arquivo leve ou escrita via DB queue (preferir arquivo simples na Fase 1); inclui `attempt_no`, `outbox_id`, tipo `text|media`, payload request (campos UAZAPI), response body parseado ou string truncada (limite configurável).
 
-- [ ] **Task 7:** Integrar auditoria nos envios  
+- [x] **Task 7:** Integrar auditoria nos envios  
   - File: `worker_message_outbox.py`  
   - Action: Após HTTP em `process_message_outbox_tick`, chamar append com request/response (antes de truncar para `campaign_send_attempts`).  
   - File: `app.py` ou worker legado (se ainda criar `create_advanced_campaign`): registrar pelo menos **criação de pasta** + lista de `lead_ids` na ordem enviada (nível campanha); envios unitários futuros cobrem o detalhe completo.
 
-- [ ] **Task 8:** API + Admin + UI
+- [x] **Task 8:** API + Admin + UI
   - File: `app.py`  
   - Action: `GET /api/admin/campaigns/<int:campaign_id>/dispatch-audit` (superadmin + flag); `GET /api/admin/users/<user_id>/campaigns-active` (campanhas `running`/`pending` para o dropdown); `GET /admin/dispatch-audit` (página com dois seletores + botões carregar/baixar).  
   - Action: Na subida do app, `os.makedirs` no diretório absoluto de `STORAGE_DIR` / `storage`.
   - Files: `templates/admin/dispatch_audit.html`, links em `templates/admin/dashboard.html` e `templates/admin/campaigns.html`.
 
-- [ ] **Task 9:** Testes  
+- [x] **Task 9:** Testes  
   - Files: `tests/test_outbox_spec_acceptance.py`, `tests/test_admin_campaign_crud.py`  
   - Action: Teste que cria 3 leads com `csv_row_order` invertido vs `id` e verifica ordem da query de enqueue e ordem do `SELECT` do worker (mock DB ou integração com transação).  
   - Action: Teste de append JSONL (tempdir) com sanitização de token.
@@ -202,11 +202,16 @@ Operadores esperam que o disparo siga **estritamente a ordem das linhas do arqui
 
 ## Registro de implementação (código — 2026-05-01)
 
-- **Ordem CSV:** `send_batch` e seleções de leads / outbox inicial em `app.py` usam `ORDER BY … COALESCE(csv_row_order, id) …`; worker outbox ordena por `step_priority` + `csv_row_order` + id do lead; round-robin removido — usa-se o primeiro candidato após ordenação.
+- **Ordem CSV:** `send_batch` e seleções de leads / outbox inicial em `app.py` usam `ORDER BY … COALESCE(csv_row_order, id) …`; worker outbox ordena por `step_priority` + `csv_row_order` + id do lead. **Task 4:** `rotation_mode == single` (e demais) → primeiro candidato após `_outbox_csv_sort_key`; `rotation_mode == round_robin` → entre linhas empatadas no critério de instância (`_outbox_rr_instance_tie_key`, ex.: mesmo `csv_row_order` na campanha), alterna `instance_id` via `_pick_instance_round_robin`.
+- **Task 3 (dequeue):** `process_message_outbox_tick` — `ORDER BY o.step_priority, COALESCE(cl.csv_row_order, cl.id), cl.id, o.next_run_at, o.id`; `queued_at` monotônico por índice de enfileiramento (`seconds=i//1e6, microseconds=i%1e6`) em `app.py`, cadência em `worker_message_outbox.py` e `scripts/migrate_campaign_to_outbox.py`.
+- **Task 5:** `worker_cadence.py` (materialize initial) — `ORDER BY COALESCE(send_batch, 999), COALESCE(csv_row_order, id), id`; `ordered_campaign_lead_ids` e doc do script `migrate_campaign_to_outbox.py`; debug `scripts/debug_uazapi_initial_flow.py` — mesma sequência com prefixo `cl.` onde aplicável.
+- **Task 6:** `utils/campaign_dispatch_audit.py` — `append_dispatch_event(campaign_id, user_id, event_dict)` (alias `append_dispatch_audit_event` para o worker), `sanitize_dispatch_audit_payload`, truncagem de `response` via `DISPATCH_AUDIT_MAX_RESPONSE_CHARS` (default 4000), lock no append (``fcntl`` / ``msvcrt``), `message_type` derivado de `request.kind` (`text`|`media`|`none`).
+- **Task 7:** `worker_message_outbox._persist_outcome` — após commit bem-sucedido, `append_dispatch_audit_event` com `request`/`response` completos (resposta dict ou string antes do `_truncate` em `campaign_send_attempts`). Legado UAZAPI em `app.py`: após `create_advanced_campaign` com sucesso, evento `legacy_advanced_campaign` com `lead_ids_in_order`, `folder_id` em `response`, fluxos `create_campaign_core`, `force_uazapi_initial_chunk_no_cadence`, `create_stage_campaign` (follow-up).
 - **Follow-up na outbox:** `enqueue_missing_cadence_outbox_rows` em `worker_message_outbox.py` — quando `enable_cadence`, lead em `snoozed` com `snooze_until <= NOW()` e etapa configurada em `campaign_steps`, enfileira `follow1` / `follow2` / `breakup` na ordem `csv_row_order`, com `step_priority` 1–3 (inicial permanece 0).
 - **Legado cadência:** `worker_cadence.py` não chama `process_campaign_sends` se existir linha em `campaign_message_outbox` para a campanha e `USE_MESSAGE_OUTBOX`; query legacy de follow ordena por `csv_row_order`.
 ### UI Admin — consulta auditoria
 
+- **Task 8:** Rotas ``admin_campaign_dispatch_audit``, ``admin_user_active_campaigns_api``, ``admin_dispatch_audit_page`` em ``app.py``; gate ``_require_message_outbox_phase1_api`` (superadmin + ``USE_MESSAGE_OUTBOX``); ``STORAGE_ROOT`` + ``os.makedirs(_storage_abs)`` na importação do app.
 - Rota de página: ``GET /admin/dispatch-audit`` (admin logado + superadmin + ``USE_MESSAGE_OUTBOX``).
 - Componentes: seletor de usuário (API existente ``GET /api/admin/users/list``), seletor de campanha **ativa** do usuário (``GET /api/admin/users/<user_id>/campaigns-active`` — apenas ``running`` e ``pending``), campo ``tail``, botão **Carregar auditoria** (JSON formatado) e **Baixar NDJSON** (abre ``dispatch-audit?format=ndjson``).
 - Links no painel: dashboard admin e lista de campanhas.
@@ -215,4 +220,5 @@ Operadores esperam que o disparo siga **estritamente a ordem das linhas do arqui
 
 - Na importação do ``app``: ``os.makedirs(os.path.abspath(STORAGE_ROOT), exist_ok=True)`` com ``STORAGE_DIR`` opcional (default ``storage``).
 - Caminho do JSONL: ``utils/campaign_dispatch_audit.dispatch_audit_jsonl_path`` usa o mesmo ``STORAGE_DIR``; escrita cria subpastas sob demanda.
+- **Task 9 (testes):** ``test_task9_csv_row_order_enqueue_query_and_worker_select_order`` (Postgres) — 3 leads com ``csv_row_order`` (3,1,2) vs ``id``; alinha query de leads da criação/enqueue e ``SELECT`` do worker; ``test_task9_dispatch_audit_jsonl_append_sanitizes_token`` (JSONL + ``STORAGE_DIR`` temp); ``test_task9_sanitize_dispatch_audit_payload_redacts_secrets`` (sanitização de chaves).
 

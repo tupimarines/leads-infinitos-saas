@@ -58,6 +58,7 @@ from utils.limits import (
 )
 from utils.cadence_uazapi import iter_fu1_folder_ids, merge_fu1_folder_into_config, parse_cadence_config
 from utils.lead_numeric_parse import coerce_lead_numeric_fields
+from utils.campaign_dispatch_audit import append_dispatch_audit_event
 
 
 load_dotenv()
@@ -6556,7 +6557,10 @@ def _create_campaign_core(user_id, data, admin_id=None):
                                         "rotation_mode": rotation_mode,
                                     }
                                 )
-                                queued_at_val = now_utc + timedelta(microseconds=min(i, 999999))
+                                # Monotonic per campaign (Task 3): micros cap at 999999; spill to seconds.
+                                queued_at_val = now_utc + timedelta(
+                                    seconds=i // 1_000_000, microseconds=i % 1_000_000
+                                )
                                 cur.execute(
                                     """
                                     INSERT INTO campaign_message_outbox (
@@ -6650,12 +6654,39 @@ def _create_campaign_core(user_id, data, admin_id=None):
 
                         payload_summary = {"campaign_id": campaign_id, "leads": len(messages), "instance_id": inst['instance_id'], "use_message_outbox": use_message_outbox}
                         print(f"[UAZAPI] create_advanced_campaign payload: {json.dumps(payload_summary)}")
+                        _t_adv = time.monotonic()
                         result = uazapi.create_advanced_campaign(
                             token, delay_min_sec, delay_max_sec, messages,
                             info=name, scheduled_for=scheduled_for_param
                         )
+                        _lat_adv = int((time.monotonic() - _t_adv) * 1000)
                         if result and result.get('folder_id'):
                             print(f"[UAZAPI] create_advanced_campaign OK campaign_id={campaign_id} inst={inst['instance_id']} folder_id={result['folder_id']}")
+                            try:
+                                append_dispatch_audit_event(
+                                    user_id=int(user_id),
+                                    campaign_id=int(campaign_id),
+                                    event={
+                                        "stage": "initial",
+                                        "outcome": "folder_created",
+                                        "latency_ms": _lat_adv,
+                                        "http_status": 200,
+                                        "request": {
+                                            "kind": "legacy_advanced_campaign",
+                                            "flow": "create_campaign_core",
+                                            "instance_id": int(inst["instance_id"]),
+                                            "lead_ids_in_order": lead_ids,
+                                            "message_count": len(messages),
+                                            "delay_min_sec": delay_min_sec,
+                                            "delay_max_sec": delay_max_sec,
+                                            "scheduled_for": scheduled_for_param,
+                                            "campaign_name_preview": (name or "")[:200],
+                                        },
+                                        "response": result if isinstance(result, dict) else result,
+                                    },
+                                )
+                            except Exception:
+                                pass
                             instance_remote_jid = _resolve_uazapi_remote_jid(uazapi, token)
                             sends_created.append({
                                 "instance_id": inst['instance_id'],
@@ -7577,6 +7608,7 @@ def _force_uazapi_initial_chunk_no_cadence(
         print(
             f"[UAZAPI] {log_label} no_cadence create_advanced_campaign campaign_id={campaign_id} inst={inst['instance_id']} n={len(messages)}"
         )
+        _t_nc = time.monotonic()
         result = uazapi.create_advanced_campaign(
             token,
             delay_min_sec,
@@ -7585,6 +7617,7 @@ def _force_uazapi_initial_chunk_no_cadence(
             info=name or f"Campaign {campaign_id}",
             scheduled_for=scheduled_for_param,
         )
+        _lat_nc = int((time.monotonic() - _t_nc) * 1000)
         folder_id = None
         if isinstance(result, dict):
             folder_id = result.get("folder_id") or result.get("folderId")
@@ -7599,6 +7632,32 @@ def _force_uazapi_initial_chunk_no_cadence(
                     "planned_count": len(lead_ids),
                 }
             )
+            try:
+                append_dispatch_audit_event(
+                    user_id=int(user_id),
+                    campaign_id=int(campaign_id),
+                    event={
+                        "stage": "initial",
+                        "outcome": "folder_created",
+                        "latency_ms": _lat_nc,
+                        "http_status": 200,
+                        "request": {
+                            "kind": "legacy_advanced_campaign",
+                            "flow": "force_uazapi_initial_chunk_no_cadence",
+                            "log_label": log_label,
+                            "instance_id": int(inst["instance_id"]),
+                            "lead_ids_in_order": lead_ids,
+                            "message_count": len(messages),
+                            "delay_min_sec": delay_min_sec,
+                            "delay_max_sec": delay_max_sec,
+                            "scheduled_for": scheduled_for_param,
+                            "campaign_name_preview": (name or "")[:200],
+                        },
+                        "response": result if isinstance(result, dict) else result,
+                    },
+                )
+            except Exception:
+                pass
         else:
             err_h = (result or {}).get("error") if isinstance(result, dict) else None
             err_m = (result or {}).get("message") if isinstance(result, dict) else None
@@ -8687,14 +8746,40 @@ def _create_stage_campaign(campaign_id):
         if not messages:
             continue
 
+        _t_st = time.monotonic()
         result = uazapi.create_advanced_campaign(
             token, delay_min_sec, delay_max_sec, messages, info=f"Campaign {campaign_id} {stage} inst {inst['instance_id']}"
         )
+        _lat_st = int((time.monotonic() - _t_st) * 1000)
         if not result or not result.get('folder_id'):
             errors.append(f"Instância {inst['instance_id']}: falha ao criar campanha")
             continue
 
         folder_id = result['folder_id']
+        try:
+            append_dispatch_audit_event(
+                user_id=int(campaign["user_id"]),
+                campaign_id=int(campaign_id),
+                event={
+                    "stage": stage,
+                    "outcome": "folder_created",
+                    "latency_ms": _lat_st,
+                    "http_status": 200,
+                    "request": {
+                        "kind": "legacy_advanced_campaign",
+                        "flow": "create_stage_campaign",
+                        "step": step,
+                        "instance_id": int(inst["instance_id"]),
+                        "lead_ids_in_order": lead_ids,
+                        "message_count": len(messages),
+                        "delay_min_sec": delay_min_sec,
+                        "delay_max_sec": delay_max_sec,
+                    },
+                    "response": result if isinstance(result, dict) else result,
+                },
+            )
+        except Exception:
+            pass
         instance_remote_jid = _resolve_uazapi_remote_jid(uazapi, token)
         sends_created.append({
             "instance_id": inst['instance_id'],

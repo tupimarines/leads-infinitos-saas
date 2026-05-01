@@ -3,8 +3,8 @@
 Migração legado (pastas / campaign_stage_sends) → fila Postgres ``campaign_message_outbox``.
 
 Task 9 (tech-spec envio-individual-fila-intercalada-campanhas):
-- Ordenação canónica de leads alinhada a ``_create_campaign_core`` / worker:
-  ``ORDER BY COALESCE(send_batch, 999) ASC, id ASC`` (F15).
+- Ordenação canónica de leads alinhada a ``_create_campaign_core`` / worker (F15 / ordem CSV):
+  ``ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC``.
 - Índice de retomada: soma de posições “consumidas” pelos chunks ``initial`` em
   ``campaign_stage_sends`` (ordem de criação ``id ASC``), conforme proposta de produto:
   chunks em ``scheduled``, ``failed`` ou ``queued`` contam na totalidade como saltados;
@@ -28,7 +28,7 @@ import json
 import os
 import random
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Sequence, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -326,6 +326,9 @@ def run_migrate(
                     },
                     ensure_ascii=False,
                 )
+                queued_at_val = now_utc + timedelta(
+                    seconds=i // 1_000_000, microseconds=i % 1_000_000
+                )
                 cur.execute(
                     """
                     INSERT INTO campaign_message_outbox (
@@ -335,7 +338,7 @@ def run_migrate(
                     )
                     VALUES (
                         %s, %s, %s, 'initial', 0, 'pending',
-                        NOW(), %s, %s, %s::jsonb
+                        %s, %s, %s, %s::jsonb
                     )
                     ON CONFLICT (campaign_lead_id, stage) DO NOTHING
                     """,
@@ -343,6 +346,7 @@ def run_migrate(
                         campaign_id,
                         lead_id,
                         instance_id,
+                        queued_at_val,
                         next_run_at_val,
                         idempotency_key,
                         payload_summary,

@@ -23,6 +23,26 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
+def test_task9_sanitize_dispatch_audit_payload_redacts_secrets():
+    """Task 9 (spec): tokens e chaves sensíveis não permanecem legíveis no payload de auditoria."""
+    from utils.campaign_dispatch_audit import sanitize_dispatch_audit_payload
+
+    secret = "tok-abcd-1234"
+    payload = {
+        "request": {
+            "kind": "text",
+            "apiKey": secret,
+            "nested": {"refresh_token": "rt-secret"},
+        },
+        "Authorization": f"Bearer {secret}",
+    }
+    out = sanitize_dispatch_audit_payload(payload)
+    assert secret not in json.dumps(out)
+    assert out["Authorization"] == "[REDACTED]"
+    assert out["request"]["apiKey"] == "[REDACTED]"
+    assert out["request"]["nested"]["refresh_token"] == "[REDACTED]"
+
+
 def _reload_outbox_modules(monkeypatch, enabled: bool):
     """Alinha ``USE_MESSAGE_OUTBOX`` em utils.config, app e worker_message_outbox (import-time)."""
     if enabled:

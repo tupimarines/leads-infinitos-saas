@@ -32,7 +32,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Métrica legada: última instância servida (envio segue ordem csv_row_order, sem round-robin).
+# Última instância servida no tick outbox (round-robin entre instâncias quando ``rotation_mode == round_robin``).
 _last_outbox_instance_id: Optional[int] = None
 
 STAGE_TO_STEP_NUMBER = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
@@ -152,6 +152,58 @@ def _outbox_csv_sort_key(row: dict) -> tuple:
     )
 
 
+def _rotation_mode_round_robin(row: dict) -> bool:
+    rm = (row.get("rotation_mode") or "single").strip().lower()
+    return rm == "round_robin"
+
+
+def _outbox_rr_instance_tie_key(row: dict) -> tuple:
+    """
+    Critério de empate para rotação entre instâncias (Task 4 / ADR-O3):
+    mesma campanha, passo, posição CSV na fila e janela ``next_run_at`` — exclui
+    ``instance_id`` e ``id`` da outbox para permitir mais de uma linha elegível.
+    """
+    t = _outbox_csv_sort_key(row)
+    return (int(row.get("campaign_id") or 0), t[0], t[1], t[3])
+
+
+def _pick_instance_round_robin(front: list[dict]) -> dict:
+    """Entre linhas empatadas na ordenação RR, alterna ``instance_id`` (estado global)."""
+    global _last_outbox_instance_id
+    if len(front) == 1:
+        return front[0]
+    inst_ids = sorted({int(c["instance_id"]) for c in front})
+    if len(inst_ids) == 1:
+        return min(front, key=lambda x: int(x["id"]))
+    last = _last_outbox_instance_id
+    if last is None or last not in inst_ids:
+        target = inst_ids[0]
+    else:
+        idx = inst_ids.index(last)
+        target = inst_ids[(idx + 1) % len(inst_ids)]
+    matching = [c for c in front if int(c["instance_id"]) == target]
+    return min(matching, key=lambda x: int(x["id"]))
+
+
+def _choose_outbox_row(candidates: list[dict]) -> dict:
+    """
+    ADR-O3 / Task 4: ordem estrita por ``_outbox_csv_sort_key`` (csv_row_order + desempates).
+    Com ``rotation_mode == round_robin``, entre linhas empatadas no critério acima **e**
+    no empate de instância (``_outbox_rr_instance_tie_key``), alterna ``instance_id``.
+    """
+    candidates.sort(key=_outbox_csv_sort_key)
+    head = candidates[0]
+    hk = _outbox_csv_sort_key(head)
+    strict_front = [c for c in candidates if _outbox_csv_sort_key(c) == hk]
+    if len(strict_front) > 1 and _rotation_mode_round_robin(head):
+        return _pick_instance_round_robin(strict_front)
+    rk = _outbox_rr_instance_tie_key(head)
+    rr_front = [c for c in candidates if _outbox_rr_instance_tie_key(c) == rk]
+    if len(rr_front) > 1 and _rotation_mode_round_robin(head):
+        return _pick_instance_round_robin(rr_front)
+    return head
+
+
 def enqueue_missing_cadence_outbox_rows(conn) -> None:
     """
     Para campanhas Uazapi com fila outbox e ``enable_cadence``: enfileira follow1/follow2/breakup
@@ -258,7 +310,9 @@ def enqueue_missing_cadence_outbox_rows(conn) -> None:
                             },
                             ensure_ascii=False,
                         )
-                        queued_at = base_utc + timedelta(microseconds=min(i, 999999))
+                        queued_at = base_utc + timedelta(
+                            seconds=i // 1_000_000, microseconds=i % 1_000_000
+                        )
                         cur.execute(
                             """
                             INSERT INTO campaign_message_outbox (
@@ -461,6 +515,7 @@ def process_message_outbox_tick(conn) -> None:
             SELECT o.id, o.campaign_id, o.campaign_lead_id, o.instance_id, o.stage, o.step_priority,
                    o.queued_at, o.next_run_at, o.idempotency_key, o.payload_summary,
                    c.user_id, c.enable_cadence, c.status AS campaign_status,
+                   COALESCE(NULLIF(TRIM(c.rotation_mode), ''), 'single') AS rotation_mode,
                    c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                    c.scheduled_start, c.outbox_delay_min_seconds, c.outbox_delay_max_seconds,
                    cl.phone, cl.name AS lead_name, cl.csv_row_order,
@@ -513,8 +568,7 @@ def process_message_outbox_tick(conn) -> None:
     if not candidates:
         return
 
-    candidates.sort(key=_outbox_csv_sort_key)
-    chosen = candidates[0]
+    chosen = _choose_outbox_row(candidates)
 
     outbox_id = int(chosen["id"])
     campaign_id = int(chosen["campaign_id"])
