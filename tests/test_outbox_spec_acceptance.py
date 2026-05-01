@@ -523,15 +523,18 @@ def test_ac12_paused_campaign_skips_outbox_post(db_conn, ensure_target_user, ens
 
 
 def test_ac5_daily_quota_defers_without_post(db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch):
-    """AC5: quota initial esgotada → ``next_run_at`` adiado e sem chamada Uazapi."""
+    """AC5: quota initial esgotada para esta campanha → ``next_run_at`` adiado sem tentativa nesse ``outbox_id``.
+
+    O worker percorre a fila global (``ORDER BY step_priority, queued_at``); outras campanhas podem ser
+    servidas antes. Quota falha só para ``cid``; mock de envio com JSON válido evita efeito colateral
+    se outra linha for enviada no mesmo ciclo de testes.
+    """
     _reload_outbox_modules(monkeypatch, True)
     uid = ensure_target_user
     iid = ensure_uazapi_instance
     cid, leads = _insert_campaign_with_leads(db_conn, user_id=uid, instance_id=iid, n_leads=1, name="AC5 quota")
 
     from psycopg2.extras import RealDictCursor
-
-    from datetime import datetime
 
     with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -554,22 +557,39 @@ def test_ac5_daily_quota_defers_without_post(db_conn, ensure_target_user, ensure
 
     import worker_message_outbox as wmo
 
-    with patch.object(wmo, "is_campaign_send_window", return_value=True):
-        with patch.object(wmo.uazapi_service, "send_text_idempotent") as mock_send:
-            with patch.object(
-                wmo,
-                "check_initial_chunk_daily_quota_for_campaign",
-                return_value=False,
-            ):
-                wmo.process_message_outbox_tick(db_conn)
+    def _quota_only_target_fails(campaign_id: int) -> bool:
+        return int(campaign_id) != int(cid)
 
-    mock_send.assert_not_called()
+    new_run = prev_run
+    for _ in range(250):
+        with patch.object(wmo, "is_campaign_send_window", return_value=True):
+            with patch.object(
+                wmo.uazapi_service,
+                "send_text_idempotent",
+                return_value={"messageId": "ac5-collateral-ok"},
+            ):
+                with patch.object(
+                    wmo,
+                    "check_initial_chunk_daily_quota_for_campaign",
+                    side_effect=_quota_only_target_fails,
+                ):
+                    wmo.process_message_outbox_tick(db_conn)
+        with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT next_run_at FROM campaign_message_outbox WHERE id = %s", (oid,))
+            new_run = cur.fetchone()["next_run_at"]
+        if new_run > prev_run:
+            break
+
+    assert new_run > prev_run, (
+        "next_run_at da linha AC5 não avançou após 250 ticks; fila ou throttles podem bloquear de forma persistente."
+    )
 
     with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT next_run_at FROM campaign_message_outbox WHERE id = %s", (oid,))
-        new_run = cur.fetchone()["next_run_at"]
-
-    assert new_run > prev_run
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM campaign_send_attempts WHERE outbox_id = %s",
+            (oid,),
+        )
+        assert int(cur.fetchone()["n"]) == 0
 
     monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
     importlib.reload(__import__("utils.config", fromlist=["cfg"]))
