@@ -97,6 +97,105 @@ def get_db_connection():
     return conn
 
 
+_UI_SEND_TERMINAL_STATUSES = frozenset({"failed", "invalid"})
+
+
+def sql_expr_campaign_lead_has_outbox_sent(lead_table_alias="campaign_leads"):
+    """
+    Expressão SQL reutilizável: há linha em campaign_message_outbox com status sent
+    para o lead da linha externa. Usar na SELECT de listagens (tech-spec ui_send_status).
+
+    lead_table_alias: identificador da tabela campaign_leads no FROM (ex.: campaign_leads ou cl).
+    """
+    alias = (lead_table_alias or "").strip()
+    if not alias or not alias.replace("_", "").isalnum():
+        raise ValueError("lead_table_alias deve ser identificador SQL seguro (alfanumérico + _)")
+    return (
+        f"EXISTS (SELECT 1 FROM campaign_message_outbox o "
+        f"WHERE o.campaign_lead_id = {alias}.id AND o.status = 'sent')"
+    )
+
+
+def compute_ui_send_status(
+    lead_status,
+    *,
+    has_outbox_sent=False,
+    last_sent_stage=None,
+    last_message_sent_at=None,
+):
+    """
+    Deriva ui_send_status (pending | sent | failed | invalid) para a UI Editar Campanha.
+
+    Regra única (BD + outbox, sem heurística HTTP no browser):
+    - failed / invalid → preserva;
+    - sent na coluna status → sent;
+    - senão, outbox com status sent para o lead → sent;
+    - senão, last_message_sent_at e last_sent_stage preenchidos (Uazapi/sync) → sent;
+    - senão → pending.
+    """
+    s = (lead_status or "")
+    if isinstance(s, str):
+        s = s.strip().lower()
+    elif s is not None:
+        s = str(s).strip().lower()
+    else:
+        s = ""
+
+    if s in _UI_SEND_TERMINAL_STATUSES:
+        return s
+    if s == "sent":
+        return "sent"
+    if has_outbox_sent:
+        return "sent"
+
+    stage_ok = last_sent_stage is not None and str(last_sent_stage).strip() != ""
+    ts_ok = last_message_sent_at is not None
+    if stage_ok and ts_ok:
+        return "sent"
+    return "pending"
+
+
+def compute_ui_send_status_for_lead_row(row, *, has_outbox_sent=None):
+    """Conveniência para RealDict: colunas campaign_leads + flag opcional do JOIN."""
+    if has_outbox_sent is None:
+        has_outbox_sent = bool(row.get("outbox_has_sent") or row.get("has_outbox_sent"))
+    return compute_ui_send_status(
+        row.get("status"),
+        has_outbox_sent=has_outbox_sent,
+        last_sent_stage=row.get("last_sent_stage"),
+        last_message_sent_at=row.get("last_message_sent_at"),
+    )
+
+
+_KANBAN_STEP_TO_STAGE = {1: "initial", 2: "follow1", 3: "follow2", 4: "breakup"}
+
+
+def kanban_column_stage_for_step(current_step):
+    """Etapa de envio da coluna do Kanban (alinhar a ``getStageByStep`` em campaigns_kanban.html)."""
+    try:
+        n = int(current_step)
+    except (TypeError, ValueError):
+        return None
+    return _KANBAN_STEP_TO_STAGE.get(n)
+
+
+def compute_ui_sent_in_column_stage(row, *, outbox_sent_stages=None):
+    """
+    True se o envio da etapa da coluna em que o lead está (``current_step``) está confirmado:
+    ``last_sent_stage`` coincide com a etapa da coluna e/ou existe outbox ``sent`` para esse par (lead, stage).
+    ``outbox_sent_stages``: conjunto de stages em minúsculas vindos de ``campaign_message_outbox``.
+    """
+    column_stage = kanban_column_stage_for_step(row.get("current_step"))
+    if not column_stage:
+        return False
+    last_sent = (row.get("last_sent_stage") or "").strip().lower()
+    if last_sent == column_stage:
+        return True
+    if outbox_sent_stages and column_stage in outbox_sent_stages:
+        return True
+    return False
+
+
 ACTIVE_LICENSE_TYPES = tuple(PLAN_POLICY.keys())
 INSTANCE_LIMIT_REACHED_MESSAGE = "Limite de instâncias atingido. Contate o suporte para contratar instâncias adicionais"
 
@@ -3081,9 +3180,10 @@ def campaign_kanban_data(campaign_id):
     """API: leads do Kanban a partir de ``campaign_leads`` (SSOT por lead).
 
     Para UAZAPI pode correr ``sync_campaign_leads_from_uazapi`` antes da leitura;
-    o JSON ``leads[]`` reflete apenas colunas da BD (ex.: ``status``, ``current_step``,
-    ``last_sent_stage``). Não há recálculo de ``sent`` por lead a partir de
-    ``listfolders`` neste handler.
+    o JSON ``leads[]`` reflete colunas da BD (ex.: ``status``, ``current_step``,
+    ``last_sent_stage``) e ``ui_sent_in_column_stage`` (envio confirmado para a etapa
+    da coluna atual, via ``last_sent_stage`` e/ou ``campaign_message_outbox`` com
+    ``status='sent'`` por stage). Não há recálculo por ``listfolders`` neste handler.
 
     ``uazapi_stats`` e ``stage_progress`` são agregados de ``campaign_stage_sends``
     (contagens / estado do envio) para resumo operacional; não substituem o estado
@@ -3166,6 +3266,7 @@ def campaign_kanban_data(campaign_id):
             conn_sync.close()
 
     conn = get_db_connection()
+    outbox_stages_by_lead = {}
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT id, phone, name, status, current_step, cadence_status,
@@ -3182,6 +3283,20 @@ def campaign_kanban_data(campaign_id):
             ORDER BY current_step ASC, status_priority ASC, COALESCE(csv_row_order, id) ASC, id ASC
         """, (campaign_id,))
         leads = cur.fetchall()
+        cur.execute(
+            """
+            SELECT campaign_lead_id, lower(trim(stage)) AS stage
+            FROM campaign_message_outbox
+            WHERE campaign_id = %s AND status = 'sent'
+            """,
+            (campaign_id,),
+        )
+        for ob in cur.fetchall() or []:
+            lid = ob.get("campaign_lead_id")
+            st = ob.get("stage")
+            if lid is None or not st:
+                continue
+            outbox_stages_by_lead.setdefault(lid, set()).add(st)
     conn.close()
     
     # Serialize datetime objects
@@ -3191,6 +3306,9 @@ def campaign_kanban_data(campaign_id):
         for key in ['snooze_until', 'last_message_sent_at', 'sent_at']:
             if row.get(key):
                 row[key] = row[key].isoformat()
+        lid = row.get("id")
+        stages = outbox_stages_by_lead.get(lid, set())
+        row["ui_sent_in_column_stage"] = compute_ui_sent_in_column_stage(row, outbox_sent_stages=stages)
         serialized.append(row)
 
     out = {'leads': serialized, 'campaign_id': campaign_id}
@@ -4704,8 +4822,11 @@ def admin_force_initial_chunk():
 def admin_get_campaign_leads(campaign_id):
     """Leads paginados de qualquer campanha (admin, sem filtro user_id).
 
-    Estado por lead (``status``, etc.) vem só de ``campaign_leads``; sem inferência
-    a partir de agregados UAZAPI/listfolders nesta rota (tech-spec Task 9).
+    Inclui ``status`` bruto de ``campaign_leads`` e ``ui_send_status`` derivado no servidor
+    (inferência limitada à BD: ``campaign_leads`` + EXISTS em ``campaign_message_outbox`` com
+    ``status='sent'`` + sinais ``last_sent_stage`` / ``last_message_sent_at``). O filtro
+    ``?status=`` continua a aplicar-se só à coluna ``campaign_leads.status``. Sem inferência
+    a partir de agregados UAZAPI/listfolders nesta rota.
     """
     conn = get_db_connection()
     try:
@@ -4721,6 +4842,8 @@ def admin_get_campaign_leads(campaign_id):
         name_filter = request.args.get('name', '')
         phone_filter = request.args.get('phone', '')
         status_filter = request.args.get('status', '')
+
+        outbox_sent_expr = sql_expr_campaign_lead_has_outbox_sent("campaign_leads")
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             base_query = "FROM campaign_leads WHERE campaign_id = %s"
@@ -4740,7 +4863,9 @@ def admin_get_campaign_leads(campaign_id):
             total = cur.fetchone()['count']
 
             query = f"""
-                SELECT id, phone, name, whatsapp_link, status, log, sent_at
+                SELECT id, phone, name, whatsapp_link, status, log, sent_at,
+                       last_sent_stage, last_message_sent_at, current_step, cadence_status,
+                       ({outbox_sent_expr}) AS outbox_has_sent
                 {base_query}
                 ORDER BY COALESCE(csv_row_order, id) ASC, id ASC
                 LIMIT %s OFFSET %s
@@ -4749,8 +4874,19 @@ def admin_get_campaign_leads(campaign_id):
             cur.execute(query, tuple(params))
             leads = cur.fetchall()
 
+        serialized_leads = []
+        for l in leads:
+            row = dict(l)
+            row["sent_at"] = row["sent_at"].isoformat() if row.get("sent_at") else None
+            row["last_message_sent_at"] = (
+                row["last_message_sent_at"].isoformat() if row.get("last_message_sent_at") else None
+            )
+            row["ui_send_status"] = compute_ui_send_status_for_lead_row(l)
+            row.pop("outbox_has_sent", None)
+            serialized_leads.append(row)
+
         return json.dumps({
-            'leads': [dict(l, sent_at=l['sent_at'].isoformat() if l['sent_at'] else None) for l in leads],
+            'leads': serialized_leads,
             'total': total,
             'page': page,
             'pages': (total + per_page - 1) // per_page
@@ -8890,7 +9026,14 @@ def edit_campaign(campaign_id):
 @app.route('/api/campaigns/<int:campaign_id>/leads')
 @login_required
 def get_campaign_leads(campaign_id):
-    """Lista paginada de leads: SSOT ``campaign_leads`` (sem ``sent`` derivado de listfolders aqui)."""
+    """
+    Lista paginada de leads da campanha.
+
+    Inclui ``status`` bruto de ``campaign_leads`` e ``ui_send_status`` derivado no servidor
+    (``campaign_leads`` + EXISTS em ``campaign_message_outbox`` com ``status='sent'`` +
+    sinais ``last_sent_stage`` / ``last_message_sent_at``). O filtro ``?status=`` continua a
+    aplicar-se só à coluna ``campaign_leads.status``.
+    """
     campaign = Campaign.get_by_id(campaign_id, current_user.id)
     if not campaign:
         return json.dumps({'error': 'Campanha não encontrada'}), 404
@@ -8903,6 +9046,8 @@ def get_campaign_leads(campaign_id):
     name_filter = request.args.get('name', '')
     phone_filter = request.args.get('phone', '')
     status_filter = request.args.get('status', '')
+
+    outbox_sent_expr = sql_expr_campaign_lead_has_outbox_sent("campaign_leads")
 
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -8924,9 +9069,11 @@ def get_campaign_leads(campaign_id):
         cur.execute(f"SELECT COUNT(*) as count {base_query}", tuple(params))
         total = cur.fetchone()['count']
         
-        # Fetch filtered leads
+        # Fetch filtered leads (colunas extras para ui_send_status e depuração)
         query = f"""
-            SELECT id, phone, name, whatsapp_link, status, log, sent_at 
+            SELECT id, phone, name, whatsapp_link, status, log, sent_at,
+                   last_sent_stage, last_message_sent_at, current_step, cadence_status,
+                   ({outbox_sent_expr}) AS outbox_has_sent
             {base_query}
             ORDER BY COALESCE(csv_row_order, id) ASC, id ASC
             LIMIT %s OFFSET %s
@@ -8936,9 +9083,20 @@ def get_campaign_leads(campaign_id):
         cur.execute(query, tuple(params))
         leads = cur.fetchall()
     conn.close()
-    
+
+    serialized_leads = []
+    for l in leads:
+        row = dict(l)
+        row["sent_at"] = row["sent_at"].isoformat() if row.get("sent_at") else None
+        row["last_message_sent_at"] = (
+            row["last_message_sent_at"].isoformat() if row.get("last_message_sent_at") else None
+        )
+        row["ui_send_status"] = compute_ui_send_status_for_lead_row(l)
+        row.pop("outbox_has_sent", None)
+        serialized_leads.append(row)
+
     return json.dumps({
-        'leads': [dict(l, sent_at=l['sent_at'].isoformat() if l['sent_at'] else None) for l in leads],
+        'leads': serialized_leads,
         'total': total,
         'page': page,
         'pages': (total + per_page - 1) // per_page

@@ -502,11 +502,14 @@
             }
 
             data.leads.forEach(lead => {
-                const statusClass = `status-${lead.status}`;
+                const displayStatus = lead.ui_send_status ?? lead.status;
+                const statusClass = `status-${displayStatus}`;
                 const statusLabel = {
-                    'pending': 'Pendente', 'sent': 'Enviado',
-                    'failed': 'Falhou', 'invalid': 'Inválido'
-                }[lead.status] || lead.status;
+                    'pending': 'Pendente',
+                    'sent': 'Enviado',
+                    'failed': 'Falhou',
+                    'invalid': 'Inválido'
+                }[displayStatus] || displayStatus;
 
                 let sentText = '-';
                 if (lead.sent_at) {
