@@ -19,6 +19,7 @@ from typing import Any, Optional
 from psycopg2.extras import RealDictCursor
 
 from services.uazapi import UazapiService
+from utils.campaign_dispatch_audit import append_dispatch_audit_event
 from utils.config import SUPER_ADMIN_EMAILS, USE_MESSAGE_OUTBOX
 from utils.limits import check_initial_chunk_daily_quota_for_campaign
 from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
@@ -31,10 +32,17 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Intercalação entre instâncias (§5): última instância servida neste processo
+# Métrica legada: última instância servida (envio segue ordem csv_row_order, sem round-robin).
 _last_outbox_instance_id: Optional[int] = None
 
 STAGE_TO_STEP_NUMBER = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
+
+# Cadência outbox: (stage, lead.current_step na coluna Kanban, step_priority, campaign_steps.step_number)
+_CADENCE_OUTBOX_STAGES: tuple[tuple[str, int, int, int], ...] = (
+    ("follow1", 2, 1, 2),
+    ("follow2", 3, 2, 3),
+    ("breakup", 4, 3, 4),
+)
 
 _REAPER_MINUTES = int(os.environ.get("UAZAPI_OUTBOX_SENDING_REAPER_MINUTES", "20"))
 
@@ -122,18 +130,167 @@ def _user_is_superadmin(conn, user_id: int) -> bool:
     return bool(row and row.get("email") in SUPER_ADMIN_EMAILS)
 
 
-def _pick_round_robin(candidates: list[dict], last_id: Optional[int]) -> Optional[dict]:
-    if not candidates:
-        return None
-    inst_ids = sorted({c["instance_id"] for c in candidates})
-    if last_id is None or last_id not in inst_ids:
-        nxt = inst_ids[0]
-    else:
-        nxt = inst_ids[(inst_ids.index(last_id) + 1) % len(inst_ids)]
-    for c in candidates:
-        if c["instance_id"] == nxt:
-            return c
-    return candidates[0]
+def _outbox_csv_sort_key(row: dict) -> tuple:
+    ordv = row.get("csv_row_order")
+    try:
+        ord_i = int(ordv) if ordv is not None else int(row.get("campaign_lead_id") or 0)
+    except (TypeError, ValueError):
+        ord_i = int(row.get("campaign_lead_id") or 0)
+    nr = row.get("next_run_at")
+    nr_key = 0
+    if nr is not None:
+        try:
+            nr_key = int(nr.timestamp()) if hasattr(nr, "timestamp") else 0
+        except Exception:
+            nr_key = 0
+    return (
+        int(row.get("step_priority") or 0),
+        ord_i,
+        int(row.get("campaign_lead_id") or 0),
+        nr_key,
+        int(row.get("id") or 0),
+    )
+
+
+def enqueue_missing_cadence_outbox_rows(conn) -> None:
+    """
+    Para campanhas Uazapi com fila outbox e ``enable_cadence``: enfileira follow1/follow2/breakup
+    quando o lead já passou pelo buffer (snoozed) e ``snooze_until`` expirou.
+    Ordem de inserção = ``csv_row_order`` (mesma hierarquia visual do Kanban).
+    """
+    if not USE_MESSAGE_OUTBOX:
+        return
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT c.id AS campaign_id, c.user_id,
+                   COALESCE(NULLIF(TRIM(c.rotation_mode), ''), 'single') AS rotation_mode
+            FROM campaigns c
+            WHERE c.status IN ('running', 'pending')
+              AND COALESCE(c.enable_cadence, FALSE) = TRUE
+              AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+              AND EXISTS (SELECT 1 FROM campaign_message_outbox o WHERE o.campaign_id = c.id LIMIT 1)
+            """
+        )
+        campaigns = cur.fetchall() or []
+
+    base_utc = datetime.utcnow()
+    for camp in campaigns:
+        cid = int(camp["campaign_id"])
+        uid = int(camp["user_id"])
+        rotation_mode = (camp.get("rotation_mode") or "single").strip().lower()
+        if rotation_mode not in ("single", "round_robin"):
+            rotation_mode = "single"
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT i.id AS instance_id, i.apikey
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                  AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                  AND i.apikey IS NOT NULL
+                  AND TRIM(i.apikey) <> ''
+                ORDER BY i.id ASC
+                """,
+                (cid,),
+            )
+            instances = cur.fetchall() or []
+        if not instances:
+            continue
+        n_inst = len(instances)
+
+        for stage, lead_step, step_priority, msg_step in _CADENCE_OUTBOX_STAGES:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM campaign_steps
+                    WHERE campaign_id = %s AND step_number = %s
+                    LIMIT 1
+                    """,
+                    (cid, msg_step),
+                )
+                if not cur.fetchone():
+                    continue
+
+                cur.execute(
+                    """
+                    SELECT cl.id, COALESCE(cl.csv_row_order, cl.id) AS ord_key
+                    FROM campaign_leads cl
+                    WHERE cl.campaign_id = %s
+                      AND cl.current_step = %s
+                      AND cl.cadence_status = 'snoozed'
+                      AND cl.snooze_until IS NOT NULL
+                      AND cl.snooze_until <= NOW()
+                      AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+                      AND COALESCE(cl.cadence_status, '') NOT IN ('converted', 'lost')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM campaign_message_outbox o
+                          WHERE o.campaign_lead_id = cl.id
+                            AND LOWER(TRIM(o.stage)) = LOWER(%s)
+                            AND o.status IN ('pending', 'sending', 'sent')
+                      )
+                    ORDER BY COALESCE(cl.csv_row_order, cl.id) ASC, cl.id ASC
+                    """,
+                    (cid, lead_step, stage),
+                )
+                leads_to_queue = cur.fetchall() or []
+
+            if not leads_to_queue:
+                continue
+
+            try:
+                with conn.cursor() as cur:
+                    for i, lr in enumerate(leads_to_queue):
+                        lead_id = int(lr["id"])
+                        if rotation_mode == "round_robin":
+                            inst = instances[i % n_inst]
+                        else:
+                            inst = instances[0]
+                        instance_id = int(inst["instance_id"])
+                        idempotency_key = f"campaign-{cid}-lead-{lead_id}-{stage}"
+                        payload_summary = json.dumps(
+                            {
+                                "stage": stage,
+                                "enqueue": "cadence_followup_auto",
+                                "rotation_mode": rotation_mode,
+                            },
+                            ensure_ascii=False,
+                        )
+                        queued_at = base_utc + timedelta(microseconds=min(i, 999999))
+                        cur.execute(
+                            """
+                            INSERT INTO campaign_message_outbox (
+                                campaign_id, campaign_lead_id, instance_id,
+                                stage, step_priority, status, queued_at,
+                                next_run_at, idempotency_key, payload_summary
+                            )
+                            VALUES (
+                                %s, %s, %s, %s, %s, 'pending', %s,
+                                NOW(), %s, %s::jsonb
+                            )
+                            ON CONFLICT (campaign_lead_id, stage) DO NOTHING
+                            """,
+                            (
+                                cid,
+                                lead_id,
+                                instance_id,
+                                stage,
+                                step_priority,
+                                queued_at,
+                                idempotency_key,
+                                payload_summary,
+                            ),
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception(
+                    "enqueue_missing_cadence_outbox_rows failed campaign_id=%s stage=%s",
+                    cid,
+                    stage,
+                )
 
 
 def _defer_row_next_window(conn, outbox_id: int, campaign_dict: dict) -> None:
@@ -295,6 +452,9 @@ def process_message_outbox_tick(conn) -> None:
     _reaper_stale_sending(conn)
     conn.commit()
 
+    enqueue_missing_cadence_outbox_rows(conn)
+    conn.commit()
+
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
@@ -303,7 +463,7 @@ def process_message_outbox_tick(conn) -> None:
                    c.user_id, c.enable_cadence, c.status AS campaign_status,
                    c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                    c.scheduled_start, c.outbox_delay_min_seconds, c.outbox_delay_max_seconds,
-                   cl.phone, cl.name AS lead_name,
+                   cl.phone, cl.name AS lead_name, cl.csv_row_order,
                    i.apikey, i.name AS instance_name,
                    COALESCE(i.api_provider, 'megaapi') AS api_provider
             FROM campaign_message_outbox o
@@ -314,7 +474,11 @@ def process_message_outbox_tick(conn) -> None:
               AND o.next_run_at <= NOW()
               AND c.status IN ('running', 'pending')
               AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
-            ORDER BY o.step_priority ASC, o.queued_at ASC
+            ORDER BY o.step_priority ASC,
+                     COALESCE(cl.csv_row_order, cl.id) ASC,
+                     cl.id ASC,
+                     o.next_run_at ASC,
+                     o.id ASC
             LIMIT 300
             """
         )
@@ -349,9 +513,8 @@ def process_message_outbox_tick(conn) -> None:
     if not candidates:
         return
 
-    chosen = _pick_round_robin(candidates, _last_outbox_instance_id)
-    if not chosen:
-        return
+    candidates.sort(key=_outbox_csv_sort_key)
+    chosen = candidates[0]
 
     outbox_id = int(chosen["id"])
     campaign_id = int(chosen["campaign_id"])
@@ -425,6 +588,8 @@ def process_message_outbox_tick(conn) -> None:
             latency_ms=latency_ms,
             success=False,
             track_from_response=None,
+            audit_request={"kind": "none", "reason": "missing_phone"},
+            audit_response_body=None,
         )
         return
 
@@ -433,6 +598,7 @@ def process_message_outbox_tick(conn) -> None:
     response_body: Optional[str] = None
     result_json: Optional[dict] = None
 
+    audit_request: dict[str, Any]
     # --- (B) HTTP fora de transação ---
     if (
         media_path
@@ -440,6 +606,15 @@ def process_message_outbox_tick(conn) -> None:
         and _is_media_path_safe(media_path, user_id)
         and os.path.exists(media_path)
     ):
+        audit_request = {
+            "kind": "media",
+            "number": phone_num,
+            "media_type": media_type if media_type in ("image", "video") else "image",
+            "media_file": os.path.basename(media_path) or media_path,
+            "caption_preview": (message or "")[:400],
+            "track_id": track_id,
+            "track_source": track_source,
+        }
         result_json = uazapi_service.send_media_campaign(
             token,
             phone_num or "",
@@ -466,8 +641,22 @@ def process_message_outbox_tick(conn) -> None:
                 latency_ms=latency_ms,
                 success=False,
                 track_from_response=None,
+                audit_request={
+                    "kind": "text",
+                    "reason": "missing_message_template",
+                    "number": phone_num,
+                    "step_number": step_number,
+                },
+                audit_response_body=None,
             )
             return
+        audit_request = {
+            "kind": "text",
+            "number": phone_num,
+            "text_preview": message[:500],
+            "track_id": track_id,
+            "track_source": track_source,
+        }
         result_json = uazapi_service.send_text_idempotent(
             token,
             phone_num or "",
@@ -493,6 +682,8 @@ def process_message_outbox_tick(conn) -> None:
         latency_ms=latency_ms,
         success=success,
         track_from_response=(result_json or None),
+        audit_request=audit_request,
+        audit_response_body=result_json if isinstance(result_json, dict) else _truncate(response_body, 4000),
     )
 
 
@@ -509,6 +700,8 @@ def _persist_outcome(
     latency_ms: int,
     success: bool,
     track_from_response: Any,
+    audit_request: Optional[dict] = None,
+    audit_response_body: Any = None,
 ) -> None:
     """Fase (C): tentativa + estado terminal; §6.1 só se ``success`` e HTTP 200 implícito."""
     stage = (chosen.get("stage") or "initial").lower()
@@ -614,6 +807,35 @@ def _persist_outcome(
             outcome=outcome,
             http_status=http_status,
         )
+        try:
+            uid_audit = int(chosen.get("user_id") or 0)
+            if uid_audit:
+                append_dispatch_audit_event(
+                    user_id=uid_audit,
+                    campaign_id=campaign_id,
+                    event={
+                        "campaign_id": campaign_id,
+                        "lead_id": lead_id,
+                        "csv_row_order": chosen.get("csv_row_order"),
+                        "outbox_id": outbox_id,
+                        "stage": stage,
+                        "attempt_no": attempt_no,
+                        "instance_id": int(chosen.get("instance_id") or 0),
+                        "outcome": outcome,
+                        "latency_ms": latency_ms,
+                        "http_status": http_status,
+                        "request": audit_request or {},
+                        "response": audit_response_body
+                        if audit_response_body is not None
+                        else _truncate(response_body, 4000),
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "append_dispatch_audit_event failed campaign_id=%s outbox_id=%s",
+                campaign_id,
+                outbox_id,
+            )
     except Exception as e:
         conn.rollback()
         observe_campaign_outbox_send_attempt("persist_failed", latency_ms)

@@ -69,7 +69,7 @@ def ordered_campaign_lead_ids(conn, campaign_id: int) -> List[int]:
             FROM campaign_leads
             WHERE campaign_id = %s
               AND COALESCE(removed_from_funnel, FALSE) = FALSE
-            ORDER BY COALESCE(send_batch, 999) ASC, id ASC
+            ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC
             """,
             (campaign_id,),
         )

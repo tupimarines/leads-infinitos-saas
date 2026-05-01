@@ -134,7 +134,7 @@ def main() -> int:
             LATERAL jsonb_array_elements_text(COALESCE(css.lead_ids, '[]'::jsonb)) AS elem
             WHERE css.campaign_id = %s AND css.stage = 'initial' AND css.uazapi_folder_id IS NOT NULL
           )
-        ORDER BY COALESCE(cl.send_batch, 999) ASC, cl.id ASC
+        ORDER BY COALESCE(cl.send_batch, 999) ASC, COALESCE(cl.csv_row_order, cl.id) ASC, cl.id ASC
         LIMIT 30
         """,
         (cid, cid),

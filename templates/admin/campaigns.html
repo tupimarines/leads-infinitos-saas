@@ -10,6 +10,10 @@
             <p class="text-gray-400">Todas as campanhas do sistema</p>
         </div>
         <div class="flex gap-4">
+            <a href="{{ url_for('admin_dispatch_audit_page') }}"
+                class="btn bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-medium transition-colors">
+                📋 Auditoria disparos
+            </a>
             <button type="button" onclick="openForceChunkModal()"
                 class="btn bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
                 title="Forçar novo chunk inicial (Uazapi + cadência) com leads ainda pendentes">

@@ -79,6 +79,18 @@ from utils.uazapi_support_notify import (
 from worker_message_outbox import process_message_outbox_tick
 from utils.outbox_prometheus import maybe_start_outbox_metrics_http_server
 
+
+def _campaign_has_message_outbox(conn, campaign_id: int) -> bool:
+    """Campanha já usa fila Postgres outbox (envio unitário); cadência legado por lead deve ser ignorada."""
+    if not USE_MESSAGE_OUTBOX:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM campaign_message_outbox WHERE campaign_id = %s LIMIT 1",
+            (campaign_id,),
+        )
+        return cur.fetchone() is not None
+
 # Chatwoot Config
 CHATWOOT_API_URL = os.environ.get('CHATWOOT_API_URL', 'https://chatwoot.wbtech.dev')
 CHATWOOT_ACCESS_TOKEN = os.environ.get('CHATWOOT_ACCESS_TOKEN')
@@ -937,7 +949,7 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                   AND COALESCE(removed_from_funnel, FALSE) = FALSE
                   AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
                   {exclude_clause}
-                ORDER BY COALESCE(send_batch, 999) ASC, id ASC
+            ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC
                 LIMIT %s
                 """,
                 (campaign_id, step, campaign_id, stage, total_limit) if exclude_clause else (campaign_id, step, total_limit),
@@ -1762,7 +1774,8 @@ def process_cadence():
                 )
 
                 if is_campaign_send_window(campaign):
-                    process_campaign_sends(campaign, conn)
+                    if not (USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, campaign["id"])):
+                        process_campaign_sends(campaign, conn)
                     bootstrap_pending_leads(campaign, conn)
                 else:
                     now_brazil = datetime.now(BRAZIL_TZ)
@@ -2993,12 +3006,12 @@ def process_campaign_sends(campaign, conn):
     # Find leads ready for follow-up (snooze expired)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT id, phone, name, current_step, cadence_status, whatsapp_link, chatwoot_conversation_id
-            FROM campaign_leads
-            WHERE campaign_id = %s
-              AND cadence_status = 'snoozed'
-              AND snooze_until <= NOW()
-            ORDER BY snooze_until ASC
+            SELECT cl.id, cl.phone, cl.name, cl.current_step, cl.cadence_status, cl.whatsapp_link, cl.chatwoot_conversation_id
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s
+              AND cl.cadence_status = 'snoozed'
+              AND cl.snooze_until <= NOW()
+            ORDER BY COALESCE(cl.csv_row_order, cl.id) ASC, cl.id ASC, cl.snooze_until ASC
             LIMIT 20
         """, (cid,))
         ready_leads = cur.fetchall()

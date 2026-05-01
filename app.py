@@ -2200,6 +2200,8 @@ def to_brt(dt):
     # Naive = assume UTC (Postgres sem timezone)
     return pytz.UTC.localize(dt).astimezone(BRAZIL_TZ)
 STORAGE_ROOT = os.environ.get("STORAGE_DIR", "storage")
+_storage_abs = os.path.abspath(STORAGE_ROOT)
+os.makedirs(_storage_abs, exist_ok=True)
 
 # Configuração do Flask-Mail
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
@@ -3870,6 +3872,114 @@ def admin_campaign_outbox_state(campaign_id):
         )
     finally:
         conn.close()
+
+
+@app.route("/api/admin/campaigns/<int:campaign_id>/dispatch-audit", methods=["GET"])
+@login_required
+def admin_campaign_dispatch_audit(campaign_id):
+    """
+    Auditoria append-only dos disparos outbox (JSONL em disco).
+    Query: ``tail`` (max linhas a partir do fim, default 800, máx 5000), ``format=json|ndjson``.
+    """
+    gate = _require_message_outbox_phase1_api()
+    if gate:
+        return gate
+
+    fmt = (request.args.get("format") or "json").strip().lower()
+    try:
+        tail_n = min(5000, max(1, int(request.args.get("tail", "800"))))
+    except (TypeError, ValueError):
+        tail_n = 800
+
+    from utils.campaign_dispatch_audit import dispatch_audit_jsonl_path
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT user_id FROM campaigns WHERE id = %s", (campaign_id,))
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "not_found", "message": "Campanha não encontrada."}), 404
+        uid = int(row["user_id"])
+    finally:
+        conn.close()
+
+    path = dispatch_audit_jsonl_path(uid, campaign_id, ensure_parent=False)
+    if not os.path.isfile(path):
+        if fmt == "ndjson":
+            return Response("", mimetype="application/x-ndjson")
+        return jsonify({"campaign_id": campaign_id, "path": path, "events": [], "truncated": False})
+
+    with open(path, "r", encoding="utf-8") as f:
+        all_lines = f.readlines()
+    chunk = all_lines[-tail_n:]
+    truncated = len(all_lines) > tail_n
+
+    if fmt == "ndjson":
+        return Response("".join(chunk), mimetype="application/x-ndjson")
+
+    events = []
+    for ln in chunk:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            events.append(json.loads(ln))
+        except json.JSONDecodeError:
+            events.append({"raw": ln, "parse_error": True})
+
+    return jsonify(
+        {
+            "campaign_id": campaign_id,
+            "path": path,
+            "events": events,
+            "truncated": truncated,
+            "returned_lines": len(chunk),
+        }
+    )
+
+
+@app.route("/api/admin/users/<int:user_id>/campaigns-active")
+@login_required
+def admin_user_active_campaigns_api(user_id):
+    """
+    Superadmin + USE_MESSAGE_OUTBOX: campanhas ``running`` / ``pending`` do usuário (dropdown auditoria).
+    """
+    gate = _require_message_outbox_phase1_api()
+    if gate:
+        return gate
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, status, use_uazapi_sender, enable_cadence
+                FROM campaigns
+                WHERE user_id = %s AND status IN ('running', 'pending')
+                ORDER BY
+                    CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                    name ASC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall() or []
+        return jsonify({"campaigns": [dict(r) for r in rows]})
+    finally:
+        conn.close()
+
+
+@app.route("/admin/dispatch-audit")
+@login_required
+@admin_required
+def admin_dispatch_audit_page():
+    """UI: seletor usuário + campanha ativa + leitura do JSONL de disparos."""
+    if not is_super_admin():
+        flash("Apenas superadmin pode acessar a auditoria de disparos.", "error")
+        return redirect(url_for("admin_dashboard"))
+    if not USE_MESSAGE_OUTBOX:
+        flash("USE_MESSAGE_OUTBOX não está ativo no ambiente.", "error")
+        return redirect(url_for("admin_dashboard"))
+    return render_template("admin/dispatch_audit.html")
 
 
 @app.route("/api/admin/campaigns/<int:campaign_id>/outbox/pause", methods=["POST"])
@@ -6327,7 +6437,7 @@ def _create_campaign_core(user_id, data, admin_id=None):
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id FROM campaign_leads WHERE campaign_id = %s AND status = 'pending' ORDER BY id ASC",
+                    "SELECT id FROM campaign_leads WHERE campaign_id = %s AND status = 'pending' ORDER BY COALESCE(csv_row_order, id) ASC, id ASC",
                     (campaign_id,)
                 )
                 pending_ids = [r[0] for r in cur.fetchall()]
@@ -6410,7 +6520,7 @@ def _create_campaign_core(user_id, data, admin_id=None):
                     cur.execute(
                         """SELECT id, phone, whatsapp_link, name FROM campaign_leads
                            WHERE campaign_id = %s AND status = 'pending'
-                           ORDER BY COALESCE(send_batch, 999) ASC, id ASC LIMIT %s""",
+                           ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC LIMIT %s""",
                         (campaign_id, total_limit)
                     )
                     leads = cur.fetchall()
@@ -6446,6 +6556,7 @@ def _create_campaign_core(user_id, data, admin_id=None):
                                         "rotation_mode": rotation_mode,
                                     }
                                 )
+                                queued_at_val = now_utc + timedelta(microseconds=min(i, 999999))
                                 cur.execute(
                                     """
                                     INSERT INTO campaign_message_outbox (
@@ -6455,13 +6566,14 @@ def _create_campaign_core(user_id, data, admin_id=None):
                                     )
                                     VALUES (
                                         %s, %s, %s, 'initial', 0, 'pending',
-                                        NOW(), %s, %s, %s::jsonb
+                                        %s, %s, %s, %s::jsonb
                                     )
                                     """,
                                     (
                                         campaign_id,
                                         lead_id,
                                         instance_id,
+                                        queued_at_val,
                                         next_run_at_val,
                                         idempotency_key,
                                         payload_summary,
@@ -6606,7 +6718,15 @@ def _create_campaign_core(user_id, data, admin_id=None):
 @app.route('/api/campaigns', methods=['POST'])
 @login_required
 def create_campaign():
-    return _create_campaign_core(current_user.id, request.json)
+    """Criador normal (Minhas Campanhas). Com ``USE_MESSAGE_OUTBOX`` e superadmin, passa ``admin_id`` para ``_create_campaign_core`` — mesma fila outbox que ``POST /api/admin/campaigns`` para o próprio utilizador (Fase 1 / ADR-4)."""
+    admin_id = (
+        current_user.id
+        if (USE_MESSAGE_OUTBOX and is_super_admin())
+        else None
+    )
+    return _create_campaign_core(
+        current_user.id, request.json, admin_id=admin_id
+    )
 
 
 @app.route("/campaigns")
@@ -6979,7 +7099,10 @@ def get_campaign_stats(campaign_id):
         uazapi_scheduled = 0
 
         # Pré-carregar stage_progress (campaign_stage_sends) — usado para cadência e headline.
+        # Importante: reconciliação cadência usa a mesma conn — não fechar antes de
+        # ``_reconciled_uazapi_cadence_counts_via_stage_progress`` (evita "connection already closed").
         conn_stage = get_db_connection()
+        cadence_rec = None
         try:
             stage_progress = _get_campaign_stage_progress(conn_stage, campaign_id)
 
@@ -6991,6 +7114,11 @@ def get_campaign_stats(campaign_id):
                         (campaign_id,),
                     )
                     has_scheduled_chunk = cur_sched.fetchone() is not None
+
+            if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
+                cadence_rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
+                    conn_stage, campaign_id, dict(campaign), total_leads
+                )
         finally:
             conn_stage.close()
 
@@ -7005,24 +7133,22 @@ def get_campaign_stats(campaign_id):
 
         # --- Fonte de verdade para sent/failed/pending ---
         # Campanhas com cadência + Uazapi: mesmo núcleo que admin (SSOT ``_reconciled_uazapi_cadence_counts_via_stage_progress``).
-        if campaign.get('enable_cadence') and campaign.get('use_uazapi_sender'):
-            rec = _reconciled_uazapi_cadence_counts_via_stage_progress(
-                conn_stage, campaign_id, dict(campaign), total_leads
+        if cadence_rec:
+            sent = cadence_rec["sent"]
+            failed = cadence_rec["failed"]
+            pending = cadence_rec["pending"]
+            uazapi_scheduled = max(
+                0,
+                cadence_rec["initial_planned"]
+                - cadence_rec["initial_sent_raw"]
+                - cadence_rec["initial_failed_raw"],
             )
-            if rec:
-                sent = rec["sent"]
-                failed = rec["failed"]
-                pending = rec["pending"]
-                uazapi_scheduled = max(
-                    0,
-                    rec["initial_planned"] - rec["initial_sent_raw"] - rec["initial_failed_raw"],
-                )
-                uazapi_debug = {
-                    "source": "campaign_stage_sends_initial",
-                    "initial_sent": rec["initial_sent_raw"],
-                    "initial_failed": rec["initial_failed_raw"],
-                    "initial_planned": rec["initial_planned"],
-                }
+            uazapi_debug = {
+                "source": "campaign_stage_sends_initial",
+                "initial_sent": cadence_rec["initial_sent_raw"],
+                "initial_failed": cadence_rec["initial_failed_raw"],
+                "initial_planned": cadence_rec["initial_planned"],
+            }
 
         # Campanhas Uazapi SEM cadência: manter list_folders live no folder principal.
         elif campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and not campaign.get('enable_cadence'):
@@ -7369,7 +7495,7 @@ def _force_uazapi_initial_chunk_no_cadence(
         cur.execute(
             """SELECT id, phone, whatsapp_link, name FROM campaign_leads
                WHERE campaign_id = %s AND status = 'pending'
-               ORDER BY COALESCE(send_batch, 999) ASC, id ASC LIMIT %s""",
+               ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC LIMIT %s""",
             (campaign_id, total_limit),
         )
         leads = cur.fetchall() or []
@@ -8471,7 +8597,7 @@ def _create_stage_campaign(campaign_id):
                  AND current_step = %s
                  AND COALESCE(removed_from_funnel, FALSE) = FALSE
                  AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
-               ORDER BY COALESCE(send_batch, 999) ASC, id ASC
+               ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC
                LIMIT %s""",
             (campaign_id, step, total_limit),
         )

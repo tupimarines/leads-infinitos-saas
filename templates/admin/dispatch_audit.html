@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Auditoria de disparos (outbox) — Admin{% endblock %}
+
+{% block body %}
+<div class="container py-8 max-w-5xl">
+    <div class="flex justify-between items-center mb-6">
+        <div>
+            <h1 class="text-2xl font-bold text-white mb-1">Auditoria de disparos</h1>
+            <p class="text-gray-400 text-sm">JSONL por campanha — mesma API usada pelo worker outbox.</p>
+        </div>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary text-sm">← Voltar</a>
+    </div>
+
+    <div class="card p-6 mb-6 space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Usuário</label>
+                <select id="audit-user"
+                    class="w-full rounded-lg bg-gray-800 border border-gray-600 text-white px-3 py-2 text-sm">
+                    <option value="">Carregando…</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Campanha ativa (running / pending)</label>
+                <select id="audit-campaign" disabled
+                    class="w-full rounded-lg bg-gray-800 border border-gray-600 text-white px-3 py-2 text-sm">
+                    <option value="">Selecione um usuário primeiro</option>
+                </select>
+            </div>
+        </div>
+        <div class="flex flex-wrap items-end gap-3">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Linhas (tail)</label>
+                <input type="number" id="audit-tail" value="800" min="1" max="5000"
+                    class="w-28 rounded-lg bg-gray-800 border border-gray-600 text-white px-3 py-2 text-sm" />
+            </div>
+            <button type="button" id="audit-load"
+                class="btn bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium">
+                Carregar auditoria
+            </button>
+            <button type="button" id="audit-download"
+                class="btn bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm font-medium">
+                Baixar NDJSON
+            </button>
+        </div>
+        <p id="audit-meta" class="text-xs text-gray-500"></p>
+    </div>
+
+    <div class="card p-4">
+        <div class="text-sm text-gray-400 mb-2">Eventos</div>
+        <pre id="audit-out"
+            class="text-xs text-gray-200 bg-gray-900/80 rounded-lg p-4 overflow-auto max-h-[70vh] whitespace-pre-wrap break-words font-mono border border-gray-700">Selecione usuário e campanha, depois «Carregar auditoria».</pre>
+    </div>
+</div>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+(function () {
+    const selUser = document.getElementById('audit-user');
+    const selCamp = document.getElementById('audit-campaign');
+    const out = document.getElementById('audit-out');
+    const meta = document.getElementById('audit-meta');
+    const tailInput = document.getElementById('audit-tail');
+
+    async function loadUsers() {
+        selUser.innerHTML = '<option value="">Carregando…</option>';
+        const res = await fetch('/api/admin/users/list', { credentials: 'same-origin' });
+        if (!res.ok) {
+            selUser.innerHTML = '<option value="">Erro ao listar usuários</option>';
+            return;
+        }
+        const users = await res.json();
+        selUser.innerHTML = '<option value="" selected disabled>Selecione um usuário…</option>';
+        users.forEach(u => {
+            const opt = document.createElement('option');
+            opt.value = u.id;
+            opt.textContent = `${u.email} (ID ${u.id})`;
+            selUser.appendChild(opt);
+        });
+    }
+
+    selUser.addEventListener('change', async () => {
+        const uid = selUser.value;
+        selCamp.innerHTML = '<option value="">Carregando…</option>';
+        selCamp.disabled = true;
+        if (!uid) {
+            selCamp.innerHTML = '<option value="">Selecione um usuário primeiro</option>';
+            return;
+        }
+        const res = await fetch(`/api/admin/users/${uid}/campaigns-active`, { credentials: 'same-origin' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            selCamp.innerHTML = `<option value="">${data.message || 'Erro ' + res.status}</option>`;
+            return;
+        }
+        const list = data.campaigns || [];
+        if (!list.length) {
+            selCamp.innerHTML = '<option value="">Nenhuma campanha running/pending</option>';
+            return;
+        }
+        selCamp.innerHTML = '<option value="" selected disabled>Selecione uma campanha…</option>';
+        list.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            const st = (c.status === 'running') ? '🟢' : '🟡';
+            opt.textContent = `${st} ${c.name} (ID ${c.id})`;
+            selCamp.appendChild(opt);
+        });
+        selCamp.disabled = false;
+    });
+
+    document.getElementById('audit-load').addEventListener('click', async () => {
+        const cid = selCamp.value;
+        if (!cid) {
+            out.textContent = 'Escolha uma campanha.';
+            return;
+        }
+        let tail = parseInt(tailInput.value, 10);
+        if (isNaN(tail) || tail < 1) tail = 800;
+        tail = Math.min(5000, tail);
+        meta.textContent = 'Carregando…';
+        out.textContent = '';
+        const res = await fetch(`/api/admin/campaigns/${cid}/dispatch-audit?tail=${tail}&format=json`, { credentials: 'same-origin' });
+        const data = await res.json().catch(() => ({ error: 'invalid_json' }));
+        if (!res.ok) {
+            meta.textContent = '';
+            out.textContent = JSON.stringify(data, null, 2);
+            return;
+        }
+        meta.textContent = data.path
+            ? `Arquivo: ${data.path} · linhas retornadas: ${data.returned_lines}${data.truncated ? ' (truncado)' : ''}`
+            : '';
+        out.textContent = JSON.stringify(data.events || [], null, 2);
+    });
+
+    document.getElementById('audit-download').addEventListener('click', () => {
+        const cid = selCamp.value;
+        if (!cid) return;
+        let tail = parseInt(tailInput.value, 10);
+        if (isNaN(tail) || tail < 1) tail = 800;
+        tail = Math.min(5000, tail);
+        window.location = `/api/admin/campaigns/${cid}/dispatch-audit?tail=${tail}&format=ndjson`;
+    });
+
+    document.addEventListener('DOMContentLoaded', loadUsers);
+})();
+</script>
+{% endblock %}
