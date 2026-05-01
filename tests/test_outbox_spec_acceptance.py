@@ -22,7 +22,11 @@ from unittest.mock import patch
 import pytest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _REPO_ROOT)
+sys.path.insert(0, _TESTS_DIR)
+
+import campaign_test_data as ctd
 
 
 def _migrate_module():
@@ -121,19 +125,8 @@ def ensure_target_user(db_conn):
 
 @pytest.fixture
 def ensure_uazapi_instance(db_conn, ensure_target_user):
-    from psycopg2.extras import RealDictCursor
-
-    uid = ensure_target_user
-    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """INSERT INTO instances (user_id, name, apikey, status, api_provider)
-               VALUES (%s, 'outbox-ac-test', 'fake-token', 'connected', 'uazapi')
-               RETURNING id""",
-            (uid,),
-        )
-        iid = cur.fetchone()["id"]
-        db_conn.commit()
-        return iid
+    """Primeira instância Uazapi ``connected`` do utilizador-alvo; cria se não existir."""
+    return ctd.first_connected_uazapi_instance_id(db_conn, ensure_target_user)
 
 
 def _insert_campaign_with_leads(
@@ -162,13 +155,20 @@ def _insert_campaign_with_leads(
             VALUES (
                 %s, %s, %s, 'running',
                 true, 'single',
-                0, 23, true, true,
+                %s, %s, true, true,
                 5, 10,
                 %s, false
             )
             RETURNING id
             """,
-            (user_id, name, msg, sent_today),
+            (
+                user_id,
+                name,
+                msg,
+                ctd.DEFAULT_TEST_SEND_HOUR_START,
+                ctd.DEFAULT_TEST_SEND_HOUR_END,
+                sent_today,
+            ),
         )
         cid = cur.fetchone()["id"]
         cur.execute(
@@ -374,23 +374,23 @@ def test_ac11_sent_today_increments_on_successful_tick(
     admin_id = ensure_superadmin
     target_user_id = ensure_target_user
 
-    leads_data = [{"title": "X", "phone": "5511888800001", "address": ""}]
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(leads_data, tmp)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".csv",
+        delete=False,
+        encoding="utf-8",
+        newline="",
+    )
+    tmp.write(ctd.SAMPLE_LEADS_CSV)
     tmp.close()
 
     try:
+        instance_id = ctd.first_connected_uazapi_instance_id(db_conn, target_user_id)
         with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """INSERT INTO instances (user_id, name, apikey, status, api_provider)
-                   VALUES (%s, 'ac11', 'tok', 'connected', 'uazapi') RETURNING id""",
-                (target_user_id,),
-            )
-            instance_id = cur.fetchone()["id"]
-            cur.execute(
                 """INSERT INTO scraping_jobs (user_id, keyword, locations, total_results, status, results_path, created_at)
-                   VALUES (%s, 'k', 'SP', 1, 'completed', %s, NOW()) RETURNING id""",
-                (target_user_id, tmp.name),
+                   VALUES (%s, 'k', 'SP', %s, 'completed', %s, NOW()) RETURNING id""",
+                (target_user_id, ctd.SAMPLE_LEADS_ROW_COUNT, tmp.name),
             )
             job_id = cur.fetchone()["id"]
             db_conn.commit()
@@ -414,8 +414,8 @@ def test_ac11_sent_today_increments_on_successful_tick(
                         "instance_ids": [instance_id],
                         "use_uazapi_sender": True,
                         "rotation_mode": "single",
-                        "send_hour_start": 0,
-                        "send_hour_end": 23,
+                        "send_hour_start": ctd.DEFAULT_TEST_SEND_HOUR_START,
+                        "send_hour_end": ctd.DEFAULT_TEST_SEND_HOUR_END,
                         "send_saturday": True,
                         "send_sunday": True,
                     }
@@ -528,7 +528,11 @@ def test_ac5_daily_quota_defers_without_post(db_conn, ensure_target_user, ensure
 
     with patch.object(wmo, "is_campaign_send_window", return_value=True):
         with patch.object(wmo.uazapi_service, "send_text_idempotent") as mock_send:
-            with patch("utils.limits.check_initial_chunk_daily_quota_for_campaign", return_value=False):
+            with patch.object(
+                wmo,
+                "check_initial_chunk_daily_quota_for_campaign",
+                return_value=False,
+            ):
                 wmo.process_message_outbox_tick(db_conn)
 
     mock_send.assert_not_called()

@@ -12,7 +12,12 @@ import tempfile
 import importlib
 from contextlib import contextmanager
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _REPO_ROOT)
+sys.path.insert(0, _TESTS_DIR)
+
+import campaign_test_data as ctd
 
 from unittest.mock import patch, MagicMock
 import pytest
@@ -31,6 +36,12 @@ def _reload_outbox_modules(monkeypatch, enabled: bool):
     import worker_message_outbox as wmo
     importlib.reload(wmo)
     return app_mod, wmo
+
+
+def _env_outbox_enabled(val):
+    if val is None:
+        return False
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 @contextmanager
@@ -91,37 +102,24 @@ def ensure_target_user(db_conn):
 
 @pytest.fixture
 def ensure_instance(db_conn, ensure_target_user):
-    """Create a Uazapi instance for the target user."""
-    from psycopg2.extras import RealDictCursor
-    user_id = ensure_target_user
-    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """INSERT INTO instances (user_id, name, apikey, status, api_provider)
-               VALUES (%s, 'test-instance', 'fake-token', 'connected', 'uazapi')
-               RETURNING id""",
-            (user_id,)
-        )
-        inst_id = cur.fetchone()['id']
-        db_conn.commit()
-        return inst_id
+    """Primeira instância Uazapi ``connected`` do utilizador-alvo; cria se não existir."""
+    return ctd.first_connected_uazapi_instance_id(db_conn, ensure_target_user)
 
 
 @pytest.fixture
 def ensure_scraping_job(db_conn, ensure_target_user):
-    """Create a scraping job with a temp CSV of leads for the target user."""
+    """Scraping job com CSV de leads válido (``campaign_test_data``)."""
     from psycopg2.extras import RealDictCursor
     user_id = ensure_target_user
 
-    leads_data = [
-        {"title": "Empresa A", "phone": "5511999990001", "address": "Rua A"},
-        {"title": "Empresa B", "phone": "5511999990002", "address": "Rua B"},
-        {"title": "Empresa C", "phone": "5511999990003", "address": "Rua C"},
-        {"title": "Empresa D", "phone": "5511999990004", "address": "Rua D"},
-        {"title": "Empresa E", "phone": "5511999990005", "address": "Rua E"},
-    ]
-
-    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
-    json.dump(leads_data, tmp)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".csv",
+        delete=False,
+        encoding="utf-8",
+        newline="",
+    )
+    tmp.write(ctd.SAMPLE_LEADS_CSV)
     tmp.close()
 
     with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -129,7 +127,7 @@ def ensure_scraping_job(db_conn, ensure_target_user):
             """INSERT INTO scraping_jobs (user_id, keyword, locations, total_results, status, results_path, created_at)
                VALUES (%s, 'test-keyword', 'SP', %s, 'completed', %s, NOW())
                RETURNING id""",
-            (user_id, len(leads_data), tmp.name)
+            (user_id, ctd.SAMPLE_LEADS_ROW_COUNT, tmp.name),
         )
         job_id = cur.fetchone()['id']
         db_conn.commit()
@@ -173,10 +171,10 @@ def test_admin_create_campaign(
                 'instance_ids': [instance_id],
                 'use_uazapi_sender': True,
                 'rotation_mode': 'single',
-                'send_hour_start': 8,
-                'send_hour_end': 20,
-                'send_saturday': False,
-                'send_sunday': False,
+                'send_hour_start': ctd.DEFAULT_TEST_SEND_HOUR_START,
+                'send_hour_end': ctd.DEFAULT_TEST_SEND_HOUR_END,
+                'send_saturday': True,
+                'send_sunday': True,
             }
 
             res = client.post(
@@ -216,20 +214,27 @@ def test_admin_create_campaign(
 
 
 def test_outbox_state_returns_403_when_use_message_outbox_disabled(
-    db_conn, ensure_admin_user,
+    db_conn, ensure_admin_user, monkeypatch,
 ):
     """AC / §7: polling outbox exige ``USE_MESSAGE_OUTBOX`` no ambiente."""
-    admin_id = ensure_admin_user
-    from app import app
-    app.config['TESTING'] = True
-    app.config['LOGIN_DISABLED'] = True
-    with app.test_client() as client:
-        with client.session_transaction() as sess:
-            sess['_user_id'] = str(admin_id)
-        res = client.get('/api/admin/campaigns/1/outbox-state')
-    assert res.status_code == 403
-    body = res.get_json(silent=True) or {}
-    assert 'USE_MESSAGE_OUTBOX' in (body.get('message') or '')
+    prev_flag = os.environ.get("USE_MESSAGE_OUTBOX")
+    _reload_outbox_modules(monkeypatch, False)
+    try:
+        admin_id = ensure_admin_user
+        import app as app_mod
+
+        flask_app = app_mod.app
+        flask_app.config["TESTING"] = True
+        flask_app.config["LOGIN_DISABLED"] = True
+        with flask_app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["_user_id"] = str(admin_id)
+            res = client.get("/api/admin/campaigns/1/outbox-state")
+        assert res.status_code == 403
+        body = res.get_json(silent=True) or {}
+        assert "USE_MESSAGE_OUTBOX" in (body.get("message") or "")
+    finally:
+        _reload_outbox_modules(monkeypatch, _env_outbox_enabled(prev_flag))
 
 
 def test_superadmin_outbox_create_skips_advanced_api_and_enqueues_outbox(
@@ -266,10 +271,10 @@ def test_superadmin_outbox_create_skips_advanced_api_and_enqueues_outbox(
                         'instance_ids': [instance_id],
                         'use_uazapi_sender': True,
                         'rotation_mode': 'single',
-                        'send_hour_start': 8,
-                        'send_hour_end': 20,
-                        'send_saturday': False,
-                        'send_sunday': False,
+                        'send_hour_start': ctd.DEFAULT_TEST_SEND_HOUR_START,
+                        'send_hour_end': ctd.DEFAULT_TEST_SEND_HOUR_END,
+                        'send_saturday': True,
+                        'send_sunday': True,
                     }
                     res = client.post(
                         '/api/admin/campaigns',
@@ -323,8 +328,8 @@ def test_outbox_tick_writes_attempt_and_marks_sent(
                         'instance_ids': [instance_id],
                         'use_uazapi_sender': True,
                         'rotation_mode': 'single',
-                        'send_hour_start': 8,
-                        'send_hour_end': 20,
+                        'send_hour_start': ctd.DEFAULT_TEST_SEND_HOUR_START,
+                        'send_hour_end': ctd.DEFAULT_TEST_SEND_HOUR_END,
                         'send_saturday': True,
                         'send_sunday': True,
                     }
