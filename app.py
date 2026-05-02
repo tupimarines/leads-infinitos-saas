@@ -3158,6 +3158,33 @@ def campaigns_list():
     )
 
 
+@app.route("/api/reconnect-alerts/<int:alert_id>/dismiss", methods=["POST"])
+@login_required
+def dismiss_reconnect_alert(alert_id):
+    """Remove um banner de reconexão in-app (utilizador só pode dispensar os seus)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM reconnect_inapp_alerts WHERE id = %s AND user_id = %s",
+                (alert_id, current_user.id),
+            )
+            deleted = cur.rowcount or 0
+        if deleted == 0:
+            conn.rollback()
+            return json.dumps({"success": False, "error": "not_found"}), 404
+        conn.commit()
+        return json.dumps({"success": True})
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return json.dumps({"success": False, "error": str(e)}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/campaigns/delete/<int:campaign_id>', methods=['POST'])
 @login_required
 def delete_campaign(campaign_id):
