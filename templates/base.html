@@ -47,8 +47,22 @@
       margin: 0;
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji';
       color: var(--text);
-      background: var(--bg);
+      background: radial-gradient(1200px 800px at 10% -10%, rgba(139, 92, 246, .12), transparent 50%),
+        radial-gradient(1000px 700px at 90% -20%, rgba(79, 124, 255, .12), transparent 50%),
+        linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
       min-height: 100%;
+    }
+
+    body.themed-bg {
+      background: url("{{ url_for('static', filename='img/bg-pattern.png') }}") repeat,
+        linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
+      background-size: 1400px auto, cover;
+      background-blend-mode: overlay, normal;
+      background-attachment: fixed;
+    }
+
+    body.login-page {
+      background: var(--bg);
     }
 
     .bg-video-shell {
@@ -394,14 +408,8 @@
   {% block extra_head %}{% endblock %}
 </head>
 
-<body>
-  <div class="bg-video-shell" aria-hidden="true">
-    <video id="bg-video" autoplay muted loop playsinline preload="metadata"
-      poster="{{ url_for('static', filename='img/favicon.png') }}">
-      <source src="{{ url_for('static', filename='video/gemini-veo-video.mp4') }}" type="video/mp4">
-    </video>
-  </div>
-  <div class="bg-video-overlay" aria-hidden="true"></div>
+<body class="{% block body_class %}themed-bg{% endblock %}">
+  {% block background_media %}{% endblock %}
 
   <div class="app-root">
     <div class="nav">
