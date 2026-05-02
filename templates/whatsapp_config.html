@@ -2,209 +2,457 @@
 
 {% block title %}WhatsApp - Leads Infinitos{% endblock %}
 
+{% block extra_head %}
+<style>
+  .wa-page {
+    padding-bottom: 40px;
+  }
+
+  .wa-page-header {
+    text-align: left;
+    padding: 8px 0 32px;
+    max-width: 720px;
+  }
+
+  .wa-page-header h1 {
+    margin: 0 0 10px;
+    font-size: clamp(1.5rem, 4vw, 2rem);
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .wa-page-header p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  .wa-card {
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+
+  .wa-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px 16px;
+    margin-bottom: 12px;
+  }
+
+  .wa-toolbar h3 {
+    margin: 0;
+    font-size: 18px;
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .wa-toolbar .badge {
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  .wa-field-block {
+    margin-top: 12px;
+  }
+
+  .wa-field-block .field {
+    margin-bottom: 12px;
+  }
+
+  .wa-flash-limit {
+    margin-top: 10px;
+    color: var(--flash-text);
+    background: var(--flash-bg);
+    border: 1px solid var(--flash-border);
+  }
+
+  .wa-instance-card {
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+
+  .wa-instance-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .wa-instance-head h3 {
+    margin: 0;
+    font-size: 18px;
+    color: var(--text);
+    font-weight: 600;
+    word-break: break-word;
+  }
+
+  .wa-btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .wa-page .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .wa-btn-danger {
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+
+  .wa-btn-danger:hover {
+    filter: brightness(1.06);
+  }
+
+  .wa-badge--connected {
+    background: color-mix(in srgb, var(--success) 14%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  }
+
+  .wa-badge--connecting {
+    background: color-mix(in srgb, var(--countdown) 18%, transparent);
+    color: var(--countdown);
+    border-color: color-mix(in srgb, var(--countdown) 35%, transparent);
+  }
+
+  .wa-badge--disconnected {
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+
+  .wa-empty-card {
+    padding: 30px;
+    text-align: center;
+  }
+
+  .wa-add-msg {
+    display: none;
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+    border: 1px solid transparent;
+  }
+
+  .wa-add-msg--error {
+    display: block;
+    color: var(--flash-text);
+    background: var(--flash-bg);
+    border-color: var(--flash-border);
+  }
+
+  .wa-add-msg--ok {
+    display: block;
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  }
+
+  .wa-inline-msg {
+    display: none;
+    margin-top: 12px;
+    padding: 10px 14px;
+    font-size: 13px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+  }
+
+  .wa-inline-msg.wa-inline-msg--ok {
+    display: block;
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  }
+
+  .wa-inline-msg.wa-inline-msg--error {
+    display: block;
+    color: var(--flash-text);
+    background: var(--flash-bg);
+    border-color: var(--flash-border);
+  }
+
+  #qr-modal.wa-qr-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  #qr-modal.wa-qr-modal.is-open {
+    display: flex;
+  }
+
+  .wa-qr-panel {
+    padding: 30px;
+    max-width: min(100%, 360px);
+    width: 100%;
+    text-align: center;
+    position: relative;
+  }
+
+  .wa-qr-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 8px;
+  }
+
+  .wa-qr-close:hover {
+    color: var(--text);
+    background: var(--btn-surface-hover-bg);
+  }
+
+  .wa-qr-panel h3 {
+    margin-top: 0;
+    color: var(--text);
+  }
+
+  #qr-container {
+    background: #fff;
+    padding: 16px;
+    border-radius: 12px;
+    min-height: 250px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .wa-text-danger {
+    color: var(--danger);
+  }
+</style>
+{% endblock %}
+
 {% block body %}
-<div class="section">
-    <div class="container">
-        <div class="hero" style="text-align: left; padding: 0 0 40px;">
-            <h1>Configuração do WhatsApp</h1>
-            <p>Conecte suas instâncias para disparar mensagens automáticas.</p>
+<main class="section wa-page">
+  <div class="container">
+    <header class="wa-page-header">
+      <h1>Configuração do WhatsApp</h1>
+      <p>Conecte suas instâncias para disparar mensagens automáticas.</p>
+    </header>
+
+    <div class="card wa-card">
+      <div class="wa-toolbar">
+        <h3>➕ Adicionar Nova Instância</h3>
+        <span class="badge">Plano {{ active_license_type|upper }} · {{ current_instances_count }}/{{ instance_limit }}</span>
+      </div>
+
+      {% if can_add_instance %}
+      <div id="add-instance-form" class="wa-field-block">
+        <div class="field">
+          <label for="new_instance_name">Nome da Instância</label>
+          <input type="text" id="new_instance_name" placeholder="Ex: whatsapp-02" autocomplete="off">
         </div>
+        <button type="button" class="btn btn-primary" onclick="createInstance()">Criar Instância</button>
+      </div>
+      {% else %}
+      <div class="flash wa-flash-limit">
+        Limite de instâncias atingido. Contate o suporte para contratar instâncias adicionais
+      </div>
+      {% endif %}
 
-        <div class="card" style="padding: 24px; margin-bottom: 24px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
-                <h3 style="margin: 0; font-size: 18px;">➕ Adicionar Nova Instância</h3>
-                <span class="badge" style="font-size: 12px;">Plano {{ active_license_type|upper }} · {{ current_instances_count }}/{{ instance_limit }}</span>
-            </div>
-
-            {% if can_add_instance %}
-            <div id="add-instance-form" style="margin-top: 12px;">
-                <div class="field" style="margin-bottom: 12px;">
-                    <label>Nome da Instância</label>
-                    <input type="text" id="new_instance_name" placeholder="Ex: whatsapp-02">
-                </div>
-                <button class="btn btn-primary" onclick="createInstance()">Criar Instância</button>
-            </div>
-            {% else %}
-            <div class="flash" style="margin-top: 10px; border-color: rgba(255,93,93,.35); background: rgba(255,93,93,.12); color: #ffd4d4;">
-                Limite de instâncias atingido. Contate o suporte para contratar instâncias adicionais
-            </div>
-            {% endif %}
-
-            <div id="add-message-area" style="margin-top: 12px; display: none;"></div>
-        </div>
-
-        <div id="instances-container">
-        {% if instances %}
-            {% for inst in instances %}
-            <div class="card instance-card" data-instance-key="{{ inst.apikey }}" data-instance-id="{{ inst.id }}" style="padding: 24px; margin-bottom: 16px;">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
-                    <div>
-                        <h3 style="margin: 0; font-size: 18px;">{{ inst.name }}</h3>
-                    </div>
-                    <div class="badge instance-status-badge" data-instance-name="{{ inst.name }}"
-                        style="{% if inst.status == 'connected' %}background: rgba(25, 195, 125, 0.12); color: #19c37d; border-color: rgba(25, 195, 125, 0.35);{% elif inst.status == 'connecting' %}background: rgba(255, 193, 7, 0.12); color: #f5c842; border-color: rgba(255, 193, 7, 0.35);{% else %}background: rgba(255, 93, 93, 0.12); color: #ff5d5d; border-color: rgba(255, 93, 93, 0.35);{% endif %}">
-                        {{ 'Conectado' if inst.status == 'connected' else ('Conectando' if inst.status == 'connecting' else 'Desconectado') }}
-                    </div>
-                </div>
-                
-                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn" onclick="getQrCode('{{ inst.apikey }}')" {% if not inst.apikey %}disabled style="opacity: 0.5;"{% endif %}>
-                        QR Code
-                    </button>
-                    <button class="btn" onclick="checkInstanceStatus('{{ inst.apikey }}', '{{ inst.name }}')">
-                        Status
-                    </button>
-                    <button class="btn" onclick="deleteSingleInstance('{{ inst.apikey }}')"
-                        style="background: rgba(255,93,93,.12); color: #ff5d5d; border-color: rgba(255,93,93,.35);">
-                        Deletar
-                    </button>
-                </div>
-                
-                <div class="instance-message-area" style="margin-top: 12px; display: none;"></div>
-            </div>
-            {% endfor %}
-        {% else %}
-            <div class="card" style="padding: 30px; text-align: center;">
-                <p class="muted">Nenhuma instância configurada. Crie uma acima para começar.</p>
-            </div>
-        {% endif %}
-        </div>
-
-        <div id="qr-modal" class="modal-backdrop" style="display: none; position: fixed; inset: 0; z-index: 1000; align-items: center; justify-content: center;">
-            <div class="card" style="padding: 30px; max-width: 350px; text-align: center; position: relative;">
-                <button onclick="closeQrModal()" style="position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;">✕</button>
-                <h3 style="margin-top: 0;">QR Code de Conexão</h3>
-                <p class="muted" style="margin-bottom: 16px;">Escaneie com seu WhatsApp</p>
-                <div id="qr-container" style="background: white; padding: 16px; border-radius: 12px; min-height: 250px; display: flex; align-items: center; justify-content: center;">
-                    <span class="muted">Carregando...</span>
-                </div>
-            </div>
-        </div>
-
-        <script>
-            function showCardMessage(card, msg, type = 'info') {
-                const area = card.querySelector('.instance-message-area');
-                if (!area) return;
-                area.style.display = 'block';
-                area.style.borderRadius = '8px';
-                area.style.padding = '10px 14px';
-                area.style.fontSize = '13px';
-                area.style.borderColor = type === 'error' ? 'rgba(255,93,93,.35)' : 'rgba(25, 195, 125, 0.35)';
-                area.style.background = type === 'error' ? 'rgba(255,93,93,.12)' : 'rgba(25, 195, 125, 0.12)';
-                area.style.color = type === 'error' ? '#ffd4d4' : '#d4ffeb';
-                area.style.border = `1px solid ${area.style.borderColor}`;
-                area.innerText = msg;
-                setTimeout(() => { area.style.display = 'none'; }, 5000);
-            }
-
-            function findCardByKey(apikey) {
-                return document.querySelector(`.instance-card[data-instance-key="${apikey}"]`);
-            }
-
-            async function createInstance() {
-                const name = document.getElementById('new_instance_name').value;
-                const msgArea = document.getElementById('add-message-area');
-                if (!name) {
-                    msgArea.style.display = 'block';
-                    msgArea.innerText = 'Digite um nome para a instância.';
-                    msgArea.style.color = '#ff5d5d';
-                    return;
-                }
-
-                try {
-                    const res = await fetch('/api/whatsapp/init', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ instance_name: name })
-                    });
-                    const data = await res.json();
-                    if (data.error) throw new Error(data.error);
-
-                    msgArea.style.display = 'block';
-                    msgArea.innerText = 'Instância criada! Recarregando...';
-                    msgArea.style.color = '#19c37d';
-                    setTimeout(() => location.reload(), 1000);
-                } catch (e) {
-                    msgArea.style.display = 'block';
-                    msgArea.innerText = e.message;
-                    msgArea.style.color = '#ff5d5d';
-                }
-            }
-
-            function closeQrModal() {
-                document.getElementById('qr-modal').style.display = 'none';
-            }
-
-            async function getQrCode(apikey) {
-                const modal = document.getElementById('qr-modal');
-                const container = document.getElementById('qr-container');
-                modal.style.display = 'flex';
-                container.innerHTML = '<span class="muted">Carregando...</span>';
-
-                try {
-                    const res = await fetch(`/api/whatsapp/qr/${apikey}`);
-                    const data = await res.json();
-                    if (data.error) throw new Error(data.error);
-
-                    let base64Img = data.base64 || data.qrcode;
-                    if (base64Img) {
-                        base64Img = base64Img.replace('data:image/png;base64,', '');
-                        container.innerHTML = `<img src="data:image/png;base64,${base64Img}" style="width:100%;height:100%;object-fit:contain;">`;
-                    } else {
-                        throw new Error('QR Code não recebido.');
-                    }
-                } catch (e) {
-                    container.innerHTML = `<span style="color: #ff5d5d;">${e.message}</span>`;
-                }
-            }
-
-            async function checkInstanceStatus(apikey, instanceName) {
-                const card = findCardByKey(apikey);
-                try {
-                    const res = await fetch(`/api/whatsapp/status/${apikey}`);
-                    const data = await res.json();
-
-                    let isConnected = false;
-                    if (data.instance && data.instance.status === 'connected') isConnected = true;
-                    else if (data.instance_data && (data.instance_data.phone_connected || data.instance_data.status === 'open')) isConnected = true;
-                    else if (data.phone_connected === true) isConnected = true;
-                    else if (data.status === 'CONNECTED' || data.status === 'open') isConnected = true;
-
-                    // Update badge
-                    const badge = card.querySelector('.instance-status-badge');
-                    if (isConnected) {
-                        badge.innerText = 'Conectado';
-                        badge.style.background = 'rgba(25, 195, 125, 0.12)';
-                        badge.style.color = '#19c37d';
-                        badge.style.borderColor = 'rgba(25, 195, 125, 0.35)';
-                        showCardMessage(card, 'Conexão ativa!', 'success');
-                    } else {
-                        badge.innerText = 'Desconectado';
-                        badge.style.background = 'rgba(255, 93, 93, 0.12)';
-                        badge.style.color = '#ff5d5d';
-                        badge.style.borderColor = 'rgba(255, 93, 93, 0.35)';
-                        showCardMessage(card, 'Instância desconectada.', 'error');
-                    }
-                } catch (e) {
-                    if (card) showCardMessage(card, 'Erro ao verificar status.', 'error');
-                }
-            }
-
-            async function deleteSingleInstance(apikey) {
-                if (!confirm('⚠️ ATENÇÃO: Deseja realmente DELETAR esta instância?\n\nEsta ação removerá a instância permanentemente.')) return;
-                
-                const card = findCardByKey(apikey);
-                try {
-                    const res = await fetch(`/api/whatsapp/delete/${apikey}`, { method: 'POST' });
-                    const data = await res.json();
-                    if (data.error) throw new Error(data.error);
-                    showCardMessage(card, 'Deletada! Recarregando...', 'success');
-                    setTimeout(() => location.reload(), 1500);
-                } catch (e) {
-                    showCardMessage(card, e.message, 'error');
-                }
-            }
-        </script>
+      <div id="add-message-area" class="wa-add-msg" aria-live="polite"></div>
     </div>
-</div>
+
+    <div id="instances-container">
+      {% if instances %}
+      {% for inst in instances %}
+      <div class="card wa-instance-card instance-card" data-instance-key="{{ inst.apikey }}" data-instance-id="{{ inst.id }}">
+        <div class="wa-instance-head">
+          <h3>{{ inst.name }}</h3>
+          <span class="badge instance-status-badge wa-badge wa-badge--{{ 'connected' if inst.status == 'connected' else ('connecting' if inst.status == 'connecting' else 'disconnected') }}"
+            data-instance-name="{{ inst.name }}">
+            {{ 'Conectado' if inst.status == 'connected' else ('Conectando' if inst.status == 'connecting' else 'Desconectado') }}
+          </span>
+        </div>
+
+        <div class="wa-btn-row">
+          <button type="button" class="btn" onclick="getQrCode('{{ inst.apikey }}')" {% if not inst.apikey %}disabled{% endif %}>
+            QR Code
+          </button>
+          <button type="button" class="btn" onclick="checkInstanceStatus('{{ inst.apikey }}', '{{ inst.name }}')">
+            Status
+          </button>
+          <button type="button" class="btn wa-btn-danger" onclick="deleteSingleInstance('{{ inst.apikey }}')">
+            Deletar
+          </button>
+        </div>
+
+        <div class="instance-message-area wa-inline-msg" aria-live="polite"></div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="card wa-empty-card">
+        <p class="muted">Nenhuma instância configurada. Crie uma acima para começar.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <div id="qr-modal" class="modal-backdrop wa-qr-modal" role="dialog" aria-modal="true" aria-labelledby="wa-qr-title">
+      <div class="card wa-qr-panel">
+        <button type="button" class="wa-qr-close" onclick="closeQrModal()" aria-label="Fechar">✕</button>
+        <h3 id="wa-qr-title">QR Code de Conexão</h3>
+        <p class="muted" style="margin-bottom: 16px;">Escaneie com seu WhatsApp</p>
+        <div id="qr-container">
+          <span class="muted">Carregando...</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function setInstanceBadge(badge, state) {
+        if (!badge) return;
+        badge.classList.remove('wa-badge--connected', 'wa-badge--connecting', 'wa-badge--disconnected');
+        badge.classList.add('wa-badge--' + state);
+      }
+
+      function showCardMessage(card, msg, type = 'info') {
+        const area = card.querySelector('.instance-message-area');
+        if (!area) return;
+        area.classList.remove('wa-inline-msg--ok', 'wa-inline-msg--error');
+        area.classList.add(type === 'error' ? 'wa-inline-msg--error' : 'wa-inline-msg--ok');
+        area.textContent = msg;
+        setTimeout(function () {
+          area.classList.remove('wa-inline-msg--ok', 'wa-inline-msg--error');
+          area.textContent = '';
+        }, 5000);
+      }
+
+      function findCardByKey(apikey) {
+        return document.querySelector('.instance-card[data-instance-key="' + apikey + '"]');
+      }
+
+      function setAddMessage(text, kind) {
+        const msgArea = document.getElementById('add-message-area');
+        msgArea.textContent = text || '';
+        msgArea.className = 'wa-add-msg';
+        if (!text) return;
+        msgArea.classList.add(kind === 'error' ? 'wa-add-msg--error' : 'wa-add-msg--ok');
+      }
+
+      async function createInstance() {
+        const name = document.getElementById('new_instance_name').value;
+        if (!name) {
+          setAddMessage('Digite um nome para a instância.', 'error');
+          return;
+        }
+
+        try {
+          const res = await fetch('/api/whatsapp/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instance_name: name })
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+
+          setAddMessage('Instância criada! Recarregando...', 'ok');
+          setTimeout(function () { location.reload(); }, 1000);
+        } catch (e) {
+          setAddMessage(e.message, 'error');
+        }
+      }
+
+      function closeQrModal() {
+        document.getElementById('qr-modal').classList.remove('is-open');
+      }
+
+      async function getQrCode(apikey) {
+        const modal = document.getElementById('qr-modal');
+        const container = document.getElementById('qr-container');
+        modal.classList.add('is-open');
+        container.innerHTML = '<span class="muted">Carregando...</span>';
+
+        try {
+          const res = await fetch('/api/whatsapp/qr/' + apikey);
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+
+          let base64Img = data.base64 || data.qrcode;
+          if (base64Img) {
+            base64Img = base64Img.replace('data:image/png;base64,', '');
+            container.innerHTML = '<img src="data:image/png;base64,' + base64Img + '" alt="QR Code" style="width:100%;max-width:280px;height:auto;object-fit:contain;">';
+          } else {
+            throw new Error('QR Code não recebido.');
+          }
+        } catch (e) {
+          container.innerHTML = '<span class="wa-text-danger">' + e.message + '</span>';
+        }
+      }
+
+      async function checkInstanceStatus(apikey, instanceName) {
+        const card = findCardByKey(apikey);
+        try {
+          const res = await fetch('/api/whatsapp/status/' + apikey);
+          const data = await res.json();
+
+          let isConnected = false;
+          if (data.instance && data.instance.status === 'connected') isConnected = true;
+          else if (data.instance_data && (data.instance_data.phone_connected || data.instance_data.status === 'open')) isConnected = true;
+          else if (data.phone_connected === true) isConnected = true;
+          else if (data.status === 'CONNECTED' || data.status === 'open') isConnected = true;
+
+          const badge = card.querySelector('.instance-status-badge');
+          if (isConnected) {
+            badge.textContent = 'Conectado';
+            setInstanceBadge(badge, 'connected');
+            showCardMessage(card, 'Conexão ativa!', 'success');
+          } else {
+            badge.textContent = 'Desconectado';
+            setInstanceBadge(badge, 'disconnected');
+            showCardMessage(card, 'Instância desconectada.', 'error');
+          }
+        } catch (e) {
+          if (card) showCardMessage(card, 'Erro ao verificar status.', 'error');
+        }
+      }
+
+      async function deleteSingleInstance(apikey) {
+        if (!confirm('⚠️ ATENÇÃO: Deseja realmente DELETAR esta instância?\n\nEsta ação removerá a instância permanentemente.')) return;
+
+        const card = findCardByKey(apikey);
+        try {
+          const res = await fetch('/api/whatsapp/delete/' + apikey, { method: 'POST' });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          showCardMessage(card, 'Deletada! Recarregando...', 'success');
+          setTimeout(function () { location.reload(); }, 1500);
+        } catch (e) {
+          showCardMessage(card, e.message, 'error');
+        }
+      }
+
+      (function () {
+        var m = document.getElementById('qr-modal');
+        if (m) {
+          m.addEventListener('click', function (e) {
+            if (e.target === m) closeQrModal();
+          });
+        }
+      })();
+    </script>
+  </div>
+</main>
 {% endblock %}

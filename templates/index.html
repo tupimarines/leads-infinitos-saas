@@ -1,147 +1,83 @@
 {% extends 'base.html' %}
 {% block title %}Gerador de Leads - Leads Infinitos{% endblock %}
-{% block body %}
-<div class="hero">
-  <div class="container">
-    <h1 style="margin-top: 8px;">A próxima geração de prospecção</h1>
-    <p>Extração automática, personalização de mensagens e disparo via WhatsApp. Automatize os primeiros passos da sua
-      prospecção ativa.</p>
-    {% if current_user.is_authenticated %}
-    <div id="license-status" style="margin-top: 16px;">
-      <!-- Status da licença será carregado via JavaScript -->
-    </div>
-    {% endif %}
-  </div>
-</div>
-<div class="section">
-  <div class="container" style="max-width: 1100px;">
 
-    <div class="dashboard-grid">
-
-      <!-- Column 1: Extraction Form -->
-      <div>
-        <div class="card" style="padding: 24px;">
-          <h3 style="margin: 0 0 10px;">Nova Extração</h3>
-          <p class="muted" style="margin-top: 4px;">Os resultados ficarão disponíveis para download ao final.</p>
-          {% with messages = get_flashed_messages() %}
-          {% if messages %}
-          <div class="flash" style="margin-top:12px;">{{ messages[0] }}</div>
-          {% endif %}
-          {% endwith %}
-          <form method="post" action="{{ url_for('scrape') }}" id="scrape-form">
-            <div class="grid" style="gap:14px;">
-              <div class="field">
-                <label>Palavra‑chave</label>
-                <input type="text" name="palavra_chave" required placeholder="Ex.: Veterinária, Dentista, Barbearia">
-              </div>
-              <div class="field">
-                <label>Localizações <span class="muted">(máximo 15)</span></label>
-                <div id="locations-container">
-                  <div class="location-field">
-                    <div class="field" style="display: flex; gap: 8px; align-items: end;">
-                      <input type="text" name="localizacoes[]" required placeholder="Ex.: Portão, Curitiba"
-                        style="flex: 1;">
-                      <button type="button" onclick="removeLocationField(this)"
-                        style="background: #ff5d5d; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">
-                        ×
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <button type="button" onclick="addLocationField()" class="btn btn-primary"
-                style="margin-top: 8px; width: 100%; justify-content: center;">
-                Adicionar Localização
-              </button>
-            </div>
-            <div class="field" style="margin-top: 14px;">
-              <label>Total de resultados</label>
-              <input type="number" name="total" min="1" max="500" required placeholder="preencha a partir de 1">
-            </div>
-            <div style="margin-top: 24px;">
-              <button class="btn btn-primary" type="submit" id="submit-btn"
-                style="width:100%; height:48px; font-weight:700; font-size: 16px;">Iniciar Extração</button>
-            </div>
-          </form>
-        </div>
-
-        <!-- Loading Indicator -->
-        <div id="loading-container" class="card" style="display: none; margin-top: 20px;">
-          <div style="text-align: center; padding: 40px 20px;">
-            <div class="loading-spinner"></div>
-            <h4 style="margin: 24px 0 12px; color: var(--primary);">Processando Extração...</h4>
-            <p style="color: var(--muted); font-size: 16px; margin: 0; line-height: 1.5;">
-              Agora é só esperar. Vá tomar um café enquanto isso... ☕
-            </p>
-            <div
-              style="margin-top: 20px; padding: 16px; background: var(--badge-bg); border-radius: 8px; border: 1px solid var(--badge-border);">
-              <p style="margin: 0; color: var(--primary); font-size: 14px;">
-                <strong>💡 Dica:</strong> O processo pode levar alguns minutos dependendo do número de localizações.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Column 2: Step by Step -->
-      <div>
-        <div class="card" style="padding: 24px; position: sticky; top: 90px;">
-          <h4 style="margin:0 0 16px; text-align: center; color: var(--text);">Passo a Passo</h4>
-          <div class="muted" style="font-size: 14px;">
-            <ol style="padding-left: 20px; line-height: 1.8; margin: 0;">
-              <li style="margin-bottom: 8px;">Selecione o segmento e local. <br><span
-                  style="font-size:12px; opacity:0.7;">(Ex: Dentista, Curitiba)</span></li>
-              <li style="margin-bottom: 8px;">Adicione até 15 localizações.</li>
-              <li style="margin-bottom: 8px;">Clique em <strong style="color:var(--primary);">Iniciar Extração</strong>.</li>
-              <li style="margin-bottom: 8px;">Confira o resultado na aba <strong style="color:var(--primary);">Jobs</strong>.
-              </li>
-              <li style="margin-bottom: 8px;">Conecte seu WhatsApp.</li>
-              <li>Crie campanhas e venda mais! 🚀</li>
-            </ol>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-</div>
-
-{% if current_user.is_authenticated %}
-<script>
-  // Verificar status da licença
-  fetch('/api/verify-license')
-    .then(response => response.json())
-    .then(data => {
-      const statusDiv = document.getElementById('license-status');
-      if (data.has_active_license) {
-        statusDiv.innerHTML = '<div class="badge" style="background: rgba(25,195,125,.18); border-color: rgba(25,195,125,.35); color: var(--success);">✓ Licença Ativa</div>';
-      } else {
-        statusDiv.innerHTML = '<div class="badge" style="background: rgba(255,93,93,.18); border-color: rgba(255,93,93,.35); color: var(--danger);">⚠ Licença Expirada</div>';
-      }
-    })
-    .catch(error => {
-      console.error('Erro ao verificar licença:', error);
-    });
-</script>
-{% endif %}
-
+{% block extra_head %}
 <style>
-  /* Custom Dashboard Grid for Layout Control */
+  .home-section {
+    padding-top: 8px;
+    padding-bottom: 40px;
+  }
+
   .dashboard-grid {
     display: grid;
     grid-template-columns: 1fr;
     gap: 24px;
+    align-items: start;
   }
 
   @media (min-width: 900px) {
     .dashboard-grid {
-      grid-template-columns: 1.8fr 1fr;
-      /* 2/3 for Form, 1/3 for Guide */
-      align-items: start;
+      grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
     }
   }
 
-  /* Loading Spinner Animation */
+  .home-card {
+    padding: 24px;
+  }
+
+  .location-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  #locations-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  @media (min-width: 560px) {
+    .location-row {
+      flex-direction: row;
+      align-items: flex-end;
+    }
+
+    .location-row .location-input-wrap {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+
+  .btn-remove-location {
+    background: var(--danger);
+    color: #fff;
+    border: none;
+    padding: 0 16px;
+    min-height: 44px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .btn-remove-location:hover {
+    filter: brightness(1.08);
+  }
+
+  .steps-card {
+    position: static;
+  }
+
+  @media (min-width: 900px) {
+    .steps-card {
+      position: sticky;
+      top: 88px;
+    }
+  }
+
   .loading-spinner {
     width: 40px;
     height: 40px;
@@ -204,6 +140,128 @@
     }
   }
 </style>
+{% endblock %}
+
+{% block body %}
+<main>
+  <div class="hero">
+    <div class="container">
+      <h1 style="margin-top: 8px;">A próxima geração de prospecção</h1>
+      <p>Extração automática, personalização de mensagens e disparo via WhatsApp. Automatize os primeiros passos da sua
+        prospecção ativa.</p>
+      {% if current_user.is_authenticated %}
+      <div id="license-status" style="margin-top: 16px;">
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="section home-section">
+    <div class="container">
+      <div class="dashboard-grid">
+
+        <div>
+          <div class="card home-card">
+            <h3 style="margin: 0 0 10px;">Nova Extração</h3>
+            <p class="muted" style="margin-top: 4px;">Os resultados ficarão disponíveis para download ao final.</p>
+            {% with messages = get_flashed_messages() %}
+            {% if messages %}
+            <div class="flash" style="margin-top:12px;">{{ messages[0] }}</div>
+            {% endif %}
+            {% endwith %}
+            <form method="post" action="{{ url_for('scrape') }}" id="scrape-form">
+              <div class="grid" style="gap:14px;">
+                <div class="field">
+                  <label>Palavra‑chave</label>
+                  <input type="text" name="palavra_chave" required placeholder="Ex.: Veterinária, Dentista, Barbearia">
+                </div>
+                <div class="field">
+                  <label>Localizações <span class="muted">(máximo 15)</span></label>
+                  <div id="locations-container">
+                    <div class="location-field">
+                      <div class="location-row">
+                        <div class="location-input-wrap">
+                          <input type="text" name="localizacoes[]" required placeholder="Ex.: Portão, Curitiba">
+                        </div>
+                        <button type="button" class="btn-remove-location" onclick="removeLocationField(this)"
+                          aria-label="Remover localização">×</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <button type="button" onclick="addLocationField()" class="btn btn-primary"
+                  style="margin-top: 8px; width: 100%; justify-content: center;">
+                  Adicionar Localização
+                </button>
+              </div>
+              <div class="field" style="margin-top: 14px;">
+                <label>Total de resultados</label>
+                <input type="number" name="total" min="1" max="500" required placeholder="preencha a partir de 1">
+              </div>
+              <div style="margin-top: 24px;">
+                <button class="btn btn-primary" type="submit" id="submit-btn"
+                  style="width:100%; height:48px; font-weight:700; font-size: 16px;">Iniciar Extração</button>
+              </div>
+            </form>
+          </div>
+
+          <div id="loading-container" class="card home-card" style="display: none; margin-top: 20px;">
+            <div style="text-align: center; padding: 40px 20px;">
+              <div class="loading-spinner"></div>
+              <h4 style="margin: 24px 0 12px; color: var(--primary);">Processando Extração...</h4>
+              <p style="color: var(--muted); font-size: 16px; margin: 0; line-height: 1.5;">
+                Agora é só esperar. Vá tomar um café enquanto isso... ☕
+              </p>
+              <div
+                style="margin-top: 20px; padding: 16px; background: var(--badge-bg); border-radius: 8px; border: 1px solid var(--badge-border);">
+                <p style="margin: 0; color: var(--primary); font-size: 14px;">
+                  <strong>💡 Dica:</strong> O processo pode levar alguns minutos dependendo do número de localizações.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="card home-card steps-card">
+            <h4 style="margin:0 0 16px; text-align: center; color: var(--text);">Passo a Passo</h4>
+            <div class="muted" style="font-size: 14px;">
+              <ol style="padding-left: 20px; line-height: 1.8; margin: 0;">
+                <li style="margin-bottom: 8px;">Selecione o segmento e local. <br><span
+                    style="font-size:12px; opacity:0.7;">(Ex: Dentista, Curitiba)</span></li>
+                <li style="margin-bottom: 8px;">Adicione até 15 localizações.</li>
+                <li style="margin-bottom: 8px;">Clique em <strong style="color:var(--primary);">Iniciar Extração</strong>.</li>
+                <li style="margin-bottom: 8px;">Confira o resultado na aba <strong style="color:var(--primary);">Jobs</strong>.
+                </li>
+                <li style="margin-bottom: 8px;">Conecte seu WhatsApp.</li>
+                <li>Crie campanhas e venda mais! 🚀</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</main>
+
+{% if current_user.is_authenticated %}
+<script>
+  fetch('/api/verify-license')
+    .then(response => response.json())
+    .then(data => {
+      const statusDiv = document.getElementById('license-status');
+      if (data.has_active_license) {
+        statusDiv.innerHTML = '<div class="badge" style="background: rgba(25,195,125,.18); border-color: rgba(25,195,125,.35); color: var(--success);">✓ Licença Ativa</div>';
+      } else {
+        statusDiv.innerHTML = '<div class="badge" style="background: rgba(255,93,93,.18); border-color: rgba(255,93,93,.35); color: var(--danger);">⚠ Licença Expirada</div>';
+      }
+    })
+    .catch(error => {
+      console.error('Erro ao verificar licença:', error);
+    });
+</script>
+{% endif %}
 
 <script>
   let locationCount = 1;
@@ -218,13 +276,13 @@
     const newField = document.createElement('div');
     newField.className = 'location-field';
     newField.innerHTML = `
-        <div class="field" style="display: flex; gap: 8px; align-items: end;">
-          <input type="text" name="localizacoes[]" required 
-                 placeholder="Ex.: Portão, Curitiba" style="flex: 1;">
-          <button type="button" onclick="removeLocationField(this)" 
-                  style="background: #ff5d5d; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">
-            ×
-          </button>
+        <div class="location-row">
+          <div class="location-input-wrap">
+            <input type="text" name="localizacoes[]" required
+                   placeholder="Ex.: Portão, Curitiba">
+          </div>
+          <button type="button" class="btn-remove-location" onclick="removeLocationField(this)"
+            aria-label="Remover localização">×</button>
         </div>
       `;
     container.appendChild(newField);
@@ -233,11 +291,10 @@
 
   function removeLocationField(button) {
     if (locationCount <= 1) return;
-    button.parentElement.parentElement.remove();
+    button.closest('.location-field').remove();
     locationCount--;
   }
 
-  // Validação no submit do formulário
   document.querySelector('form').addEventListener('submit', function (e) {
     const locations = document.querySelectorAll('input[name="localizacoes[]"]');
     if (locations.length === 0) {
@@ -246,7 +303,6 @@
       return;
     }
 
-    // Verificar se todos os campos estão preenchidos
     for (let input of locations) {
       if (!input.value.trim()) {
         e.preventDefault();
@@ -255,11 +311,9 @@
       }
     }
 
-    // Mostrar loading
     showLoading();
   });
 
-  // Handle Tab to add new location and Enter to show confirmation popup
   document.getElementById('locations-container').addEventListener('keydown', function (e) {
     if (e.target.name !== 'localizacoes[]') return;
 
@@ -267,11 +321,9 @@
       const inputs = document.querySelectorAll('input[name="localizacoes[]"]');
       const lastInput = inputs[inputs.length - 1];
 
-      // If we're on the last input and Tab is pressed, add new field
       if (e.target === lastInput && locationCount < 15) {
         e.preventDefault();
         addLocationField();
-        // Focus the new input after a small delay
         setTimeout(() => {
           const newInputs = document.querySelectorAll('input[name="localizacoes[]"]');
           newInputs[newInputs.length - 1].focus();
@@ -285,7 +337,6 @@
     }
   });
 
-  // Confirmation popup
   function showExtractionConfirmPopup() {
     const totalInput = document.querySelector('input[name="total"]');
     if (!totalInput || !totalInput.value) {
@@ -294,7 +345,6 @@
       return;
     }
 
-    // Create modal overlay
     const overlay = document.createElement('div');
     overlay.id = 'extraction-confirm-overlay';
     overlay.className = 'extraction-confirm-layer';
@@ -321,7 +371,6 @@
       document.getElementById('scrape-form').submit();
     };
 
-    // Close on overlay click
     overlay.onclick = function (e) {
       if (e.target === overlay) overlay.remove();
     };
@@ -332,7 +381,6 @@
     const loadingContainer = document.getElementById('loading-container');
     const submitBtn = document.getElementById('submit-btn');
 
-    // Esconder formulário e mostrar loading
     form.style.display = 'none';
     loadingContainer.style.display = 'block';
     submitBtn.disabled = true;

@@ -275,10 +275,13 @@
     }
 
     .nav-inner {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      height: 64px;
+      min-height: 64px;
+      padding-block: 8px;
+      gap: 12px;
     }
 
     .brand {
@@ -287,6 +290,8 @@
       gap: 10px;
       font-weight: 700;
       letter-spacing: .2px;
+      flex-shrink: 0;
+      min-width: 0;
     }
 
     .brand-badge {
@@ -341,8 +346,15 @@
 
     .nav-cta {
       display: flex;
-      gap: 10px;
+      flex-wrap: wrap;
+      gap: 8px 10px;
       align-items: center;
+      justify-content: flex-end;
+    }
+
+    .nav-cta .btn {
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .btn {
@@ -499,6 +511,14 @@
       color: var(--muted);
     }
 
+    /* Conteúdo principal (páginas sem Tailwind) — alinha com max-width do .container */
+    .page-shell {
+      width: 100%;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 20px 40px;
+    }
+
     .footer {
       padding: 28px 0;
       color: var(--muted);
@@ -528,11 +548,14 @@
       .nav-cta {
         display: none;
         position: absolute;
-        top: 64px;
+        top: 100%;
         left: 0;
         right: 0;
+        z-index: 30;
         background: var(--nav-mobile-bg);
         flex-direction: column;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
         padding: 20px;
         border-bottom: 1px solid var(--nav-mobile-border);
         box-shadow: var(--nav-mobile-shadow);
@@ -601,13 +624,11 @@
   <div class="app-root">
     <div class="nav">
       <div class="container nav-inner">
-        <div class="brand">
-          <a href="{{ url_for('index') }}" class="brand" style="color: inherit; text-decoration: none;">
-            <img src="{{ url_for('static', filename='img/rocket-logo.png') }}" alt="Leads Infinitos"
-              style="height: 38px; width: auto; filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));">
-            <div>Leads Infinitos</div>
-          </a>
-        </div>
+        <a href="{{ url_for('index') }}" class="brand" style="color: inherit; text-decoration: none;">
+          <img src="{{ url_for('static', filename='img/rocket-logo.png') }}" alt="Leads Infinitos"
+            style="height: 38px; width: auto; filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));">
+          <span class="brand-text">Leads Infinitos</span>
+        </a>
         <div class="nav-right">
           <button type="button" class="mobile-menu-btn" aria-expanded="false" aria-controls="nav-cta-menu">☰</button>
           <button type="button" id="theme-toggle" class="theme-toggle" aria-pressed="false"
