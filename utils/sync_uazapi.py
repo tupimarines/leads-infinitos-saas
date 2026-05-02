@@ -589,23 +589,26 @@ def reconcile_send_leads_via_message_find_for_scope(
     if scope_count == 0:
         return set(), set(), 0
 
+    debug_sync = os.environ.get("DEBUG_SYNC_UAZAPI") == "1"
+
     if not _ua_message_find_enabled():
-        print(
-            json.dumps(
-                {
-                    "event": "uazapi_message_find_disabled_blocking_reconcile",
-                    "campaign_id": campaign_id,
-                    "send_id": send_id,
-                    "folder_id": fid,
-                    "find_scope_count": scope_count,
-                    "find_positive_count": 0,
-                    "find_negative_count": scope_count,
-                    "message_find_pages_used": 0,
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
+        if debug_sync:
+            print(
+                json.dumps(
+                    {
+                        "event": "uazapi_message_find_disabled_blocking_reconcile",
+                        "campaign_id": campaign_id,
+                        "send_id": send_id,
+                        "folder_id": fid,
+                        "find_scope_count": scope_count,
+                        "find_positive_count": 0,
+                        "find_negative_count": scope_count,
+                        "message_find_pages_used": 0,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
         return set(), set(), 0
 
     sent_ids, failed_ids, pages_used = reconcile_leads_via_message_find(
@@ -619,22 +622,23 @@ def reconcile_send_leads_via_message_find_for_scope(
         send_row=send_row,
     )
     pos = len(sent_ids)
-    print(
-        json.dumps(
-            {
-                "event": "uazapi_reconcile_message_find_scope",
-                "campaign_id": campaign_id,
-                "send_id": send_id,
-                "folder_id": fid,
-                "find_scope_count": scope_count,
-                "find_positive_count": pos,
-                "find_negative_count": max(0, scope_count - pos),
-                "message_find_pages_used": int(pages_used),
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
+    if debug_sync:
+        print(
+            json.dumps(
+                {
+                    "event": "uazapi_reconcile_message_find_scope",
+                    "campaign_id": campaign_id,
+                    "send_id": send_id,
+                    "folder_id": fid,
+                    "find_scope_count": scope_count,
+                    "find_positive_count": pos,
+                    "find_negative_count": max(0, scope_count - pos),
+                    "message_find_pages_used": int(pages_used),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
     return sent_ids, failed_ids, pages_used
 
 

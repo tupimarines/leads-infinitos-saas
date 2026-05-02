@@ -82,9 +82,19 @@ from utils.config import (
 # Cliente: Authorization: Bearer <token> ou header X-Provision-Token com o mesmo valor.
 PROVISION_API_SECRET = (os.environ.get("PROVISION_API_SECRET") or "").strip()
 
-# Throttling para warning de stats Uazapi (evitar spam a cada polling)
+# Throttling para warning de stats Uazapi (evitar spam a cada polling do dashboard)
 _stats_uazapi_warning_last = {}  # campaign_id -> timestamp
-STATS_UAZAPI_WARNING_COOLDOWN = 300  # 5 min
+
+
+def _stats_uazapi_warning_cooldown_sec() -> int:
+    raw = (os.environ.get("STATS_UAZAPI_WARNING_COOLDOWN_SEC") or "3600").strip()
+    try:
+        return max(120, min(int(raw), 86400))
+    except ValueError:
+        return 3600
+
+
+STATS_UAZAPI_WARNING_COOLDOWN = _stats_uazapi_warning_cooldown_sec()
 UAZAPI_SYNC_WEB_INTERVAL_MINUTES = 10
 
 # Configuração Redis

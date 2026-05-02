@@ -10,24 +10,25 @@ load_dotenv()
 # Configuração de Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("worker")
+logging.getLogger("rq.worker").setLevel(logging.WARNING)
 
 # Importar módulos de tarefas para garantir que estejam disponíveis
 # Isso é crucial para que o RQ encontre as funções
 try:
     import main  # Contém tarefas de scraping
-    logger.info("Módulo main importado com sucesso.")
+    logger.debug("Módulo main importado com sucesso.")
 except ImportError as e:
     logger.warning(f"Não foi possível importar main: {e}")
 
 try:
     import worker_email  # Contém tarefas de email
-    logger.info("Módulo worker_email importado com sucesso.")
+    logger.debug("Módulo worker_email importado com sucesso.")
 except ImportError as e:
     logger.warning(f"Não foi possível importar worker_email: {e}")
 
 try:
     import worker_scraper  # Contém tarefas de scraping (wrapper)
-    logger.info("Módulo worker_scraper importado com sucesso.")
+    logger.debug("Módulo worker_scraper importado com sucesso.")
 except ImportError as e:
     logger.warning(f"Não foi possível importar worker_scraper: {e}")
 

@@ -11,6 +11,7 @@ For each cadence-enabled campaign:
 """
 
 import os
+import logging
 import time
 import json
 import random
@@ -64,6 +65,11 @@ from utils.cadence_uazapi import merge_fu1_into_campaign_db
 from utils.config import SUPER_ADMIN_EMAILS, USE_MESSAGE_OUTBOX
 from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
 from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
+from utils.initial_chunk_schedule_target import (
+    cadence_next_send_datetime,
+    resolve_initial_chunk_schedule_target,
+    uazapi_same_day_initial_chunk_after_unlock_enabled,
+)
 # Slot matinal automático do chunk initial: ``cadence_next_initial_send_slot`` em
 # ``utils/initial_chunk_schedule_target.py`` (sucessor de ``_next_initial_send_slot``).
 from utils.uazapi_error_taxonomy import (
@@ -80,6 +86,8 @@ from utils.uazapi_support_notify import (
 
 from worker_message_outbox import process_message_outbox_tick
 from utils.outbox_prometheus import maybe_start_outbox_metrics_http_server
+
+_logger_cadence = logging.getLogger(__name__)
 
 
 def _campaign_has_message_outbox(conn, campaign_id: int) -> bool:
@@ -1895,7 +1903,7 @@ def _sync_active_stage_folders(conn):
 # --- MAIN LOGIC ---
 
 def process_cadence():
-    print("🔄 Starting Intelligent Cadence Worker...")
+    _logger_cadence.debug("Intelligent Cadence Worker iniciado.")
     maybe_start_outbox_metrics_http_server()
     last_stage_sync_at = None
     last_disconnect_pause_check_mono: float | None = None

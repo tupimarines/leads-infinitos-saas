@@ -1,4 +1,5 @@
 import os
+import logging
 import time
 import re
 from datetime import datetime, timedelta
@@ -8,6 +9,8 @@ from dotenv import load_dotenv
 import pytz
 
 load_dotenv()
+
+_logger_sender = logging.getLogger(__name__)
 
 BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 
@@ -290,7 +293,7 @@ def process_campaigns():
     """
     Loop do worker: sincroniza uso/leads Uazapi periodicamente (envio em massa é pela API Uazapi).
     """
-    print("Starting Sender Worker Loop...")
+    _logger_sender.debug("Sender worker loop iniciado.")
     last_uazapi_usage_sync_at = None
     
     while True:

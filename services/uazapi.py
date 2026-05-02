@@ -6,6 +6,7 @@ deletar e enviar mensagens. URL base via UAZAPI_URL; admintoken via UAZAPI_ADMIN
 """
 
 import base64
+import hashlib
 import json
 import os
 import time
@@ -130,16 +131,49 @@ class UazapiService:
         """
         url = f"{self.base_url}/instance/status"
         headers = {"token": token}
+        tok = (token or "").strip()
+
+        def _maybe_log_get_status_401(resp) -> None:
+            if resp is None or resp.status_code != 401:
+                return
+            body = (getattr(resp, "text", None) or "").lower()
+            if "invalid token" not in body:
+                return
+            digest = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
+            key = ("get_status", digest)
+            now = time.monotonic()
+            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
+                _401_log_last[key] = now
+                print(
+                    "⚠️ [Uazapi] 401 Invalid token (get_status). Atualize o apikey da instância."
+                )
 
         try:
             response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 401:
+                body_l = (response.text or "").lower()
+                if "invalid token" in body_l:
+                    _maybe_log_get_status_401(response)
+                    return None
             if response.status_code != 200:
-                print(f"❌ [Uazapi] get_status Status: {response.status_code}")
-                print(f"❌ [Uazapi] get_status Body: {response.text}")
-            response.raise_for_status()
+                if os.environ.get("UAZAPI_DEBUG", "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                ):
+                    print(
+                        f"❌ [Uazapi] get_status Status: {response.status_code} "
+                        f"Body: {(response.text or '')[:500]}"
+                    )
+                return None
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"❌ [Uazapi] Error getting status: {e}")
+            if os.environ.get("UAZAPI_DEBUG", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                print(f"❌ [Uazapi] Error getting status: {e}")
             return None
 
     def delete_instance(self, token: str) -> Tuple[bool, Optional[int]]:
