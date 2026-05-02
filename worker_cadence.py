@@ -532,11 +532,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
     campaign_clause = (
         "AND css.campaign_id = %s" if only_campaign_id is not None else ""
     )
-    lock_sql = (
-        ""
-        if dry_run
-        else "FOR UPDATE OF campaign_stage_sends SKIP LOCKED"
-    )
+    # PostgreSQL: com JOIN, FOR UPDATE OF deve usar o alias da relação no FROM, não o nome da tabela.
+    lock_sql = "" if dry_run else "FOR UPDATE OF css SKIP LOCKED"
     params = [cutoff]
     if only_campaign_id is not None:
         params.append(int(only_campaign_id))
