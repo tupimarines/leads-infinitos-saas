@@ -27,10 +27,15 @@
       --radius: 14px;
       --radius-sm: 10px;
       --radius-lg: 18px;
+      --video-overlay-bg: linear-gradient(180deg, rgba(11, 16, 32, .62) 0%, rgba(11, 16, 32, .52) 45%, rgba(11, 16, 32, .68) 100%);
     }
 
     * {
       box-sizing: border-box;
+    }
+
+    html {
+      background: var(--bg);
     }
 
     html,
@@ -42,18 +47,41 @@
       margin: 0;
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji';
       color: var(--text);
-      background: radial-gradient(1200px 800px at 10% -10%, rgba(139, 92, 246, .12), transparent 50%),
-        radial-gradient(1000px 700px at 90% -20%, rgba(79, 124, 255, .12), transparent 50%),
-        linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
+      background: var(--bg);
+      min-height: 100%;
     }
 
-    body.themed-bg {
-      background: url("{{ url_for('static', filename='img/bg-pattern.png') }}") repeat,
-      linear-gradient(180deg, #0b1020 0%, #0b1020 100%);
-      background-size: 1400px auto, cover;
-      /* Adjust size as needed */
-      background-blend-mode: overlay, normal;
-      background-attachment: fixed;
+    .bg-video-shell {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      overflow: hidden;
+      pointer-events: none;
+      min-height: 100svh;
+    }
+
+    .bg-video-shell video {
+      width: 100%;
+      height: 100%;
+      min-width: 100%;
+      min-height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .bg-video-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background: var(--video-overlay-bg);
+    }
+
+    .app-root {
+      position: relative;
+      z-index: 2;
+      min-height: 100vh;
+      min-height: 100svh;
     }
 
     a {
@@ -366,43 +394,52 @@
   {% block extra_head %}{% endblock %}
 </head>
 
-<body class="themed-bg">
-  <div class="nav">
-    <div class="container nav-inner">
-      <div class="brand">
-        <a href="{{ url_for('index') }}" class="brand" style="color: inherit; text-decoration: none;">
-          <img src="{{ url_for('static', filename='img/rocket-logo.png') }}" alt="Leads Infinitos"
-            style="height: 38px; width: auto; filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));">
-          <div>Leads Infinitos</div>
-        </a>
-      </div>
-      <button class="mobile-menu-btn">☰</button>
-      <div class="nav-cta">
-        {% if current_user.is_authenticated %}
-        {% if current_user.is_admin %}
-        <a class="btn btn-primary" href="{{ url_for('admin_dashboard') }}"
-          style="background: linear-gradient(135deg, #ff4f4f, #f65c5c); box-shadow: 0 5px 15px rgba(255, 79, 79, 0.3);">Admin</a>
-        {% endif %}
-        <a class="btn" href="{{ url_for('dashboard') }}">Dashboard</a>
-        <a class="btn" href="{{ url_for('index') }}">Início</a>
-        <a class="btn" href="{{ url_for('jobs') }}">Jobs</a>
-        <a class="btn" href="{{ url_for('campaigns_list') }}">Campanhas</a>
-        <a class="btn" href="{{ url_for('whatsapp_config') }}">WhatsApp</a>
-        <a class="btn" href="{{ url_for('account') }}">Minha Conta</a>
-        <a class="btn" href="{{ url_for('logout') }}">Sair</a>
-        {% else %}
-        <a class="btn" href="{{ url_for('login') }}">Entrar</a>
-        <a class="btn btn-primary" href="{{ url_for('register') }}">Criar conta</a>
-        {% endif %}
+<body>
+  <div class="bg-video-shell" aria-hidden="true">
+    <video id="bg-video" autoplay muted loop playsinline preload="metadata"
+      poster="{{ url_for('static', filename='img/favicon.png') }}">
+      <source src="{{ url_for('static', filename='video/gemini-veo-video.mp4') }}" type="video/mp4">
+    </video>
+  </div>
+  <div class="bg-video-overlay" aria-hidden="true"></div>
+
+  <div class="app-root">
+    <div class="nav">
+      <div class="container nav-inner">
+        <div class="brand">
+          <a href="{{ url_for('index') }}" class="brand" style="color: inherit; text-decoration: none;">
+            <img src="{{ url_for('static', filename='img/rocket-logo.png') }}" alt="Leads Infinitos"
+              style="height: 38px; width: auto; filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));">
+            <div>Leads Infinitos</div>
+          </a>
+        </div>
+        <button class="mobile-menu-btn">☰</button>
+        <div class="nav-cta">
+          {% if current_user.is_authenticated %}
+          {% if current_user.is_admin %}
+          <a class="btn btn-primary" href="{{ url_for('admin_dashboard') }}"
+            style="background: linear-gradient(135deg, #ff4f4f, #f65c5c); box-shadow: 0 5px 15px rgba(255, 79, 79, 0.3);">Admin</a>
+          {% endif %}
+          <a class="btn" href="{{ url_for('dashboard') }}">Dashboard</a>
+          <a class="btn" href="{{ url_for('index') }}">Início</a>
+          <a class="btn" href="{{ url_for('jobs') }}">Jobs</a>
+          <a class="btn" href="{{ url_for('campaigns_list') }}">Campanhas</a>
+          <a class="btn" href="{{ url_for('whatsapp_config') }}">WhatsApp</a>
+          <a class="btn" href="{{ url_for('account') }}">Minha Conta</a>
+          <a class="btn" href="{{ url_for('logout') }}">Sair</a>
+          {% else %}
+          <a class="btn" href="{{ url_for('login') }}">Entrar</a>
+          <a class="btn btn-primary" href="{{ url_for('register') }}">Criar conta</a>
+          {% endif %}
+        </div>
       </div>
     </div>
-  </div>
-  </div>
 
-  {% block body %}{% endblock %}
+    {% block body %}{% endblock %}
 
-  <div class="footer">
-    <div class="container">© 2026 Leads Infinitos. Todos os direitos reservados.</div>
+    <div class="footer">
+      <div class="container">© 2026 Leads Infinitos. Todos os direitos reservados.</div>
+    </div>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
@@ -414,6 +451,12 @@
         menuBtn.addEventListener('click', function () {
           navCta.classList.toggle('active');
         });
+      }
+
+      var bgVideo = document.getElementById('bg-video');
+      if (bgVideo && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        bgVideo.pause();
+        bgVideo.removeAttribute('autoplay');
       }
     });
   </script>
