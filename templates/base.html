@@ -346,15 +346,45 @@
 
     .nav-cta {
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px 10px;
+      flex-wrap: nowrap;
+      gap: 8px;
       align-items: center;
       justify-content: flex-end;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+      padding-bottom: 2px;
+    }
+
+    .nav-cta::-webkit-scrollbar {
+      height: 5px;
+    }
+
+    .nav-cta::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--muted) 50%, transparent);
+    }
+
+    .nav-cta::-webkit-scrollbar-track {
+      background: transparent;
     }
 
     .nav-cta .btn {
       white-space: nowrap;
       flex-shrink: 0;
+    }
+
+    /* Desktop estreito: botões um pouco mais compactos para caber sem scroll */
+    @media (min-width: 901px) and (max-width: 1180px) {
+      .nav-cta .btn {
+        padding: 0 11px;
+        font-size: 13px;
+      }
     }
 
     .btn {
@@ -555,6 +585,10 @@
         background: var(--nav-mobile-bg);
         flex-direction: column;
         flex-wrap: nowrap;
+        flex: none;
+        min-width: auto;
+        overflow-x: visible;
+        overflow-y: visible;
         justify-content: flex-start;
         padding: 20px;
         border-bottom: 1px solid var(--nav-mobile-border);
