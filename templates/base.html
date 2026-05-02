@@ -30,6 +30,10 @@
       --video-overlay-bg: linear-gradient(180deg, rgba(11, 16, 32, .62) 0%, rgba(11, 16, 32, .52) 45%, rgba(11, 16, 32, .68) 100%);
     }
 
+    [data-theme="light"] {
+      --video-overlay-bg: linear-gradient(180deg, rgba(247, 244, 239, .88) 0%, rgba(250, 248, 245, .82) 45%, rgba(247, 244, 239, .9) 100%);
+    }
+
     * {
       box-sizing: border-box;
     }
@@ -409,6 +413,13 @@
 </head>
 
 <body class="{% block body_class %}themed-bg{% endblock %}">
+  <div class="bg-video-shell" aria-hidden="true">
+    <video id="bg-video" autoplay muted loop playsinline preload="metadata"
+      poster="{{ url_for('static', filename='img/favicon.png') }}">
+      <source src="{{ url_for('static', filename='video/gemini-veo-video.mp4') }}" type="video/mp4">
+    </video>
+  </div>
+  <div class="bg-video-overlay" aria-hidden="true"></div>
   {% block background_media %}{% endblock %}
 
   <div class="app-root">

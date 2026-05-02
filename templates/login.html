@@ -1,14 +1,5 @@
 {% extends 'base.html' %}
 {% block body_class %}login-page{% endblock %}
-{% block background_media %}
-<div class="bg-video-shell" aria-hidden="true">
-  <video id="bg-video" autoplay muted loop playsinline preload="metadata"
-    poster="{{ url_for('static', filename='img/favicon.png') }}">
-    <source src="{{ url_for('static', filename='video/gemini-veo-video.mp4') }}" type="video/mp4">
-  </video>
-</div>
-<div class="bg-video-overlay" aria-hidden="true"></div>
-{% endblock %}
 {% block title %}Entrar - Leads Infinitos{% endblock %}
 {% block body %}
   <div class="hero">

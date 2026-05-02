@@ -111,7 +111,7 @@ A combinação **creme/branco gelo + bordas roxas + toque rosado nos gradientes*
 
 - [x] **Task 1:** Copiar `gemini-veo-video.mp4` da raiz do repositório para `static/video/gemini-veo-video.mp4` (criar pasta se necessário). Garantir que o arquivo não seja ignorado pelo `.gitignore` se o projeto for versionar o asset (se for grande, documentar em Notes uso de Git LFS ou hospedagem externa).
 
-- [ ] **Task 2:** Em `templates/base.html`, adicionar estrutura:
+- [x] **Task 2:** Em `templates/base.html`, adicionar estrutura:
   - `<div class="bg-video-shell" aria-hidden="true">` contendo `<video>` com `autoplay`, `muted`, `loop`, `playsinline`, `preload="metadata"`, `poster` opcional (primeiro frame exportado ou placeholder em `static/img/`).
   - `<div class="bg-video-overlay"></div>` com opacidade/cor definidas por `[data-theme]`.
   - Wrapper `.app-root` envolvendo `.nav`, `{% block body %}`, `.footer` com `position: relative; z-index` acima do vídeo.
