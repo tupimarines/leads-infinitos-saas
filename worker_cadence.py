@@ -464,6 +464,80 @@ def _stale_recovery_enabled():
     )
 
 
+def _stale_recovery_verbose_logging() -> bool:
+    """Emite JSON de recovery de bump com sucesso (padrão: off; liga com UAZAPI_STALE_RECOVERY_VERBOSE=1)."""
+    return os.environ.get("UAZAPI_STALE_RECOVERY_VERBOSE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+_cadence_outside_window_log_last_m: float = 0.0
+
+
+def _should_log_cadence_outside_send_window() -> bool:
+    """
+    Evita repetir a cada 30s quando a primeira campanha de cadence está fora da janela.
+    Config: ``CADENCE_OUTSIDE_WINDOW_LOG_MINUTES`` (default 20, máx. 240).
+    """
+    global _cadence_outside_window_log_last_m
+    try:
+        minutes = float((os.environ.get("CADENCE_OUTSIDE_WINDOW_LOG_MINUTES") or "20").strip())
+    except (TypeError, ValueError):
+        minutes = 20.0
+    minutes = max(1.0, min(float(minutes), 240.0))
+    now = time.monotonic()
+    interval = minutes * 60.0
+    if now - _cadence_outside_window_log_last_m < interval:
+        return False
+    _cadence_outside_window_log_last_m = now
+    return True
+
+
+def _bump_stale_send_scheduled_for_unique(
+    conn,
+    *,
+    send_id: int,
+    campaign_id,
+    instance_id,
+    next_sf,
+    max_slip_seconds: int = 600,
+):
+    """
+    Aplica ``scheduled_for`` evitando violar ``uq_campaign_stage_sends_window``.
+    Se ``next_sf`` colidir com outro send ``scheduled`` da mesma (campanha, initial, instância),
+    desfaz o segundo a segundo até caber. Retorna (data aplicada | None, erro | None).
+    """
+    if next_sf is None:
+        return None, "next_sf_none"
+    for slip in range(max_slip_seconds + 1):
+        candidate = next_sf if slip == 0 else (next_sf + timedelta(seconds=slip))
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM campaign_stage_sends
+                WHERE campaign_id = %s AND stage = 'initial' AND (instance_id IS NOT DISTINCT FROM %s)
+                  AND scheduled_for = %s AND status = 'scheduled' AND id <> %s
+                LIMIT 1
+                """,
+                (campaign_id, instance_id, candidate, send_id),
+            )
+            if cur.fetchone() is not None:
+                continue
+            cur.execute(
+                """
+                UPDATE campaign_stage_sends
+                SET scheduled_for = %s, updated_at = NOW()
+                WHERE id = %s AND status = 'scheduled'
+                """,
+                (candidate, send_id),
+            )
+            return candidate, None
+    return None, "stale_bump_no_unique_slot"
+
+
 def _recover_stale_scheduled_initial_uazapi_sends(
     conn,
     *,
@@ -565,7 +639,9 @@ def _recover_stale_scheduled_initial_uazapi_sends(
             )
             rows = cur.fetchall() or []
 
-        def _stale_recovery_log(payload):
+        def _stale_recovery_log(payload, *, always: bool = False) -> None:
+            if not always and not _stale_recovery_verbose_logging():
+                return
             print(json.dumps(payload, ensure_ascii=False, default=str), flush=True)
 
         for row in rows:
@@ -602,7 +678,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                             "policy": "dry_run",
                             "within_send_window": within_send_window,
                             "within_materialize_window": within_materialize,
-                        }
+                        },
+                        always=True,
                     )
                     continue
                 with conn.cursor() as cur:
@@ -625,7 +702,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                         "policy": "failed",
                         "within_send_window": within_send_window,
                         "within_materialize_window": within_materialize,
-                    }
+                    },
+                    always=True,
                 )
                 continue
 
@@ -644,7 +722,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                             "within_send_window": within_send_window,
                             "within_materialize_window": within_materialize,
                             "quota_policy": None,
-                        }
+                        },
+                        always=True,
                     )
                     continue
                 with conn.cursor() as cur:
@@ -668,7 +747,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                         "within_send_window": within_send_window,
                         "within_materialize_window": within_materialize,
                         "quota_policy": None,
-                    }
+                    },
+                    always=True,
                 )
                 continue
 
@@ -693,7 +773,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                             "within_send_window": within_send_window,
                             "within_materialize_window": within_materialize,
                             "next_valid_scheduled_for": None,
-                        }
+                        },
+                        always=True,
                     )
                     continue
                 with conn.cursor() as cur:
@@ -718,7 +799,8 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                         "within_send_window": within_send_window,
                         "within_materialize_window": within_materialize,
                         "next_valid_scheduled_for": None,
-                    }
+                    },
+                    always=True,
                 )
                 continue
 
@@ -743,21 +825,34 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                         if hasattr(next_sf, "isoformat")
                         else str(next_sf),
                         "quota_allows_initial_today": quota_ok,
-                    }
+                    },
+                    always=True,
                 )
                 continue
 
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE campaign_stage_sends
-                    SET scheduled_for = %s, updated_at = NOW()
-                    WHERE id = %s AND status = 'scheduled'
-                    """,
-                    (next_sf, send_id),
+            applied, bump_err = _bump_stale_send_scheduled_for_unique(
+                conn,
+                send_id=send_id,
+                campaign_id=cid,
+                instance_id=instance_id,
+                next_sf=next_sf,
+            )
+            if bump_err:
+                _stale_recovery_log(
+                    {
+                        "event": "uazapi_stale_scheduled_recovery",
+                        "campaign_id": cid,
+                        "send_ids": [send_id],
+                        "instance_id": instance_id,
+                        "reason": "stale_bump_unique_slot_failed",
+                        "error": bump_err,
+                        "policy": "bump_scheduled_for",
+                    },
+                    always=True,
                 )
-
-            stats["bumped_send_ids"].append(send_id)
+                continue
+            if applied is not None:
+                stats["bumped_send_ids"].append(send_id)
             _stale_recovery_log(
                 {
                     "event": "uazapi_stale_scheduled_recovery",
@@ -769,11 +864,12 @@ def _recover_stale_scheduled_initial_uazapi_sends(
                     "within_send_window": within_send_window,
                     "within_materialize_window": within_materialize,
                     "daily_limit_remaining": None,
-                    "next_valid_scheduled_for": next_sf.isoformat()
-                    if hasattr(next_sf, "isoformat")
-                    else str(next_sf),
+                    "next_valid_scheduled_for": applied.isoformat()
+                    if applied is not None and hasattr(applied, "isoformat")
+                    else str(applied),
                     "quota_allows_initial_today": quota_ok,
-                }
+                },
+                always=False,
             )
 
         if dry_run:
@@ -2020,9 +2116,10 @@ def process_cadence():
                 else:
                     now_brazil = datetime.now(BRAZIL_TZ)
                     if first_with_cadence and campaign.get("id") == first_with_cadence.get("id"):
-                        print(
-                            f"⏰ [Cadence] Fora da janela da campanha ({now_brazil.strftime('%H:%M')} BRT). Envio Mega/cadência pausado."
-                        )
+                        if _should_log_cadence_outside_send_window():
+                            print(
+                                f"⏰ [Cadence] Fora da janela da campanha ({now_brazil.strftime('%H:%M')} BRT). Envio Mega/cadência pausado."
+                            )
 
             conn.close()
             time.sleep(CADENCE_POLL_INTERVAL)

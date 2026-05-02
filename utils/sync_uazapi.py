@@ -63,6 +63,36 @@ def _sync_reconcile_listmessages_enabled():
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+_ua_sync_status_line_last_mono: dict[tuple[int, int], float] = {}
+
+
+def _ua_sync_status_line_dedupe_sec() -> float:
+    """Não repete a mesma linha ℹ️ [Uazapi Sync] por (campaign, send) dentro deste intervalo (default 120s)."""
+    try:
+        return max(0.0, min(float((os.environ.get("UAZAPI_SYNC_LOG_DEDUPE_SEC") or "120").strip()), 3600.0))
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def _should_emit_ua_sync_status_line(campaign_id, send_id) -> bool:
+    if os.environ.get("DEBUG_SYNC_UAZAPI") == "1":
+        return True
+    win = _ua_sync_status_line_dedupe_sec()
+    if win <= 0:
+        return True
+    try:
+        key = (int(campaign_id), int(send_id or 0))
+    except (TypeError, ValueError):
+        return True
+    now = time.monotonic()
+    if now - _ua_sync_status_line_last_mono.get(key, 0) < win:
+        return False
+    _ua_sync_status_line_last_mono[key] = now
+    if len(_ua_sync_status_line_last_mono) > 2000:
+        _ua_sync_status_line_last_mono.clear()
+    return True
+
+
 def _listfolders_prefix_sent_enabled():
     """
     Legado: _sync_folder_via_listfolders marca os primeiros log_success IDs em
@@ -1053,7 +1083,9 @@ def sync_campaign_leads_from_uazapi(conn, campaign_id, token, folder_id, uazapi_
             or status in ("failed", "error", "cancelled", "canceled", "inconsistent", "partial")
             or (status == "done" and log_failed > 0)
         )
-        if _show_sync_line:
+        if _show_sync_line and _should_emit_ua_sync_status_line(
+            campaign_id, send.get("id")
+        ):
             print(
                 f"ℹ️ [Uazapi Sync] campaign={campaign_id} send_id={send.get('id')} stage={send.get('stage')} "
                 f"folder_id={fid} status={status} success={log_success} failed={log_failed} planned={planned_count}"

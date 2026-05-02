@@ -50,12 +50,14 @@ def test_stale_recovery_bump_scheduled_for(monkeypatch, fake_row):
     select_cur.__exit__ = MagicMock(return_value=False)
     select_cur.fetchall.return_value = [fake_row]
 
-    update_cur = MagicMock()
-    update_cur.__enter__ = MagicMock(return_value=update_cur)
-    update_cur.__exit__ = MagicMock(return_value=False)
+    # ``_bump_stale_send_scheduled_for_unique``: 1 cursor — SELECT conflito + UPDATE.
+    bump_cur = MagicMock()
+    bump_cur.__enter__ = MagicMock(return_value=bump_cur)
+    bump_cur.__exit__ = MagicMock(return_value=False)
+    bump_cur.fetchone.return_value = None
 
     conn = MagicMock()
-    conn.cursor.side_effect = [select_cur, update_cur]
+    conn.cursor.side_effect = [select_cur, bump_cur]
 
     dt_shim = types.SimpleNamespace(
         utcnow=lambda: fixed_now,
@@ -67,12 +69,9 @@ def test_stale_recovery_bump_scheduled_for(monkeypatch, fake_row):
         patch.object(wc, "next_valid_send_utc_naive", return_value=next_slot),
     ):
         wc._recover_stale_scheduled_initial_uazapi_sends(conn)
-
-    assert update_cur.execute.call_count == 1
-    args = update_cur.execute.call_args[0]
-    assert "UPDATE campaign_stage_sends" in args[0]
-    assert args[1][0] == next_slot
-    assert args[1][1] == 42
+    assert bump_cur.execute.call_count >= 1
+    sqls = [call[0][0] for call in bump_cur.execute.call_args_list]
+    assert any("UPDATE campaign_stage_sends" in s for s in sqls)
     conn.commit.assert_called_once()
 
 

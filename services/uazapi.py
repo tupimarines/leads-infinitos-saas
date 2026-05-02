@@ -6,7 +6,6 @@ deletar e enviar mensagens. URL base via UAZAPI_URL; admintoken via UAZAPI_ADMIN
 """
 
 import base64
-import hashlib
 import json
 import os
 import time
@@ -54,9 +53,25 @@ def _resolve_media_file_value(file: str) -> Optional[str]:
     print(f"❌ [Uazapi] send_media: arquivo não encontrado: {file}")
     return None
 
-# Rate limit para log de 401: uma vez por instance_id a cada 5 min
+# Rate limit para log 401: por chave; intervalo via UAZAPI_401_LOG_INTERVAL_SEC (default 600s).
 _401_log_last: dict[tuple, float] = {}
-_401_LOG_INTERVAL_SEC = 300
+
+
+def _uazapi_401_log_interval_sec() -> float:
+    raw = (os.environ.get("UAZAPI_401_LOG_INTERVAL_SEC") or "600").strip()
+    try:
+        return max(30.0, min(float(raw), 86400.0))
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _uazapi_should_log_401(key: tuple) -> bool:
+    now = time.monotonic()
+    interval = _uazapi_401_log_interval_sec()
+    if now - _401_log_last.get(key, 0) >= interval:
+        _401_log_last[key] = now
+        return True
+    return False
 
 
 class UazapiService:
@@ -131,21 +146,14 @@ class UazapiService:
         """
         url = f"{self.base_url}/instance/status"
         headers = {"token": token}
-        tok = (token or "").strip()
 
-        def _maybe_log_get_status_401(resp) -> None:
-            if resp is None or resp.status_code != 401:
-                return
-            body = (getattr(resp, "text", None) or "").lower()
-            if "invalid token" not in body:
-                return
-            digest = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
-            key = ("get_status", digest)
-            now = time.monotonic()
-            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
-                _401_log_last[key] = now
+        def _maybe_log_get_status_401(_resp) -> None:
+            # Uma linha no intervalo global: vários tokens/instâncias com apikey inválida geram
+            # uma única mensagem (reduz ruído em cadence/health).
+            if _uazapi_should_log_401(("uazapi_401", "get_status")):
                 print(
-                    "⚠️ [Uazapi] 401 Invalid token (get_status). Atualize o apikey da instância."
+                    "⚠️ [Uazapi] 401 Invalid token (get_status). Uma ou mais instâncias; "
+                    "atualize apikeys (UAZAPI_401_LOG_INTERVAL_SEC / UAZAPI_DEBUG=1)."
                 )
 
         try:
@@ -562,12 +570,15 @@ class UazapiService:
             if resp is None or resp.status_code != 401:
                 return
             inst_id = (ctx or {}).get("instance_id")
-            key = ("inst", inst_id) if inst_id is not None else ("legacy", (ctx or {}).get("campaign_id"))
-            now = time.monotonic()
-            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
-                _401_log_last[key] = now
-                msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={key[1]}" if key[1] is not None else "instância"
-                print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
+            log_key = (
+                "uazapi_401",
+                endpoint,
+                inst_id if inst_id is not None else (ctx or {}).get("campaign_id"),
+            )
+            if not _uazapi_should_log_401(log_key):
+                return
+            msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={(ctx or {}).get('campaign_id')}" if (ctx or {}).get("campaign_id") is not None else "instância"
+            print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
 
         try:
             response = requests.get(
@@ -639,12 +650,15 @@ class UazapiService:
             if resp is None or resp.status_code != 401:
                 return
             inst_id = (ctx or {}).get("instance_id")
-            key = ("inst", inst_id) if inst_id is not None else ("legacy", (ctx or {}).get("campaign_id"))
-            now = time.monotonic()
-            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
-                _401_log_last[key] = now
-                msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={key[1]}" if key[1] is not None else "instância"
-                print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
+            log_key = (
+                "uazapi_401",
+                endpoint,
+                inst_id if inst_id is not None else (ctx or {}).get("campaign_id"),
+            )
+            if not _uazapi_should_log_401(log_key):
+                return
+            msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={(ctx or {}).get('campaign_id')}" if (ctx or {}).get("campaign_id") is not None else "instância"
+            print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
 
         try:
             response = requests.post(
@@ -709,12 +723,15 @@ class UazapiService:
             if resp is None or resp.status_code != 401:
                 return
             inst_id = (ctx or {}).get("instance_id")
-            key = ("inst", inst_id) if inst_id is not None else ("legacy", (ctx or {}).get("campaign_id"))
-            now = time.monotonic()
-            if now - _401_log_last.get(key, 0) >= _401_LOG_INTERVAL_SEC:
-                _401_log_last[key] = now
-                msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={key[1]}" if key[1] is not None else "instância"
-                print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
+            log_key = (
+                "uazapi_401",
+                endpoint,
+                inst_id if inst_id is not None else (ctx or {}).get("campaign_id"),
+            )
+            if not _uazapi_should_log_401(log_key):
+                return
+            msg = f"instance_id={inst_id}" if inst_id is not None else f"campaign_id={(ctx or {}).get('campaign_id')}" if (ctx or {}).get("campaign_id") is not None else "instância"
+            print(f"⚠️ [Uazapi] {msg}: 401 Invalid token ({endpoint}). Atualize o apikey da instância.")
 
         try:
             response = requests.post(
