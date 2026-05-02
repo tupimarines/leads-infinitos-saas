@@ -3,7 +3,7 @@ title: 'UI — toggle tema claro/escuro, paleta revisada e vídeo de fundo globa
 slug: ui-toggle-tema-claro-escuro-video-fundo
 created: '2026-05-01T12:00:00Z'
 status: ready-for-dev
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 tech_stack:
   - Flask 3.x
   - Jinja2
@@ -116,32 +116,32 @@ A combinação **creme/branco gelo + bordas roxas + toque rosado nos gradientes*
   - `<div class="bg-video-overlay"></div>` com opacidade/cor definidas por `[data-theme]`.
   - Wrapper `.app-root` envolvendo `.nav`, `{% block body %}`, `.footer` com `position: relative; z-index` acima do vídeo.
 
-- [ ] **Task 3:** Substituir/remover dependência visual exclusiva de `body.themed-bg` + `bg-pattern.png` como fundo principal; manter pattern apenas se ainda agregar sobre o vídeo (provavelmente desligado por padrão para não poluir). Ajustar `body` para fundo transparente ou cor de fallback sólida igual a `--bg` quando vídeo falhar.
+- [x] **Task 3:** Substituir/remover dependência visual exclusiva de `body.themed-bg` + `bg-pattern.png` como fundo principal; manter pattern apenas se ainda agregar sobre o vídeo (provavelmente desligado por padrão para não poluir). Ajustar `body` para fundo transparente ou cor de fallback sólida igual a `--bg` quando vídeo falhar.
 
-- [ ] **Task 4:** Expandir `:root` com tokens completos para **dark** (valores revisados) e adicionar bloco `[data-theme="light"]` com overrides para todas as variáveis usadas por `body`, `.nav`, `.btn`, `.btn-primary`, `.card`, `.field`/`input`, `.flash`, `.footer`, `.badge`, `.brand-badge`, focus rings. Incluir variáveis `--video-overlay-opacity`, `--video-overlay-tint` se útil.
+- [x] **Task 4:** Expandir `:root` com tokens completos para **dark** (valores revisados) e adicionar bloco `[data-theme="light"]` com overrides para todas as variáveis usadas por `body`, `.nav`, `.btn`, `.btn-primary`, `.card`, `.field`/`input`, `.flash`, `.footer`, `.badge`, `.brand-badge`, focus rings. Incluir variáveis `--video-overlay-opacity`, `--video-overlay-tint` se útil.
 
-- [ ] **Task 5:** Script de tema (inline cedo no `<head>` ou imediatamente após abrir `<html>`):
+- [x] **Task 5:** Script de tema (inline cedo no `<head>` ou imediatamente após abrir `<html>`):
   - Ler `localStorage.getItem('theme')` (`'dark'|'light'`).
   - Se vazio, opcional: `window.matchMedia('(prefers-color-scheme: dark)')`.
   - Setar `document.documentElement.dataset.theme` e `classList.toggle('dark', theme === 'dark')` para Tailwind.
   - Pequeno listener `prefers-reduced-motion` para pausar vídeo após `DOMContentLoaded`.
 
-- [ ] **Task 6:** Toggle na `.nav-inner` (ao lado de `.nav-cta` ou dentro em mobile): botão acessível (`aria-pressed`, `aria-label` “Alternar tema claro e escuro”), alterna tema e persiste em `localStorage`.
+- [x] **Task 6:** Toggle na `.nav-inner` (ao lado de `.nav-cta` ou dentro em mobile): botão acessível (`aria-pressed`, `aria-label` “Alternar tema claro e escuro”), alterna tema e persiste em `localStorage`.
 
-- [ ] **Task 7:** Para cada arquivo que usa Tailwind CDN (`dashboard.html`, `campaigns_*`, `account.html`, `admin/*` listados no frontmatter):
+- [x] **Task 7:** Para cada arquivo que usa Tailwind CDN (`dashboard.html`, `campaigns_*`, `account.html`, `admin/*` listados no frontmatter):
   - Adicionar `tailwind.config.darkMode = 'class'`.
   - Alinhar `theme.extend.colors` a variáveis CSS (ex.: cores nomeadas `surface`, `elevated`, `muted`) **ou** trocar classes literais `text-gray-200` por pares claros/escuros explícitos.
   - Revisar `.stat-card` e estilos inline em `<style>` dos templates para usar `var(--*)` ou classes `dark:`.
 
-- [ ] **Task 8:** Modais — exemplos obrigatórios neste PR:
+- [x] **Task 8:** Modais — exemplos obrigatórios neste PR:
   - `templates/whatsapp_config.html`: remover dependência de overlay preto fixo; usar classe tokenizada (ex.: `modal-backdrop` com `background: rgba` via variável tema).
   - `templates/admin/campaigns.html`: substituir `bg-black/80` por utilitários compatíveis com ambos os modos (`bg-black/60 dark:bg-black/80` + painel claro no tema light).
   - `templates/campaigns_kanban.html`: painel modal e `body.modal-open` sem assumir fundo escuro único.
   - `templates/admin/users.html`: `#detailsModal` e conteúdos internos.
 
-- [ ] **Task 9:** Responsividade do vídeo: garantir cobertura mobile (`object-fit: cover`, `min-height: 100svh`, teste em largura estreita). Evitar que o vídeo empurre layout (permanecer `fixed`).
+- [x] **Task 9:** Responsividade do vídeo: garantir cobertura mobile (`object-fit: cover`, `min-height: 100svh`, teste em largura estreita). Evitar que o vídeo empurre layout (permanecer `fixed`).
 
-- [ ] **Task 10:** Verificar páginas que não usam Tailwind mas estendem `base.html` (`login.html`, `register.html`, `index.html`, etc.) para regressões visuais no modo claro.
+- [x] **Task 10:** Verificar páginas que não usam Tailwind mas estendem `base.html` (`login.html`, `register.html`, `index.html`, etc.) para regressões visuais no modo claro.
 
 ### Acceptance Criteria
 

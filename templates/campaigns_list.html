@@ -7,55 +7,58 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
     tailwind.config = {
+        darkMode: 'class',
         theme: {
             extend: {
                 colors: {
-                    bg: '#0b1020',
-                    card: '#0f1630',
-                    primary: '#4f7cff',
-                    accent: '#8b5cf6',
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
                 }
             }
         }
     }
 </script>
 <style>
-    /* Glass card styling */
     .campaign-card {
-        background: rgba(15, 22, 48, 0.6);
+        background: var(--card-bg);
         backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--card-border);
         border-radius: 16px;
         transition: all 0.3s ease;
+        box-shadow: var(--shadow);
     }
 
     .campaign-card:hover {
-        border-color: rgba(79, 124, 255, 0.3);
+        border-color: color-mix(in srgb, var(--primary) 40%, var(--card-border));
         transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(79, 124, 255, 0.1);
+        box-shadow: var(--shadow), 0 8px 24px color-mix(in srgb, var(--primary) 10%, transparent);
     }
 
-    /* Progress bar */
     .progressbar {
         width: 100%;
         height: 8px;
-        background: rgba(255, 255, 255, 0.05);
+        background: color-mix(in srgb, var(--muted) 18%, transparent);
         border-radius: 4px;
         overflow: hidden;
     }
 
     .progress-fill {
         height: 100%;
-        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        background: linear-gradient(90deg, var(--primary), var(--accent));
         transition: width 0.5s ease;
         border-radius: 4px;
     }
 
-    /* Deal tracker buttons */
     .btn-deal {
-        background: rgba(79, 124, 255, 0.15);
-        border: 1px solid rgba(79, 124, 255, 0.3);
-        color: #4f7cff;
+        background: color-mix(in srgb, var(--primary) 15%, transparent);
+        border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+        color: var(--primary);
         padding: 4px 12px;
         border-radius: 6px;
         font-weight: 600;
@@ -64,8 +67,8 @@
     }
 
     .btn-deal:hover {
-        background: rgba(79, 124, 255, 0.25);
-        border-color: rgba(79, 124, 255, 0.5);
+        background: color-mix(in srgb, var(--primary) 28%, transparent);
+        border-color: color-mix(in srgb, var(--primary) 55%, transparent);
     }
 
     .deals-tracker {
@@ -73,13 +76,14 @@
         align-items: center;
         gap: 8px;
         padding: 12px;
-        background: rgba(139, 92, 246, 0.05);
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
         border-radius: 8px;
         margin-top: 12px;
+        border: 1px solid color-mix(in srgb, var(--card-border) 80%, transparent);
     }
 
     h1 {
-        color: #e8ecf6;
+        color: var(--text);
     }
 </style>
 {% endblock %}
@@ -92,7 +96,7 @@
             <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">
                 Minhas Campanhas
             </h1>
-            <p class="text-gray-400 mt-1">Gerencie seus disparos e acompanhe resultados em tempo real.</p>
+            <p class="text-faint mt-1">Gerencie seus disparos e acompanhe resultados em tempo real.</p>
         </div>
         <a href="{{ url_for('new_campaign') }}" class="btn-cyber-sm shadow-lg shadow-purple-500/20"
             style="background: linear-gradient(90deg, #4f7cff, #8b5cf6); padding: 12px 24px; border-radius: 8px; color: white; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px;">
@@ -109,9 +113,9 @@
     <div class="mb-6 space-y-3" role="status" aria-live="polite" data-reconnect-alerts-stack>
         {% for a in reconnect_alerts %}
         <div data-reconnect-alert="{{ a.id }}"
-            class="relative rounded-xl border border-emerald-500/35 bg-emerald-500/10 pl-4 pr-10 py-3 text-sm text-gray-200 shadow-lg shadow-emerald-900/20">
+            class="relative rounded-xl border border-emerald-500/35 bg-emerald-500/10 pl-4 pr-10 py-3 text-sm text-slate-800 dark:text-gray-200 shadow-lg shadow-emerald-900/20">
             <button type="button"
-                class="absolute top-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
+                class="absolute top-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg text-slate-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10 hover:text-ink transition-colors"
                 onclick="dismissReconnectAlert({{ a.id }}, this)" title="Dispensar" aria-label="Dispensar aviso">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
                     stroke="currentColor" stroke-width="2">
@@ -119,7 +123,7 @@
                 </svg>
             </button>
             <strong class="text-emerald-300">Instância WhatsApp ligada</strong>
-            <p class="mt-1 text-gray-300 pr-1">{{ a.body_text }}</p>
+            <p class="mt-1 text-slate-700 dark:text-gray-300 pr-1">{{ a.body_text }}</p>
         </div>
         {% endfor %}
     </div>
@@ -131,8 +135,8 @@
         <div class="campaign-card p-6" data-campaign-id="{{ campaign.id }}" data-status="{{ campaign.status }}" data-use-uazapi="{{ '1' if campaign.use_uazapi_sender and campaign.uazapi_folder_id else '0' }}" data-enable-cadence="{{ '1' if campaign.enable_cadence else '0' }}">
             <!-- Campaign Header -->
             <div class="mb-4">
-                <h3 class="text-xl font-bold text-white truncate mb-1" title="{{ campaign.name }}">{{ campaign.name }}</h3>
-                <p class="text-xs text-gray-500 truncate mb-3">{{ campaign.message_template[:50] }}...</p>
+                <h3 class="text-xl font-bold text-ink truncate mb-1" title="{{ campaign.name }}">{{ campaign.name }}</h3>
+                <p class="text-xs text-faint truncate mb-3">{{ campaign.message_template[:50] }}...</p>
 
                 <!-- Status and Actions Row -->
                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -168,7 +172,7 @@
                     <div class="flex items-center gap-1 ml-auto">
                     <!-- Edit Button -->
                     <a href="/campaigns/{{ campaign.id }}/edit"
-                        class="text-gray-400 hover:text-blue-300 transition-colors p-2 rounded-lg border border-white/10 bg-white/5" title="Editar Campanha">
+                        class="text-faint hover:text-blue-600 dark:hover:text-blue-300 transition-colors p-2 rounded-lg border border-[color:var(--card-border)] bg-black/[0.03] dark:bg-white/5" title="Editar Campanha">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -178,7 +182,7 @@
 
                     <!-- Kanban Board Button -->
                     <a href="/campaigns/{{ campaign.id }}/kanban"
-                        class="text-gray-400 hover:text-purple-300 transition-colors p-2 rounded-lg border border-white/10 bg-white/5 inline-flex items-center gap-2" title="Kanban Cadência">
+                        class="text-faint hover:text-purple-600 dark:hover:text-purple-300 transition-colors p-2 rounded-lg border border-[color:var(--card-border)] bg-black/[0.03] dark:bg-white/5 inline-flex items-center gap-2" title="Kanban Cadência">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
                             stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -224,18 +228,18 @@
 
             {% if campaign.enable_cadence %}
             <p class="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Cadência (sub-campanhas)</p>
-            <div id="stage-progress-{{ campaign.id }}" class="text-gray-200 bg-white/5 rounded-lg border border-white/10 p-3 mb-3 space-y-1.5 leading-snug"></div>
-            <div id="stage-sync-{{ campaign.id }}" class="hidden text-[10px] text-gray-500 mb-2"></div>
+            <div id="stage-progress-{{ campaign.id }}" class="text-slate-800 dark:text-gray-200 bg-black/[0.04] dark:bg-white/5 rounded-lg border border-[color:var(--card-border)] p-3 mb-3 space-y-1.5 leading-snug"></div>
+            <div id="stage-sync-{{ campaign.id }}" class="hidden text-[10px] text-faint mb-2"></div>
             {% else %}
             <div class="flex flex-wrap items-baseline gap-4 mb-4 text-sm">
-                <span class="text-gray-400">Leads <span class="text-lg font-bold text-white tabular-nums" id="total-{{ campaign.id }}">-</span></span>
-                <span class="text-gray-400">Enviados <span class="text-lg font-bold text-green-400 tabular-nums" id="sent-{{ campaign.id }}">-</span></span>
+                <span class="text-faint">Leads <span class="text-lg font-bold text-ink tabular-nums" id="total-{{ campaign.id }}">-</span></span>
+                <span class="text-faint">Enviados <span class="text-lg font-bold text-green-600 dark:text-green-400 tabular-nums" id="sent-{{ campaign.id }}">-</span></span>
             </div>
             {% endif %}
 
             <!-- Progress Bar -->
             <div class="mb-4">
-                <div class="flex justify-between text-xs text-gray-400 mb-2">
+                <div class="flex justify-between text-xs text-faint mb-2">
                     <span>Progresso</span>
                     <span id="progress-percent-{{ campaign.id }}">0%</span>
                 </div>
@@ -245,15 +249,15 @@
             </div>
 
             <!-- Success Rate -->
-            <div class="text-sm text-gray-300 mb-3">
-                Taxa de Sucesso: <span class="font-bold text-green-400" id="success-rate-{{ campaign.id }}">-</span>
+            <div class="text-sm text-slate-700 dark:text-gray-300 mb-3">
+                Taxa de Sucesso: <span class="font-bold text-green-600 dark:text-green-400" id="success-rate-{{ campaign.id }}">-</span>
             </div>
 
             <!-- Deal Tracker -->
             <div class="deals-tracker">
-                <span class="text-sm text-gray-300">Negócios:</span>
+                <span class="text-sm text-slate-700 dark:text-gray-300">Negócios:</span>
                 <button class="btn-deal" onclick="updateDeal({{ campaign.id }}, 'decrement')">−</button>
-                <span class="text-lg font-bold text-white" id="deals-{{ campaign.id }}">-</span>
+                <span class="text-lg font-bold text-ink" id="deals-{{ campaign.id }}">-</span>
                 <button class="btn-deal" onclick="updateDeal({{ campaign.id }}, 'increment')">+</button>
                 <span class="ml-auto text-xs text-purple-400 font-semibold">
                     Conversão: <span id="conversion-{{ campaign.id }}">0%</span>
@@ -261,8 +265,8 @@
             </div>
 
             <!-- Timestamps -->
-            <div class="mt-4 pt-4 border-t border-white/5">
-                <div class="flex justify-between text-xs text-gray-500">
+            <div class="mt-4 pt-4 border-t border-[color:var(--card-border)]">
+                <div class="flex justify-between text-xs text-faint">
                     <span>Criada: {{ (campaign.created_at|to_brt).strftime('%d/%m/%Y %H:%M') if campaign.created_at else '-' }}</span>
                     <span id="last-sent-{{ campaign.id }}">-</span>
                 </div>
@@ -271,16 +275,16 @@
         {% endfor %}
     </div>
     {% else %}
-    <div class="text-center py-20 bg-gray-800/20 rounded-2xl border border-gray-700/30 border-dashed">
-        <div class="w-16 h-16 bg-gray-700/30 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24"
+    <div class="text-center py-20 bg-black/[0.04] dark:bg-gray-800/20 rounded-2xl border border-[color:var(--card-border)] border-dashed">
+        <div class="w-16 h-16 bg-black/[0.06] dark:bg-gray-700/30 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-faint" fill="none" viewBox="0 0 24 24"
                 stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
             </svg>
         </div>
-        <h3 class="text-xl font-medium text-white mb-2">Nenhuma campanha encontrada</h3>
-        <p class="text-gray-400 mb-6">Crie sua primeira campanha para começar a prospectar.</p>
+        <h3 class="text-xl font-medium text-ink mb-2">Nenhuma campanha encontrada</h3>
+        <p class="text-faint mb-6">Crie sua primeira campanha para começar a prospectar.</p>
         <a href="{{ url_for('new_campaign') }}" class="btn-cyber-sm"
             style="background: linear-gradient(90deg, #4f7cff, #8b5cf6); padding: 12px 24px; border-radius: 8px; color: white; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px;">
             Criar Campanha

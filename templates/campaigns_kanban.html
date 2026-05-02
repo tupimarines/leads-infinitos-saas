@@ -6,24 +6,24 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
     tailwind.config = {
+        darkMode: 'class',
         theme: {
             extend: {
                 colors: {
-                    bg: '#0b1020',
-                    card: '#0f1630',
-                    primary: '#4f7cff',
-                    accent: '#8b5cf6'
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
                 }
             }
         }
     }
 </script>
 <style>
-    body {
-        background: #0b1020;
-        color: #e8ecf6;
-    }
-
     .kanban-board {
         display: flex;
         gap: 12px;
@@ -36,17 +36,18 @@
         min-width: 240px;
         max-width: 280px;
         flex: 1;
-        background: rgba(15, 22, 48, 0.6);
+        background: var(--card-bg);
         backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--card-border);
         border-radius: 16px;
         display: flex;
         flex-direction: column;
+        box-shadow: var(--shadow);
     }
 
     .kanban-column-header {
         padding: 14px 16px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        border-bottom: 1px solid var(--card-border);
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -60,24 +61,25 @@
     }
 
     .kanban-column-body.drag-over {
-        background: rgba(79, 124, 255, 0.06);
+        background: color-mix(in srgb, var(--primary) 10%, transparent);
         border-radius: 0 0 16px 16px;
     }
 
     .lead-card {
-        background: rgba(12, 20, 48, 0.8);
-        border: 1px solid rgba(79, 124, 255, 0.12);
+        background: color-mix(in srgb, var(--input-bg) 94%, transparent);
+        border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--card-border));
         border-radius: 10px;
         padding: 10px 12px;
         margin-bottom: 6px;
         cursor: grab;
         transition: all 0.2s;
         user-select: none;
+        color: var(--text);
     }
 
     .lead-card:hover {
-        border-color: rgba(79, 124, 255, 0.35);
-        box-shadow: 0 2px 12px rgba(79, 124, 255, 0.1);
+        border-color: color-mix(in srgb, var(--primary) 45%, var(--card-border));
+        box-shadow: 0 2px 12px color-mix(in srgb, var(--primary) 14%, transparent);
     }
 
     .lead-card.dragging {
@@ -106,7 +108,7 @@
     }
 
     .kanban-column-body::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.1);
+        background: color-mix(in srgb, var(--muted) 35%, transparent);
         border-radius: 4px;
     }
 
@@ -149,11 +151,12 @@
     h1,
     h2,
     h3 {
-        color: #e8ecf6;
+        color: var(--text);
     }
 
     body.modal-open {
         overflow: hidden;
+        /* Scroll lock only — overlay escuro/claro vem de cada .modal-backdrop */
     }
 
     #stageCampaignModal {
@@ -167,14 +170,14 @@
     <!-- Header -->
     <div class="flex items-center justify-between mb-6">
         <div class="flex items-center gap-4">
-            <a href="/campaigns" class="text-gray-400 hover:text-white transition-colors">
+            <a href="/campaigns" class="text-faint hover:text-ink transition-colors">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
                 </svg>
             </a>
             <div>
-                <h1 class="text-xl font-bold text-white">{{ campaign.name }}</h1>
-                <p class="text-xs text-gray-500 mt-0.5">
+                <h1 class="text-xl font-bold text-ink">{{ campaign.name }}</h1>
+                <p class="text-xs text-faint mt-0.5">
                     Kanban de cadência •
                     <span id="totalLeads">{{ total_leads }}</span> leads
                     {% if campaign.enable_cadence %}
@@ -185,7 +188,7 @@
         </div>
         <div class="flex items-center gap-2 flex-wrap justify-end">
             <button type="button" onclick="downloadRemanentCsv('funnel')"
-                class="text-xs px-3 py-1.5 rounded-lg border border-gray-600/80 text-gray-300 hover:bg-white/5 hover:border-gray-500 transition-colors"
+                class="text-xs px-3 py-1.5 rounded-lg border border-[color:var(--card-border)] text-ink dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors"
                 title="Etapas 1 a 4 do funil (exceto convertido, perdido ou respondeu)">CSV 1–4</button>
             <button type="button" onclick="downloadRemanentCsv('breakup')"
                 class="text-xs px-3 py-1.5 rounded-lg border border-yellow-600/40 text-yellow-200/90 hover:bg-yellow-500/10 transition-colors"
@@ -407,12 +410,12 @@
 </div>
 
 <!-- Lead Details Modal -->
-<div id="leadModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50">
+<div id="leadModal" class="fixed inset-0 modal-backdrop hidden flex items-center justify-center z-50">
     <div
-        class="bg-[#0f1630] border border-gray-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4">
-        <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
-            <h3 class="text-lg font-bold text-white">Detalhes do Lead</h3>
-            <button onclick="closeLeadModal()" class="text-gray-400 hover:text-white transition-colors">
+        class="bg-elevated border border-[color:var(--card-border)] rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4 text-ink">
+        <div class="p-4 border-b border-[color:var(--card-border)] flex justify-between items-center bg-black/[0.03] dark:bg-gray-900/50">
+            <h3 class="text-lg font-bold text-ink">Detalhes do Lead</h3>
+            <button onclick="closeLeadModal()" class="text-faint hover:text-ink transition-colors">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
                     </path>
@@ -423,35 +426,35 @@
             <!-- Header Info -->
             <div class="grid grid-cols-2 gap-4">
                 <div>
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Nome</label>
-                    <p class="text-gray-200 font-medium text-lg" id="modalName">-</p>
+                    <label class="text-xs text-faint uppercase tracking-wider">Nome</label>
+                    <p class="text-ink font-medium text-lg" id="modalName">-</p>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Telefone</label>
+                    <label class="text-xs text-faint uppercase tracking-wider">Telefone</label>
                     <div class="flex items-center gap-2">
-                        <p class="text-gray-200 font-medium" id="modalPhone">-</p>
+                        <p class="text-ink font-medium" id="modalPhone">-</p>
                         <a href="#" target="_blank" id="modalLink"
-                            class="text-blue-400 hover:text-blue-300 text-xs bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">Abrir
+                            class="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 text-xs bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">Abrir
                             WhatsApp</a>
                     </div>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Status</label>
-                    <p class="text-gray-200" id="modalStatus">-</p>
+                    <label class="text-xs text-faint uppercase tracking-wider">Status</label>
+                    <p class="text-ink" id="modalStatus">-</p>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Última Interação</label>
-                    <p class="text-gray-200" id="modalLastSent">-</p>
+                    <label class="text-xs text-faint uppercase tracking-wider">Última Interação</label>
+                    <p class="text-ink" id="modalLastSent">-</p>
                 </div>
             </div>
 
             <!-- Enrichment Info -->
-            <div class="grid grid-cols-2 gap-4 border-t border-gray-700/50 pt-4 mt-2">
+            <div class="grid grid-cols-2 gap-4 border-t border-[color:var(--card-border)] pt-4 mt-2">
                 <div class="col-span-2">
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Endereço</label>
+                    <label class="text-xs text-faint uppercase tracking-wider">Endereço</label>
                     <div class="flex items-center gap-2">
-                        <p class="text-gray-200 text-sm truncate" id="modalAddress">-</p>
-                        <a href="#" target="_blank" id="modalMapLink" class="hidden text-green-400 hover:text-green-300"
+                        <p class="text-ink text-sm truncate" id="modalAddress">-</p>
+                        <a href="#" target="_blank" id="modalMapLink" class="hidden text-green-600 hover:text-green-500 dark:text-green-400 dark:hover:text-green-300"
                             title="Ver no Maps">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -464,29 +467,29 @@
                     </div>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Site / Categoria</label>
+                    <label class="text-xs text-faint uppercase tracking-wider">Site / Categoria</label>
                     <div class="flex flex-col">
                         <a href="#" target="_blank" id="modalWebsite"
-                            class="text-blue-400 hover:text-blue-300 text-sm truncate block mb-1">-</a>
-                        <span class="text-gray-400 text-xs" id="modalCategory">-</span>
+                            class="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 text-sm truncate block mb-1">-</a>
+                        <span class="text-faint text-xs" id="modalCategory">-</span>
                     </div>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-500 uppercase tracking-wider">Avaliações</label>
+                    <label class="text-xs text-faint uppercase tracking-wider">Avaliações</label>
                     <div class="flex items-center gap-2 mt-1">
                         <div class="flex text-yellow-500" id="modalRatingStars">
                             <!-- Stars -->
                         </div>
-                        <span class="text-gray-200 text-sm" id="modalReviewsText">-</span>
+                        <span class="text-ink text-sm" id="modalReviewsText">-</span>
                     </div>
                 </div>
             </div>
 
             <!-- Notes -->
-            <div class="bg-gray-900/30 p-4 rounded-xl border border-gray-700/50">
-                <label class="text-xs text-gray-500 uppercase tracking-wider mb-2 block font-semibold">Anotações</label>
+            <div class="bg-black/[0.03] dark:bg-gray-900/30 p-4 rounded-xl border border-[color:var(--card-border)]">
+                <label class="text-xs text-faint uppercase tracking-wider mb-2 block font-semibold">Anotações</label>
                 <textarea id="modalNotes"
-                    class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary h-32 resize-none placeholder-gray-600 transition-colors"
+                    class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary h-32 resize-none placeholder-[color:var(--input-placeholder)] transition-colors"
                     placeholder="Escreva observações importantes sobre este lead..."></textarea>
                 <div class="flex justify-end mt-3">
                     <button onclick="saveNote()" id="btnSaveNote"
@@ -501,10 +504,10 @@
             </div>
 
             <!-- Metadata -->
-            <div class="border-t border-gray-700/50 pt-4">
+            <div class="border-t border-[color:var(--card-border)] pt-4">
                 <details class="group">
                     <summary
-                        class="flex items-center gap-2 cursor-pointer text-xs text-gray-500 hover:text-gray-300 transition-colors select-none">
+                        class="flex items-center gap-2 cursor-pointer text-xs text-faint hover:text-ink transition-colors select-none">
                         <svg class="w-4 h-4 transition-transform group-open:rotate-90" fill="none" stroke="currentColor"
                             viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7">
@@ -513,7 +516,7 @@
                         Ver dados técnicos (JSON)
                     </summary>
                     <pre id="modalRaw"
-                        class="mt-3 bg-gray-950 p-4 rounded-lg text-[10px] text-gray-400 overflow-x-auto font-mono border border-gray-800"></pre>
+                        class="mt-3 bg-slate-100 dark:bg-gray-950 p-4 rounded-lg text-[10px] text-faint overflow-x-auto font-mono border border-[color:var(--card-border)]"></pre>
                 </details>
             </div>
         </div>
@@ -521,12 +524,12 @@
 </div>
 
 <!-- Message Template Modal -->
-<div id="messageModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50">
+<div id="messageModal" class="fixed inset-0 modal-backdrop hidden flex items-center justify-center z-50">
     <div
-        class="bg-[#0f1630] border border-gray-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4">
-        <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
-            <h3 class="text-lg font-bold text-white">Editar Mensagem - <span id="msgModalStepName"></span></h3>
-            <button onclick="closeMessageModal()" class="text-gray-400 hover:text-white transition-colors">
+        class="bg-elevated border border-[color:var(--card-border)] rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4 text-ink">
+        <div class="p-4 border-b border-[color:var(--card-border)] flex justify-between items-center bg-black/[0.03] dark:bg-gray-900/50">
+            <h3 class="text-lg font-bold text-ink">Editar Mensagem - <span id="msgModalStepName"></span></h3>
+            <button onclick="closeMessageModal()" class="text-faint hover:text-ink transition-colors">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
                     </path>
@@ -536,11 +539,11 @@
 
         <div class="p-6 overflow-y-auto flex-1 space-y-4">
             <div class="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
-                <p class="text-xs text-blue-300">
+                <p class="text-xs text-blue-700 dark:text-blue-300">
                     <strong>Dica:</strong> Adicione múltiplas variações. O sistema escolherá uma aleatoriamente para
                     cada envio.
-                    Use variáveis como <code class="bg-blue-900/50 px-1 rounded">{nome}</code>, <code
-                        class="bg-blue-900/50 px-1 rounded">{empresa}</code>.
+                    Use variáveis como <code class="bg-blue-100 dark:bg-blue-900/50 px-1 rounded text-ink">{nome}</code>, <code
+                        class="bg-blue-100 dark:bg-blue-900/50 px-1 rounded text-ink">{empresa}</code>.
                     Spintax também é suportado (ex: <code>{Olá|Oi}</code>).
                 </p>
             </div>
@@ -550,7 +553,7 @@
             </div>
 
             <button onclick="addVariation()"
-                class="w-full py-2 border-2 border-dashed border-gray-700 hover:border-gray-500 text-gray-500 hover:text-gray-300 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
+                class="w-full py-2 border-2 border-dashed border-[color:var(--card-border)] hover:border-[color:var(--primary)] text-faint hover:text-ink rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                 </svg>
@@ -558,9 +561,9 @@
             </button>
         </div>
 
-        <div class="p-4 border-t border-gray-700 bg-gray-900/50 flex justify-end gap-3">
+        <div class="p-4 border-t border-[color:var(--card-border)] bg-black/[0.03] dark:bg-gray-900/50 flex justify-end gap-3">
             <button onclick="closeMessageModal()"
-                class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancelar</button>
+                class="px-4 py-2 text-sm text-faint hover:text-ink transition-colors">Cancelar</button>
             <button onclick="saveMessageTemplate()" id="btnSaveMsg"
                 class="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-blue-500/20 flex items-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -573,11 +576,11 @@
 </div>
 
 <!-- Stage Campaign Modal -->
-<div id="stageCampaignModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50">
-    <div class="bg-[#0f1630] border border-gray-700 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4">
-        <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
-            <h3 class="text-lg font-bold text-white">Gerar Campanha - <span id="stageModalStepName"></span></h3>
-            <button onclick="closeStageCampaignModal()" class="text-gray-400 hover:text-white transition-colors">
+<div id="stageCampaignModal" class="fixed inset-0 modal-backdrop hidden flex items-center justify-center z-50">
+    <div class="bg-elevated border border-[color:var(--card-border)] rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4 text-ink">
+        <div class="p-4 border-b border-[color:var(--card-border)] flex justify-between items-center bg-black/[0.03] dark:bg-gray-900/50">
+            <h3 class="text-lg font-bold text-ink">Gerar Campanha - <span id="stageModalStepName"></span></h3>
+            <button onclick="closeStageCampaignModal()" class="text-faint hover:text-ink transition-colors">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                 </svg>
@@ -586,50 +589,50 @@
         <div class="p-6 overflow-y-auto flex-1 space-y-5">
             <div class="grid grid-cols-2 gap-4">
                 <div>
-                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Data de envio</label>
-                    <input id="stageScheduledDate" type="date" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                    <label class="block text-xs text-faint uppercase tracking-wider mb-2">Data de envio</label>
+                    <input id="stageScheduledDate" type="date" class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none">
                 </div>
                 <div>
-                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Horário</label>
-                    <input id="stageScheduledTime" type="time" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                    <label class="block text-xs text-faint uppercase tracking-wider mb-2">Horário</label>
+                    <input id="stageScheduledTime" type="time" class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none">
                 </div>
             </div>
             <div class="flex items-center gap-3">
-                <label class="inline-flex items-center gap-2 text-sm text-gray-300">
-                    <input type="checkbox" id="stageSendNow" class="rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0" checked>
+                <label class="inline-flex items-center gap-2 text-sm text-ink">
+                    <input type="checkbox" id="stageSendNow" class="rounded border-[color:var(--input-border)] bg-[color:var(--input-bg)] text-blue-600 focus:ring-blue-500 focus:ring-offset-0" checked>
                     Gerar agora
                 </label>
-                <p class="text-xs text-gray-500">Desmarque para agendar por data/hora.</p>
+                <p class="text-xs text-faint">Desmarque para agendar por data/hora.</p>
             </div>
-            <p id="stageScheduleStatus" class="text-xs text-gray-500 -mt-3"></p>
+            <p id="stageScheduleStatus" class="text-xs text-faint -mt-3"></p>
 
             <div class="grid grid-cols-2 gap-4">
                 <div>
-                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Delay mínimo (min)</label>
-                    <input id="stageDelayMin" type="number" min="1" max="60" value="5" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                    <label class="block text-xs text-faint uppercase tracking-wider mb-2">Delay mínimo (min)</label>
+                    <input id="stageDelayMin" type="number" min="1" max="60" value="5" class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none">
                 </div>
                 <div>
-                    <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Delay máximo (min)</label>
-                    <input id="stageDelayMax" type="number" min="1" max="60" value="15" class="w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none">
+                    <label class="block text-xs text-faint uppercase tracking-wider mb-2">Delay máximo (min)</label>
+                    <input id="stageDelayMax" type="number" min="1" max="60" value="15" class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none">
                 </div>
             </div>
 
             <div>
-                <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Instâncias (API 2.0)</label>
+                <label class="block text-xs text-faint uppercase tracking-wider mb-2">Instâncias (API 2.0)</label>
                 <div id="stageInstanceList" class="space-y-2"></div>
-                <p id="stageCapacityPreview" class="text-xs text-emerald-300 mt-2 hidden"></p>
+                <p id="stageCapacityPreview" class="text-xs text-emerald-700 dark:text-emerald-300 mt-2 hidden"></p>
             </div>
 
             <div>
-                <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">Variações da mensagem (máx. 5)</label>
+                <label class="block text-xs text-faint uppercase tracking-wider mb-2">Variações da mensagem (máx. 5)</label>
                 <div id="stageVariationsContainer" class="space-y-3"></div>
-                <button onclick="addStageVariation()" type="button" class="w-full mt-3 py-2 border-2 border-dashed border-gray-700 hover:border-gray-500 text-gray-500 hover:text-gray-300 rounded-lg text-sm font-medium transition-colors">
+                <button onclick="addStageVariation()" type="button" class="w-full mt-3 py-2 border-2 border-dashed border-[color:var(--card-border)] hover:border-[color:var(--primary)] text-faint hover:text-ink rounded-lg text-sm font-medium transition-colors">
                     Adicionar variação
                 </button>
             </div>
         </div>
-        <div class="p-4 border-t border-gray-700 bg-gray-900/50 flex justify-end gap-3">
-            <button onclick="closeStageCampaignModal()" class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancelar</button>
+        <div class="p-4 border-t border-[color:var(--card-border)] bg-black/[0.03] dark:bg-gray-900/50 flex justify-end gap-3">
+            <button onclick="closeStageCampaignModal()" class="px-4 py-2 text-sm text-faint hover:text-ink transition-colors">Cancelar</button>
             <button onclick="submitStageCampaign()" id="stageSubmitBtn" class="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-blue-500/20">
                 Gerar Campanha
             </button>
@@ -647,7 +650,7 @@
     async function openMessageModal(stepNumber, stepName) {
         CURRENT_STEP_NUMBER = stepNumber;
         document.getElementById('msgModalStepName').textContent = stepName;
-        document.getElementById('msgVariationsContainer').innerHTML = '<div class="text-center text-gray-500 py-4">Carregando...</div>';
+        document.getElementById('msgVariationsContainer').innerHTML = '<div class="text-center text-faint py-4">Carregando...</div>';
         document.getElementById('messageModal').classList.remove('hidden');
         updateModalBodyLock();
 
@@ -690,9 +693,9 @@
         div.className = 'flex gap-2 items-start animate-fade-in';
 
         div.innerHTML = `
-            <textarea class="msg-variation-input w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary h-24 resize-none placeholder-gray-600 transition-colors"
+            <textarea class="msg-variation-input w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary h-24 resize-none placeholder-[color:var(--input-placeholder)] transition-colors"
                 placeholder="Digite a mensagem...">${value}</textarea>
-            <button onclick="removeVariation(this)" class="text-gray-500 hover:text-red-400 p-2 rounded hover:bg-red-500/10 transition-colors" title="Remover variação">
+            <button onclick="removeVariation(this)" class="text-faint hover:text-red-500 dark:hover:text-red-400 p-2 rounded hover:bg-red-500/10 transition-colors" title="Remover variação">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
             </button>
         `;
@@ -766,15 +769,15 @@
         container.innerHTML = '';
         UAZAPI_INSTANCES.forEach((inst, idx) => {
             const row = document.createElement('label');
-            row.className = 'flex items-center gap-3 p-2 rounded-lg border border-gray-700/60 hover:bg-white/5 cursor-pointer';
+            row.className = 'flex items-center gap-3 p-2 rounded-lg border border-[color:var(--card-border)] hover:bg-black/[0.03] dark:hover:bg-white/5 cursor-pointer';
             const status = inst.status === 'connected' ? '● Conectado' : '○ Desconectado';
             const statusClass = inst.status === 'connected'
                 ? 'text-green-400 border-green-500/30 bg-green-500/10'
                 : 'text-red-400 border-red-500/30 bg-red-500/10';
             row.innerHTML = `
-                <input type="checkbox" onchange="updateStageCapacityPreview()" class="stage-instance-checkbox rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0" value="${inst.id}" ${idx === 0 ? 'checked' : ''}>
+                <input type="checkbox" onchange="updateStageCapacityPreview()" class="stage-instance-checkbox rounded border-[color:var(--input-border)] bg-[color:var(--input-bg)] text-blue-600 focus:ring-blue-500 focus:ring-offset-0" value="${inst.id}" ${idx === 0 ? 'checked' : ''}>
                 <div class="flex-1 flex items-center justify-between">
-                    <span class="text-sm text-gray-200">${inst.name}</span>
+                    <span class="text-sm text-ink">${inst.name}</span>
                     <span class="text-[10px] px-2 py-0.5 rounded-full border ${statusClass}">${status}</span>
                 </div>
             `;
@@ -792,8 +795,8 @@
         const row = document.createElement('div');
         row.className = 'flex gap-2 items-start';
         row.innerHTML = `
-            <textarea class="stage-variation-input w-full bg-gray-950/50 border border-gray-700/70 rounded-lg p-3 text-sm text-gray-200 focus:border-primary focus:outline-none h-20 resize-none" placeholder="Digite a mensagem...">${value}</textarea>
-            <button type="button" onclick="this.parentElement.remove()" class="text-gray-500 hover:text-red-400 p-2 rounded hover:bg-red-500/10 transition-colors" title="Remover variação">
+            <textarea class="stage-variation-input w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg p-3 text-sm text-ink focus:border-primary focus:outline-none h-20 resize-none" placeholder="Digite a mensagem...">${value}</textarea>
+            <button type="button" onclick="this.parentElement.remove()" class="text-faint hover:text-red-500 dark:hover:text-red-400 p-2 rounded hover:bg-red-500/10 transition-colors" title="Remover variação">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
             </button>
         `;
@@ -1300,7 +1303,7 @@
                     star.classList.add('text-yellow-400');
                     star.innerHTML = '<path fill="currentColor" d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path>';
                 } else {
-                    star.classList.add('text-gray-600');
+                    star.classList.add('text-faint');
                     star.innerHTML = '<path fill="currentColor" d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path>';
                 }
                 starsContainer.appendChild(star);

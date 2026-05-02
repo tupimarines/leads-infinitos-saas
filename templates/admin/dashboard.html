@@ -2,12 +2,35 @@
 
 {% block title %}Admin Dashboard - Leads Infinitos{% endblock %}
 
+{% block extra_head %}
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
+                }
+            }
+        }
+    }
+</script>
+{% endblock %}
+
 {% block body %}
 <div class="container py-8">
     <div class="flex justify-between items-center mb-8">
         <div>
-            <h1 class="text-3xl font-bold text-white mb-2">Super Admin</h1>
-            <p class="text-gray-400">Visão geral do sistema</p>
+            <h1 class="text-3xl font-bold text-ink mb-2">Super Admin</h1>
+            <p class="text-faint">Visão geral do sistema</p>
         </div>
         <div class="flex gap-4">
             <a href="{{ url_for('admin_dispatch_audit_page') }}" class="btn bg-slate-600 hover:bg-slate-500 text-white">Auditoria disparos</a>
@@ -20,28 +43,27 @@
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <!-- Users -->
         <div class="card p-6">
-            <div class="text-gray-400 text-sm font-medium mb-1">Total Usuários</div>
-            <div class="text-3xl font-bold text-white">{{ total_users }}</div>
+            <div class="text-faint text-sm font-medium mb-1">Total Usuários</div>
+            <div class="text-3xl font-bold text-ink">{{ total_users }}</div>
         </div>
 
         <!-- Active Licenses -->
         <div class="card p-6">
-            <div class="text-gray-400 text-sm font-medium mb-1">Licenças Ativas</div>
-            <div class="text-3xl font-bold text-green-400">{{ active_licenses }}</div>
+            <div class="text-faint text-sm font-medium mb-1">Licenças Ativas</div>
+            <div class="text-3xl font-bold text-green-600 dark:text-green-400">{{ active_licenses }}</div>
         </div>
 
         <!-- Campaigns -->
         <div class="card p-6">
-            <div class="text-gray-400 text-sm font-medium mb-1">Campanhas Criadas</div>
-            <div class="text-3xl font-bold text-blue-400">{{ total_campaigns }}</div>
+            <div class="text-faint text-sm font-medium mb-1">Campanhas Criadas</div>
+            <div class="text-3xl font-bold text-blue-600 dark:text-blue-400">{{ total_campaigns }}</div>
         </div>
 
         <!-- Messages Sent -->
         <div class="card p-6">
-            <div class="text-gray-400 text-sm font-medium mb-1">Total Envios</div>
-            <div class="text-3xl font-bold text-purple-400">{{ total_sent }}</div>
+            <div class="text-faint text-sm font-medium mb-1">Total Envios</div>
+            <div class="text-3xl font-bold text-purple-600 dark:text-purple-400">{{ total_sent }}</div>
         </div>
     </div>
 </div>
-<script src="https://cdn.tailwindcss.com"></script>
 {% endblock %}

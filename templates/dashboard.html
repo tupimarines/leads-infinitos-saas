@@ -7,36 +7,41 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
     tailwind.config = {
+        darkMode: 'class',
         theme: {
             extend: {
                 colors: {
-                    bg: '#0b1020',
-                    card: '#0f1630',
-                    primary: '#4f7cff',
-                    accent: '#8b5cf6',
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
                 }
             }
         }
     }
 </script>
 <style>
-    /* Glass card styling */
     .stat-card {
-        background: rgba(255, 255, 255, 0.1);
+        background: var(--card-bg);
         backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--card-border);
         border-radius: 16px;
         transition: all 0.3s ease;
+        box-shadow: var(--shadow);
     }
 
     .stat-card:hover {
-        border-color: rgba(79, 124, 255, 0.3);
+        border-color: color-mix(in srgb, var(--primary) 45%, var(--card-border));
         transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(79, 124, 255, 0.1);
+        box-shadow: var(--shadow), 0 8px 24px color-mix(in srgb, var(--primary) 12%, transparent);
     }
 
     h1 {
-        color: #e8ecf6;
+        color: var(--text);
     }
 </style>
 {% endblock %}
@@ -49,16 +54,16 @@
         <h1 class="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">
             Dashboard
         </h1>
-        <p class="text-gray-400 mt-2">Visão geral do seu desempenho</p>
+        <p class="text-faint mt-2">Visão geral do seu desempenho</p>
     </div>
 
     {% if reconnect_alerts %}
     <div class="mb-6 space-y-3" role="status" aria-live="polite" data-reconnect-alerts-stack>
         {% for a in reconnect_alerts %}
         <div data-reconnect-alert="{{ a.id }}"
-            class="relative rounded-xl border border-emerald-500/35 bg-emerald-500/10 pl-4 pr-10 py-3 text-sm text-gray-200 shadow-lg shadow-emerald-900/20">
+            class="relative rounded-xl border border-emerald-500/35 bg-emerald-500/10 pl-4 pr-10 py-3 text-sm text-slate-800 dark:text-gray-200 shadow-lg shadow-emerald-900/20">
             <button type="button"
-                class="absolute top-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
+                class="absolute top-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg text-slate-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10 hover:text-ink transition-colors"
                 onclick="dismissReconnectAlert({{ a.id }}, this)" title="Dispensar" aria-label="Dispensar aviso">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
                     stroke="currentColor" stroke-width="2">
@@ -66,7 +71,7 @@
                 </svg>
             </button>
             <strong class="text-emerald-300">Instância WhatsApp ligada</strong>
-            <p class="mt-1 text-gray-300 pr-1">{{ a.body_text }}</p>
+            <p class="mt-1 text-slate-700 dark:text-gray-300 pr-1">{{ a.body_text }}</p>
         </div>
         {% endfor %}
     </div>
@@ -86,8 +91,8 @@
                     </svg>
                 </div>
             </div>
-            <h3 class="text-sm text-gray-400 mb-1">Leads Extraídos (Mês)</h3>
-            <p class="text-3xl font-bold text-white" id="today-leads">-</p>
+            <h3 class="text-sm text-faint mb-1">Leads Extraídos (Mês)</h3>
+            <p class="text-3xl font-bold text-ink" id="today-leads">-</p>
         </div>
 
         <!-- Mensagens Enviadas (Hoje) -->
@@ -101,8 +106,8 @@
                     </svg>
                 </div>
             </div>
-            <h3 class="text-sm text-gray-400 mb-1">Mensagens Enviadas (Mês)</h3>
-            <p class="text-3xl font-bold text-white" id="today-sent">-</p>
+            <h3 class="text-sm text-faint mb-1">Mensagens Enviadas (Mês)</h3>
+            <p class="text-3xl font-bold text-ink" id="today-sent">-</p>
         </div>
 
         <!-- Taxa de Sucesso (Hoje) -->
@@ -116,8 +121,8 @@
                     </svg>
                 </div>
             </div>
-            <h3 class="text-sm text-gray-400 mb-1">Taxa de Sucesso (Mês)</h3>
-            <p class="text-3xl font-bold text-white" id="success-rate">-</p>
+            <h3 class="text-sm text-faint mb-1">Taxa de Sucesso (Mês)</h3>
+            <p class="text-3xl font-bold text-ink" id="success-rate">-</p>
         </div>
 
         <!-- Campanhas Ativas -->
@@ -131,9 +136,9 @@
                     </svg>
                 </div>
             </div>
-            <h3 class="text-sm text-gray-400 mb-1">Campanhas Ativas</h3>
-            <p class="text-3xl font-bold text-white" id="active-campaigns">-</p>
-            <p class="text-xs text-gray-500 mt-1">de <span id="total-campaigns">-</span> no total</p>
+            <h3 class="text-sm text-faint mb-1">Campanhas Ativas</h3>
+            <p class="text-3xl font-bold text-ink" id="active-campaigns">-</p>
+            <p class="text-xs text-faint mt-1 opacity-90">de <span id="total-campaigns">-</span> no total</p>
         </div>
 
     </div>
@@ -153,12 +158,12 @@
                     </svg>
                 </div>
                 <div>
-                    <h3 class="text-sm text-gray-400 mb-1">Negócios Fechados (Total)</h3>
-                    <p class="text-5xl font-bold text-white" id="total-deals">-</p>
+                    <h3 class="text-sm text-faint mb-1">Negócios Fechados (Total)</h3>
+                    <p class="text-5xl font-bold text-ink" id="total-deals">-</p>
                 </div>
             </div>
-            <div class="mt-4 pt-4 border-t border-white/5">
-                <p class="text-gray-400 text-sm">Acumulado de todas as campanhas</p>
+            <div class="mt-4 pt-4 border-t border-[color:var(--card-border)]">
+                <p class="text-faint text-sm">Acumulado de todas as campanhas</p>
             </div>
         </div>
 
@@ -174,12 +179,12 @@
                     </svg>
                 </div>
                 <div>
-                    <h3 class="text-sm text-gray-400 mb-1">Taxa de Conversão Geral</h3>
-                    <p class="text-5xl font-bold text-white" id="conversion-rate">-</p>
+                    <h3 class="text-sm text-faint mb-1">Taxa de Conversão Geral</h3>
+                    <p class="text-5xl font-bold text-ink" id="conversion-rate">-</p>
                 </div>
             </div>
-            <div class="mt-4 pt-4 border-t border-white/5">
-                <p class="text-gray-400 text-sm">Negócios fechados / Mensagens enviadas</p>
+            <div class="mt-4 pt-4 border-t border-[color:var(--card-border)]">
+                <p class="text-faint text-sm">Negócios fechados / Mensagens enviadas</p>
             </div>
         </div>
 
@@ -187,18 +192,18 @@
 
     <!-- Quick Actions -->
     <div class="stat-card p-6">
-        <h3 class="text-lg font-semibold text-white mb-4">Ações Rápidas</h3>
+        <h3 class="text-lg font-semibold text-ink mb-4">Ações Rápidas</h3>
         <div class="flex flex-wrap gap-4">
             <a href="{{ url_for('new_campaign') }}"
                 class="px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white font-semibold rounded-lg hover:opacity-90 transition-opacity">
                 Nova Campanha
             </a>
             <a href="{{ url_for('campaigns_list') }}"
-                class="px-6 py-3 bg-white/5 text-white font-semibold rounded-lg hover:bg-white/10 transition-colors border border-white/10">
+                class="px-6 py-3 bg-black/[0.04] dark:bg-white/5 text-ink dark:text-white font-semibold rounded-lg hover:bg-black/[0.08] dark:hover:bg-white/10 transition-colors border border-[color:var(--card-border)]">
                 Ver Campanhas
             </a>
             <a href="{{ url_for('jobs') }}"
-                class="px-6 py-3 bg-white/5 text-white font-semibold rounded-lg hover:bg-white/10 transition-colors border border-white/10">
+                class="px-6 py-3 bg-black/[0.04] dark:bg-white/5 text-ink dark:text-white font-semibold rounded-lg hover:bg-black/[0.08] dark:hover:bg-white/10 transition-colors border border-[color:var(--card-border)]">
                 Extrações
             </a>
         </div>

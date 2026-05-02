@@ -3,7 +3,8 @@
 {% block title %}Jobs de Scraping{% endblock %}
 
 {% block body %}
-<div class="container mt-4">
+<div class="section jobs-page">
+<div class="container">
     <div class="row">
         <div class="col-12 mb-4">
             <h2>Jobs de Scraping</h2>
@@ -26,7 +27,7 @@
                         style="background: rgba(255, 209, 102, 0.2); color: #ffd166; border: 1px solid rgba(255, 209, 102, 0.3);">Pendente</span>
                     {% elif job.status == 'running' %}
                     <span class="badge"
-                        style="background: rgba(79, 124, 255, 0.2); color: #4f7cff; border: 1px solid rgba(79, 124, 255, 0.3);">Executando</span>
+                        style="background: rgba(79, 124, 255, 0.2); color: var(--primary-600); border: 1px solid rgba(79, 124, 255, 0.3);">Executando</span>
                     {% elif job.status == 'completed' %}
                     <span class="badge"
                         style="background: rgba(25, 195, 125, 0.2); color: #19c37d; border: 1px solid rgba(25, 195, 125, 0.3);">Concluído</span>
@@ -58,7 +59,7 @@
 
             {% if job.status == 'running' %}
             <div class="job-progress">
-                <div class="progress" style="height: 6px;">
+                <div class="progress">
                     <div class="progress-bar" role="progressbar" style="width: {{ job.progress }}%"
                         aria-valuenow="{{ job.progress }}" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
@@ -97,8 +98,55 @@
     </div>
     {% endif %}
 </div>
+</div>
 
 <style>
+    .jobs-page .text-muted {
+        color: var(--muted);
+    }
+
+    .jobs-page .progress {
+        height: 6px;
+        border-radius: 999px;
+        background: var(--input-border);
+        overflow: hidden;
+    }
+
+    .jobs-page .progress-bar {
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--primary), var(--accent));
+        transition: width 0.3s ease;
+    }
+
+    .jobs-page .alert.alert-info {
+        padding: 16px 18px;
+        border-radius: var(--radius);
+        border: 1px solid var(--badge-border);
+        background: var(--badge-bg);
+        color: var(--text);
+    }
+
+    .jobs-page .alert-link {
+        color: var(--primary);
+        font-weight: 600;
+    }
+
+    .jobs-page .alert-link:hover {
+        color: var(--primary-600);
+    }
+
+    .jobs-page h2 {
+        margin: 0 0 8px;
+        color: var(--text);
+    }
+
+    .jobs-page .btn-sm {
+        height: 36px;
+        padding: 0 12px;
+        font-size: 13px;
+    }
+
     .job-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -107,8 +155,8 @@
 
     .job-card {
         padding: 20px;
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
         border-radius: 12px;
         display: flex;
         flex-direction: column;
@@ -118,8 +166,8 @@
 
     .job-card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
-        border-color: rgba(255, 255, 255, 0.15);
+        box-shadow: var(--shadow);
+        border-color: var(--primary);
     }
 
     .job-header {
@@ -185,7 +233,7 @@
         display: flex;
         gap: 8px;
         justify-content: flex-end;
-        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        border-top: 1px solid var(--card-border);
         padding-top: 16px;
     }
 

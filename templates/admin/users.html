@@ -2,11 +2,33 @@
 
 {% block title %}Gerenciar Usuários - Admin{% endblock %}
 
-{% block body %}
+{% block extra_head %}
 <script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
+                }
+            }
+        }
+    }
+</script>
+{% endblock %}
+
+{% block body %}
 <div class="container py-8">
     <div class="flex justify-between items-center mb-8">
-        <h1 class="text-3xl font-bold text-white">Gerenciar Usuários</h1>
+        <h1 class="text-3xl font-bold text-ink">Gerenciar Usuários</h1>
         <div class="flex gap-2">
             <button onclick="openCreateModal()" class="btn btn-primary bg-blue-600 hover:bg-blue-700">
                 + Novo Usuário
@@ -18,11 +40,11 @@
     <!-- Filters -->
     <div class="mb-6 flex gap-4">
         <input type="text" id="searchInput" placeholder="Filtrar por email, ID..."
-            class="bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 w-64 focus:outline-none focus:border-blue-500"
+            class="bg-slate-100 dark:bg-[#0c1430] border border-[color:var(--card-border)] rounded-lg text-ink dark:text-white px-4 py-2 w-64 focus:outline-none focus:border-primary"
             onkeyup="filterTable()">
 
         <select id="planFilter" onchange="filterTable()"
-            class="bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 focus:outline-none focus:border-blue-500">
+            class="bg-slate-100 dark:bg-[#0c1430] border border-[color:var(--card-border)] rounded-lg text-ink dark:text-white px-4 py-2 focus:outline-none focus:border-primary">
             <option value="all">Todos os Planos</option>
             <option value="starter">Starter</option>
             <option value="pro">Pro</option>
@@ -34,8 +56,8 @@
 
     <div class="card overflow-hidden">
         <div class="overflow-x-auto">
-            <table class="w-full text-left text-sm text-gray-400" id="usersTable">
-                <thead class="bg-gray-800/50 text-xs uppercase text-gray-300">
+            <table class="w-full text-left text-sm text-faint" id="usersTable">
+                <thead class="bg-slate-100/90 dark:bg-gray-800/50 text-xs uppercase text-slate-700 dark:text-gray-300">
                     <tr>
                         <th class="px-6 py-4">ID</th>
                         <th class="px-6 py-4">Email</th>
@@ -45,13 +67,13 @@
                         <th class="px-6 py-4 text-right">Ações</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-gray-700/50">
+                <tbody class="divide-y divide-[color:var(--card-border)]">
                     {% for user in users %}
-                    <tr class="hover:bg-gray-800/30 user-row" data-plan="{{ user.license_type or 'no-plan' }}"
+                    <tr class="hover:bg-black/[0.03] dark:hover:bg-gray-800/30 user-row" data-plan="{{ user.license_type or 'no-plan' }}"
                         data-search="{{ user.email }} {{ user.id }}">
 
                         <td class="px-6 py-4">{{ user.id }}</td>
-                        <td class="px-6 py-4 font-medium text-white">{{ user.email }}</td>
+                        <td class="px-6 py-4 font-medium text-ink">{{ user.email }}</td>
                         <td class="px-6 py-4">
                             {% if user.is_admin %}
                             <span
@@ -111,75 +133,75 @@
 </div>
 
 <!-- Modal User Details -->
-<div id="detailsModal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50">
-    <div class="card p-6 w-full max-w-3xl mx-4 relative max-h-[90vh] overflow-y-auto">
-        <button onclick="closeDetailsModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white">✕</button>
+<div id="detailsModal" class="fixed inset-0 modal-backdrop hidden items-center justify-center z-50">
+    <div class="card p-6 w-full max-w-3xl mx-4 relative max-h-[90vh] overflow-y-auto text-ink">
+        <button onclick="closeDetailsModal()" class="absolute top-4 right-4 text-faint hover:text-ink">✕</button>
 
-        <h3 class="text-xl font-bold text-white mb-6">Detalhes do Usuário</h3>
+        <h3 class="text-xl font-bold text-ink mb-6">Detalhes do Usuário</h3>
 
         <div id="modalLoading" class="text-center py-8">
-            <span class="text-blue-400 animate-pulse">Carregando...</span>
+            <span class="text-primary animate-pulse">Carregando...</span>
         </div>
 
         <div id="modalContent" class="hidden space-y-6">
             <!-- Info Grid -->
             <div class="grid grid-cols-2 gap-4">
                 <div class="col-span-2">
-                    <label class="text-xs text-gray-500 uppercase">Email (Editar)</label>
+                    <label class="text-xs text-faint uppercase">Email (Editar)</label>
                     <input type="email" id="editEmail"
-                        class="w-full bg-[#0c1430] border border-gray-700 rounded text-white px-2 py-1 mt-1 focus:outline-none focus:border-blue-500">
+                        class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded text-ink px-2 py-1 mt-1 focus:outline-none focus:border-primary">
                 </div>
                 <div class="col-span-2">
-                    <label class="text-xs text-gray-500 uppercase">Senha (Deixe vazio para manter)</label>
+                    <label class="text-xs text-faint uppercase">Senha (Deixe vazio para manter)</label>
                     <div class="flex gap-2">
                         <input type="password" id="editPassword" placeholder="Nova senha..."
-                            class="flex-1 bg-[#0c1430] border border-gray-700 rounded text-white px-2 py-1 mt-1 focus:outline-none focus:border-blue-500">
+                            class="flex-1 bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded text-ink px-2 py-1 mt-1 focus:outline-none focus:border-primary">
                         <button onclick="saveUserChanges()"
-                            class="mt-1 px-3 py-1 bg-green-500/20 text-green-400 border border-green-500/30 rounded hover:bg-green-500/30 transition-colors text-sm">
+                            class="mt-1 px-3 py-1 bg-green-500/20 text-green-700 dark:text-green-400 border border-green-500/30 rounded hover:bg-green-500/30 transition-colors text-sm">
                             Salvar
                         </button>
                     </div>
                 </div>
 
                 <div>
-                    <label class="text-xs text-gray-500 uppercase">Assinante Desde</label>
-                    <div id="detailSince" class="text-white"></div>
+                    <label class="text-xs text-faint uppercase">Assinante Desde</label>
+                    <div id="detailSince" class="text-ink"></div>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-500 uppercase">Plano Atual</label>
-                    <div id="detailPlan" class="text-white font-bold"></div>
+                    <label class="text-xs text-faint uppercase">Plano Atual</label>
+                    <div id="detailPlan" class="text-ink font-bold"></div>
                 </div>
 
-                <div class="col-span-2 mt-2 pt-2 border-t border-gray-700">
-                    <label class="text-xs text-gray-500 uppercase mb-1 block">Conexão WhatsApp</label>
+                <div class="col-span-2 mt-2 pt-2 border-t border-[color:var(--card-border)]">
+                    <label class="text-xs text-faint uppercase mb-1 block">Conexão WhatsApp</label>
                     <div class="space-y-2">
                         <div class="flex gap-2">
                             <input type="text" id="newInstanceName" placeholder="Nome da nova instância"
-                                class="flex-1 bg-[#0c1430] border border-gray-700 rounded text-white px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
+                                class="flex-1 bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded text-ink px-2 py-1 text-sm focus:outline-none focus:border-primary">
                             <button onclick="addInstance()"
-                                class="px-3 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded hover:bg-blue-500/30 transition-colors text-sm">
+                                class="px-3 py-1 bg-blue-500/20 text-blue-700 dark:text-blue-400 border border-blue-500/30 rounded hover:bg-blue-500/30 transition-colors text-sm">
                                 Adicionar instância
                             </button>
                         </div>
-                        <div id="instanceLimitError" class="hidden text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1"></div>
+                        <div id="instanceLimitError" class="hidden text-xs text-red-600 dark:text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1"></div>
                         <div id="detailWhatsapp"
-                            class="text-sm space-y-2 bg-[#0c1430] p-2 rounded border border-gray-700/50">
+                            class="text-sm space-y-2 bg-[color:var(--input-bg)] p-2 rounded border border-[color:var(--card-border)]">
                         </div>
                     </div>
                 </div>
             </div>
 
-            <hr class="border-gray-700">
+            <hr class="border-[color:var(--card-border)]">
 
             <!-- Actions -->
             <div class="space-y-4">
                 <!-- Change Plan -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Alterar Plano</label>
+                    <label class="block text-sm font-medium text-faint mb-2">Alterar Plano</label>
                     <form action="{{ url_for('admin_create_license') }}" method="POST" class="flex flex-col md:flex-row gap-2 items-stretch">
                         <input type="hidden" name="user_id" id="formPlanUserId">
                         <select name="license_type"
-                            class="w-full md:flex-1 min-w-0 bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 text-sm focus:outline-none focus:border-blue-500">
+                            class="w-full md:flex-1 min-w-0 bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg text-ink px-4 py-2 text-sm focus:outline-none focus:border-primary">
                             <option value="starter">Starter (1 instância, 1k extrações/mês, 30 disparos iniciais/dia por instância)</option>
                             <option value="starter_trial">Starter Trial (1 instância, 100 extrações, 10 disparos/dia/instância, 7 dias)</option>
                             <option value="pro">Pro (2 instâncias, 2k extrações/mês, 30 disparos/dia/instância)</option>
@@ -207,27 +229,27 @@
 </div>
 
 <!-- Create User Modal -->
-<div id="createModal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50">
-    <div class="card p-6 w-full max-w-md mx-4 relative">
-        <button onclick="closeCreateModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white">✕</button>
-        <h3 class="text-xl font-bold text-white mb-6">Criar Novo Usuário</h3>
+<div id="createModal" class="fixed inset-0 modal-backdrop hidden items-center justify-center z-50">
+    <div class="card p-6 w-full max-w-md mx-4 relative text-ink">
+        <button onclick="closeCreateModal()" class="absolute top-4 right-4 text-faint hover:text-ink">✕</button>
+        <h3 class="text-xl font-bold text-ink mb-6">Criar Novo Usuário</h3>
         <form id="createForm" onsubmit="createUser(event)">
             <div class="space-y-4">
                 <div>
-                    <label class="text-sm text-gray-400">Email</label>
+                    <label class="text-sm text-faint">Email</label>
                     <input type="email" name="email" required
-                        class="w-full bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 mt-1 focus:outline-none focus:border-blue-500">
+                        class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg text-ink px-4 py-2 mt-1 focus:outline-none focus:border-primary">
                 </div>
                 <div>
-                    <label class="text-sm text-gray-400">Senha</label>
+                    <label class="text-sm text-faint">Senha</label>
                     <input type="password" name="password" required
-                        class="w-full bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 mt-1 focus:outline-none focus:border-blue-500">
+                        class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg text-ink px-4 py-2 mt-1 focus:outline-none focus:border-primary">
                 </div>
                 <div>
-                    <label class="text-sm text-gray-400">Nome da Instância WhatsApp (Opcional)</label>
+                    <label class="text-sm text-faint">Nome da Instância WhatsApp (Opcional)</label>
                     <input type="text" name="instance_name" placeholder="Ex: instance_augusto"
-                        class="w-full bg-[#0c1430] border border-gray-700 rounded-lg text-white px-4 py-2 mt-1 focus:outline-none focus:border-blue-500">
-                    <p class="text-xs text-gray-500 mt-1">Se preenchido, cria e vincula uma instância.</p>
+                        class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded-lg text-ink px-4 py-2 mt-1 focus:outline-none focus:border-primary">
+                    <p class="text-xs text-faint mt-1">Se preenchido, cria e vincula uma instância.</p>
                 </div>
                 <button type="submit" class="btn btn-primary w-full">Criar Usuário</button>
             </div>
@@ -328,7 +350,7 @@
                 planDiv.className = getDataPlanColor(data.license.type);
             } else {
                 planDiv.textContent = 'Sem Plano Ativo';
-                planDiv.className = 'text-gray-500 font-bold';
+                planDiv.className = 'text-faint font-bold';
             }
 
             loading.style.display = 'none';
@@ -343,26 +365,26 @@
     function renderInstances() {
         const waDiv = document.getElementById('detailWhatsapp');
         if (!currentUserInstances.length) {
-            waDiv.innerHTML = '<span class="text-gray-500">Nenhuma instância cadastrada.</span>';
+            waDiv.innerHTML = '<span class="text-faint">Nenhuma instância cadastrada.</span>';
             return;
         }
 
         waDiv.innerHTML = currentUserInstances.map((inst) => {
             const status = (inst.status || 'disconnected').toLowerCase();
-            const statusColor = status === 'connected' ? 'text-green-400' : (status === 'connecting' ? 'text-yellow-400' : 'text-gray-400');
+            const statusColor = status === 'connected' ? 'text-green-600 dark:text-green-400' : (status === 'connecting' ? 'text-amber-600 dark:text-yellow-400' : 'text-faint');
             const provider = (inst.api_provider || 'megaapi').toUpperCase();
             return `
-                <div class="flex items-center gap-2 border border-gray-700/60 rounded p-2">
+                <div class="flex items-center gap-2 border border-[color:var(--card-border)] rounded p-2">
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2">
                             <span class="font-medium ${statusColor}">${inst.name}</span>
-                            <span class="text-xs text-gray-500">(${status})</span>
-                            <span class="text-[10px] px-1 py-0.5 rounded bg-gray-700 text-gray-300">${provider}</span>
+                            <span class="text-xs text-faint">(${status})</span>
+                            <span class="text-[10px] px-1 py-0.5 rounded bg-black/[0.06] dark:bg-gray-700 text-ink">${provider}</span>
                         </div>
-                        <div id="waJidContainer-${inst.id}" class="text-xs text-gray-500 truncate"></div>
+                        <div id="waJidContainer-${inst.id}" class="text-xs text-faint truncate"></div>
                     </div>
                     <button onclick="verifyWhatsappStatus('${inst.apikey}', ${inst.id})"
-                        class="text-xs bg-blue-500/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors"
+                        class="text-xs bg-blue-500/20 text-blue-700 dark:text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors"
                         title="Verificar Status">
                         ⟳
                     </button>
@@ -416,9 +438,9 @@
                 // Update JID display directly
                 const jidContainer = document.getElementById(`waJidContainer-${instanceId}`);
                 if (jid) {
-                    jidContainer.innerHTML = `<span class="text-xs text-green-400 block">${jid} (Validado)</span>`;
+                    jidContainer.innerHTML = `<span class="text-xs text-green-600 dark:text-green-400 block">${jid} (Validado)</span>`;
                 } else {
-                    jidContainer.innerHTML = `<span class="text-xs text-gray-500 block">JID não detectado</span>`;
+                    jidContainer.innerHTML = `<span class="text-xs text-faint block">JID não detectado</span>`;
                 }
 
                 // Temporary success indicator on button
@@ -472,11 +494,11 @@
 
     function getDataPlanColor(type) {
         switch (type) {
-            case 'starter': return 'text-green-400 font-bold';
-            case 'pro': return 'text-blue-400 font-bold';
-            case 'scale': return 'text-purple-400 font-bold';
-            case 'infinite': return 'text-cyan-400 font-bold';
-            default: return 'text-gray-300 font-bold';
+            case 'starter': return 'text-green-600 dark:text-green-400 font-bold';
+            case 'pro': return 'text-blue-600 dark:text-blue-400 font-bold';
+            case 'scale': return 'text-purple-600 dark:text-purple-400 font-bold';
+            case 'infinite': return 'text-cyan-600 dark:text-cyan-400 font-bold';
+            default: return 'text-ink font-bold';
         }
     }
 

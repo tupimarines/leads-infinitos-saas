@@ -2,65 +2,156 @@
 
 {% block title %}Minhas Licenças - Leads Infinitos{% endblock %}
 
-{% block content %}
-<div class="container mt-4">
-    <div class="row">
-        <div class="col-12">
-            <h2 class="mb-4">Minhas Licenças</h2>
-            
-            {% if licenses %}
-                <div class="row">
-                    {% for license in licenses %}
-                    <div class="col-md-6 mb-3">
-                        <div class="card">
-                            <div class="card-body">
-                                <h5 class="card-title">
-                                    Licença {{ license.license_type.title() }}
-                                    {% if license.status == 'active' %}
-                                        <span class="badge bg-success">Ativa</span>
-                                    {% elif license.status == 'expired' %}
-                                        <span class="badge bg-danger">Expirada</span>
-                                    {% else %}
-                                        <span class="badge bg-warning">{{ license.status.title() }}</span>
-                                    {% endif %}
-                                </h5>
-                                
-                                <div class="row">
-                                    <div class="col-6">
-                                        <small class="text-muted">Data de Compra:</small>
-                                        <p class="mb-1">{{ license.purchase_date[:10] }}</p>
-                                    </div>
-                                    <div class="col-6">
-                                        <small class="text-muted">Expira em:</small>
-                                        <p class="mb-1">{{ license.expires_at[:10] }}</p>
-                                    </div>
-                                </div>
-                                
-                                <div class="mt-2">
-                                    <small class="text-muted">ID da Compra:</small>
-                                    <p class="mb-0 small">{{ license.hotmart_purchase_id }}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-            {% else %}
-                <div class="alert alert-info">
-                    <h5>Nenhuma licença encontrada</h5>
-                    <p>Você ainda não possui licenças ativas. Para usar o Leads Infinitos, você precisa comprar uma licença na Hotmart.</p>
-                    <a href="https://hotmart.com/pt-br/marketplace/produtos/leads-infinitos" class="btn btn-primary" target="_blank">
-                        Comprar Licença
-                    </a>
-                </div>
-            {% endif %}
-            
-            <div class="mt-4">
-                <a href="{{ url_for('index') }}" class="btn btn-secondary">
-                    <i class="fas fa-arrow-left"></i> Voltar
-                </a>
-            </div>
+{% block body %}
+<div class="section licenses-page">
+  <div class="container">
+    <h1 class="licenses-page__title">Minhas Licenças</h1>
+    <p class="muted licenses-page__lead">Visualize o status das suas licenças e datas importantes.</p>
+
+    {% if licenses %}
+    <div class="licenses-grid">
+      {% for license in licenses %}
+      <div class="card licenses-page__card">
+        <h3 class="licenses-page__card-title">
+          Licença {{ license.license_type.title() }}
+          {% if license.status == 'active' %}
+          <span class="badge license-status license-status--active">Ativa</span>
+          {% elif license.status == 'expired' %}
+          <span class="badge license-status license-status--expired">Expirada</span>
+          {% else %}
+          <span class="badge license-status license-status--other">{{ license.status.title() }}</span>
+          {% endif %}
+        </h3>
+
+        <div class="licenses-page__meta">
+          <div>
+            <span class="muted" style="font-size: 12px; font-weight: 600;">Data de compra</span>
+            <p class="licenses-page__meta-value">{{ license.purchase_date[:10] }}</p>
+          </div>
+          <div>
+            <span class="muted" style="font-size: 12px; font-weight: 600;">Expira em</span>
+            <p class="licenses-page__meta-value">{{ license.expires_at[:10] }}</p>
+          </div>
         </div>
+
+        <div class="licenses-page__id">
+          <span class="muted">ID da compra</span>
+          <p class="licenses-page__id-value">{{ license.hotmart_purchase_id }}</p>
+        </div>
+      </div>
+      {% endfor %}
     </div>
+    {% else %}
+    <div class="card licenses-page__empty">
+      <h3>Nenhuma licença encontrada</h3>
+      <p class="muted">Você ainda não possui licenças ativas. Para usar o Leads Infinitos, você precisa comprar uma licença na Hotmart.</p>
+      <a href="https://hotmart.com/pt-br/marketplace/produtos/leads-infinitos" class="btn btn-primary" target="_blank"
+        rel="noopener noreferrer">
+        Comprar licença
+      </a>
+    </div>
+    {% endif %}
+
+    <p style="margin-top: 28px;">
+      <a href="{{ url_for('index') }}" class="btn">Voltar ao início</a>
+    </p>
+  </div>
 </div>
+
+<style>
+  .licenses-page__title {
+    margin: 0 0 8px;
+    font-size: 28px;
+    color: var(--text);
+  }
+
+  .licenses-page__lead {
+    margin: 0 0 24px;
+  }
+
+  .licenses-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 20px;
+  }
+
+  .licenses-page__card {
+    padding: 22px;
+  }
+
+  .licenses-page__card-title {
+    margin: 0 0 16px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .license-status--active {
+    background: rgba(25, 195, 125, 0.18);
+    border-color: rgba(25, 195, 125, 0.35);
+    color: var(--success);
+  }
+
+  .license-status--expired {
+    background: rgba(255, 93, 93, 0.18);
+    border-color: rgba(255, 93, 93, 0.35);
+    color: var(--danger);
+  }
+
+  .license-status--other {
+    background: rgba(255, 209, 102, 0.2);
+    border-color: rgba(255, 209, 102, 0.35);
+    color: var(--countdown);
+  }
+
+  .licenses-page__meta-value {
+    margin: 4px 0 0;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  .licenses-page__meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 20px;
+  }
+
+  .licenses-page__id {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--card-border);
+  }
+
+  .licenses-page__id-value {
+    margin: 6px 0 0;
+    font-size: 13px;
+    word-break: break-all;
+    color: var(--text);
+  }
+
+  .licenses-page__empty {
+    padding: 28px;
+    max-width: 520px;
+  }
+
+  .licenses-page__empty h3 {
+    margin: 0 0 12px;
+    color: var(--text);
+  }
+
+  .licenses-page__empty .btn-primary {
+    margin-top: 16px;
+  }
+
+  @media (max-width: 520px) {
+    .licenses-page__meta {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
 {% endblock %}

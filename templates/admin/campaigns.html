@@ -2,12 +2,35 @@
 
 {% block title %}Admin - Campanhas - Leads Infinitos{% endblock %}
 
+{% block extra_head %}
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
+                }
+            }
+        }
+    }
+</script>
+{% endblock %}
+
 {% block body %}
 <div class="container py-8">
     <div class="flex justify-between items-center mb-8">
         <div>
-            <h1 class="text-3xl font-bold text-white mb-2">Gerenciar Campanhas</h1>
-            <p class="text-gray-400">Todas as campanhas do sistema</p>
+            <h1 class="text-3xl font-bold text-ink mb-2">Gerenciar Campanhas</h1>
+            <p class="text-faint">Todas as campanhas do sistema</p>
         </div>
         <div class="flex gap-4">
             <a href="{{ url_for('admin_dispatch_audit_page') }}"
@@ -31,23 +54,23 @@
     <div class="card p-4 mb-6">
         <div class="flex flex-wrap gap-2">
             <a href="{{ url_for('admin_campaigns') }}"
-                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-blue-600 text-white' if not status_filter else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-blue-600 text-white' if not status_filter else 'bg-slate-200 dark:bg-gray-700 text-slate-800 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-gray-600' }}">
                 Todas ({{ counts.all }})
             </a>
             <a href="{{ url_for('admin_campaigns', status='running') }}"
-                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-green-600 text-white' if status_filter == 'running' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-green-600 text-white' if status_filter == 'running' else 'bg-slate-200 dark:bg-gray-700 text-slate-800 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-gray-600' }}">
                 🟢 Ativas ({{ counts.running }})
             </a>
             <a href="{{ url_for('admin_campaigns', status='pending') }}"
-                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-yellow-600 text-white' if status_filter == 'pending' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-yellow-600 text-white' if status_filter == 'pending' else 'bg-slate-200 dark:bg-gray-700 text-slate-800 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-gray-600' }}">
                 🟡 Pendentes ({{ counts.pending }})
             </a>
             <a href="{{ url_for('admin_campaigns', status='paused') }}"
-                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-orange-600 text-white' if status_filter == 'paused' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-orange-600 text-white' if status_filter == 'paused' else 'bg-slate-200 dark:bg-gray-700 text-slate-800 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-gray-600' }}">
                 ⏸️ Pausadas ({{ counts.paused }})
             </a>
             <a href="{{ url_for('admin_campaigns', status='completed') }}"
-                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-purple-600 text-white' if status_filter == 'completed' else 'bg-gray-700 text-gray-300 hover:bg-gray-600' }}">
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ 'bg-purple-600 text-white' if status_filter == 'completed' else 'bg-slate-200 dark:bg-gray-700 text-slate-800 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-gray-600' }}">
                 ✅ Concluídas ({{ counts.completed }})
             </a>
         </div>
@@ -88,29 +111,29 @@
             </div>
 
             <!-- Info -->
-            <h3 class="text-lg font-bold text-white mb-2 pr-24">{{ campaign.name }}</h3>
-            <p class="text-sm text-gray-400 mb-4">
+            <h3 class="text-lg font-bold text-ink mb-2 pr-24">{{ campaign.name }}</h3>
+            <p class="text-sm text-faint mb-4">
                 <span class="text-blue-400">{{ campaign.user_email }}</span>
             </p>
 
             <!-- Stats -->
             <div class="grid grid-cols-3 gap-2 mb-4">
-                <div class="bg-gray-800/50 rounded p-2 text-center">
-                    <div class="text-xs text-gray-500">Total</div>
-                    <div class="text-lg font-bold text-white">{{ campaign.total_leads }}</div>
+                <div class="bg-slate-100 dark:bg-gray-800/50 rounded p-2 text-center">
+                    <div class="text-xs text-faint">Total</div>
+                    <div class="text-lg font-bold text-ink">{{ campaign.total_leads }}</div>
                 </div>
-                <div class="bg-gray-800/50 rounded p-2 text-center">
-                    <div class="text-xs text-gray-500">Enviados</div>
-                    <div class="text-lg font-bold text-green-400 sent-count">{{ campaign.sent_count }}</div>
+                <div class="bg-slate-100 dark:bg-gray-800/50 rounded p-2 text-center">
+                    <div class="text-xs text-faint">Enviados</div>
+                    <div class="text-lg font-bold text-green-600 dark:text-green-400 sent-count">{{ campaign.sent_count }}</div>
                 </div>
-                <div class="bg-gray-800/50 rounded p-2 text-center">
-                    <div class="text-xs text-gray-500">Pendentes</div>
+                <div class="bg-slate-100 dark:bg-gray-800/50 rounded p-2 text-center">
+                    <div class="text-xs text-faint">Pendentes</div>
                     <div class="text-lg font-bold text-yellow-400 pending-count">{{ campaign.pending_count }}</div>
                 </div>
             </div>
 
             <!-- Date -->
-            <p class="text-xs text-gray-500 mb-4">
+            <p class="text-xs text-faint mb-4">
                 Criada em: {{ (campaign.created_at|to_brt).strftime('%d/%m/%Y %H:%M') if campaign.created_at else 'N/A' }}
             </p>
 
@@ -131,7 +154,7 @@
             </div>
         </div>
         {% else %}
-        <div class="col-span-full text-center py-12 text-gray-500">
+        <div class="col-span-full text-center py-12 text-faint">
             Nenhuma campanha encontrada.
         </div>
         {% endfor %}
@@ -139,40 +162,40 @@
 </div>
 
 <!-- Modal: forçar chunk inicial (admin) -->
-<div id="force-chunk-modal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4 bg-black/80"
+<div id="force-chunk-modal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4 modal-backdrop"
     onclick="if(event.target===this) closeForceChunkModal()">
-    <div class="bg-gray-900 border border-violet-600/40 rounded-xl max-w-lg w-full shadow-2xl"
+    <div class="bg-elevated border border-[color:var(--card-border)] rounded-xl max-w-lg w-full shadow-2xl text-ink"
         onclick="event.stopPropagation()">
-        <div class="px-5 py-4 border-b border-gray-700">
-            <h2 class="text-lg font-semibold text-white">Forçar chunk inicial (Uazapi)</h2>
-            <p class="text-sm text-gray-400 mt-1">Cria o próximo lote de envio inicial (Uazapi) para pendentes que
-                ainda não tiveram mensagem. <span class="text-amber-300/90">Com cadência:</span> agendamento
-                + materialize imediato. <span class="text-amber-300/90">Sem cadência:</span> criação direta
+        <div class="px-5 py-4 border-b border-[color:var(--card-border)]">
+            <h2 class="text-lg font-semibold text-ink">Forçar chunk inicial (Uazapi)</h2>
+            <p class="text-sm text-faint mt-1">Cria o próximo lote de envio inicial (Uazapi) para pendentes que
+                ainda não tiveram mensagem. <span class="text-amber-700 dark:text-amber-300/90">Com cadência:</span> agendamento
+                + materialize imediato. <span class="text-amber-700 dark:text-amber-300/90">Sem cadência:</span> criação direta
                 (create_advanced) como no fluxo de nova campanha. Opcional: cancela chunks
                 iniciais agendados/retomada presos.</p>
         </div>
-        <div class="px-5 py-4 space-y-4 text-sm text-gray-300">
+        <div class="px-5 py-4 space-y-4 text-sm text-ink">
             <div>
-                <label class="block text-gray-400 mb-1">ID da campanha *</label>
+                <label class="block text-faint mb-1">ID da campanha *</label>
                 <input type="number" id="force-campaign-id" min="1"
-                    class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white"
+                    class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded px-3 py-2 text-ink"
                     placeholder="ex.: 210" />
             </div>
             <div>
-                <label class="block text-gray-400 mb-1">Confirmação: nome exato (opcional)</label>
+                <label class="block text-faint mb-1">Confirmação: nome exato (opcional)</label>
                 <input type="text" id="force-confirm-name"
-                    class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white"
+                    class="w-full bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded px-3 py-2 text-ink"
                     placeholder="Cole o nome completo se quiser evitar enganos" />
             </div>
             <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" id="force-cancel-scheduled" checked class="rounded border-gray-600" />
+                <input type="checkbox" id="force-cancel-scheduled" checked class="rounded border-[color:var(--input-border)]" />
                 <span>Cancelar chunks iniciais agendados/retomada (recomendado p/ destravar)</span>
             </label>
-            <pre id="force-chunk-output" class="hidden text-xs bg-black/50 border border-gray-700 rounded p-3 max-h-64 overflow-y-auto text-left whitespace-pre-wrap break-words"></pre>
+            <pre id="force-chunk-output" class="hidden text-xs bg-slate-200/90 dark:bg-black/50 border border-[color:var(--card-border)] rounded p-3 max-h-64 overflow-y-auto text-left whitespace-pre-wrap break-words text-faint"></pre>
         </div>
-        <div class="px-5 py-3 border-t border-gray-700 flex justify-end gap-2">
+        <div class="px-5 py-3 border-t border-[color:var(--card-border)] flex justify-end gap-2">
             <button type="button" onclick="closeForceChunkModal()"
-                class="px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-white">Cancelar</button>
+                class="px-4 py-2 rounded-lg bg-slate-200 text-ink hover:bg-slate-300 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-600">Cancelar</button>
             <button type="button" id="force-chunk-submit" onclick="submitForceChunk()"
                 class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-medium">Executar</button>
         </div>
@@ -180,22 +203,21 @@
 </div>
 
 <!-- Modal detalhes (superadmin) -->
-<div id="campaign-detail-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/70"
+<div id="campaign-detail-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-backdrop"
     onclick="if(event.target===this) closeCampaignDetail()">
-    <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl"
+    <div class="bg-elevated border border-[color:var(--card-border)] rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl text-ink"
         onclick="event.stopPropagation()">
-        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-            <h2 class="text-lg font-semibold text-white">Detalhes da campanha</h2>
+        <div class="flex items-center justify-between px-5 py-4 border-b border-[color:var(--card-border)]">
+            <h2 class="text-lg font-semibold text-ink">Detalhes da campanha</h2>
             <button type="button" onclick="closeCampaignDetail()"
-                class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+                class="text-faint hover:text-ink text-2xl leading-none">&times;</button>
         </div>
-        <div id="campaign-detail-body" class="px-5 py-4 overflow-y-auto text-sm text-gray-300 space-y-6">
-            <p class="text-gray-500">Carregando…</p>
+        <div id="campaign-detail-body" class="px-5 py-4 overflow-y-auto text-sm text-faint space-y-6">
+            <p class="text-faint">Carregando…</p>
         </div>
     </div>
 </div>
 
-<script src="https://cdn.tailwindcss.com"></script>
 <script>
     const ADMIN_CSRF = {{ csrf_token|tojson }};
     function esc(s) {
@@ -285,19 +307,19 @@
         const body = document.getElementById('campaign-detail-body');
         m.classList.remove('hidden');
         m.classList.add('flex');
-        body.innerHTML = '<p class="text-gray-500">Carregando…</p>';
+        body.innerHTML = '<p class="text-faint">Carregando…</p>';
         try {
             const res = await fetch(`/api/admin/campaigns/${id}/detail`);
             const data = await res.json();
             if (!res.ok) {
-                body.innerHTML = '<p class="text-red-400">' + esc(data.error || 'Erro ao carregar') + '</p>';
+                body.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(data.error || 'Erro ao carregar') + '</p>';
                 return;
             }
             const fc = document.getElementById('force-campaign-id');
             if (fc) fc.value = id;
             body.innerHTML = renderCampaignDetail(data);
         } catch (err) {
-            body.innerHTML = '<p class="text-red-400">' + esc(err.message) + '</p>';
+            body.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(err.message) + '</p>';
         }
     }
 
@@ -329,56 +351,56 @@
 
         let html = '<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">';
         for (const [k, v] of rows) {
-            html += `<div class="text-gray-500">${esc(k)}</div><div class="text-white font-medium break-all">${esc(v)}</div>`;
+            html += `<div class="text-faint">${esc(k)}</div><div class="text-ink font-medium break-all">${esc(v)}</div>`;
         }
         html += '</div>';
 
         if (c.message_template) {
-            html += '<div><h3 class="text-white font-semibold mb-2 mt-4">Modelo de mensagem</h3><pre class="bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words max-h-48 overflow-y-auto">' + esc(c.message_template) + '</pre></div>';
+            html += '<div><h3 class="text-ink font-semibold mb-2 mt-4">Modelo de mensagem</h3><pre class="bg-slate-100 dark:bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words max-h-48 overflow-y-auto text-ink">' + esc(c.message_template) + '</pre></div>';
         }
         if (c.cadence_config && Object.keys(c.cadence_config).length) {
-            html += '<div><h3 class="text-white font-semibold mb-2">Config. cadência (JSON)</h3><pre class="bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words">' + esc(JSON.stringify(c.cadence_config, null, 2)) + '</pre></div>';
+            html += '<div><h3 class="text-ink font-semibold mb-2">Config. cadência (JSON)</h3><pre class="bg-slate-100 dark:bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words text-ink">' + esc(JSON.stringify(c.cadence_config, null, 2)) + '</pre></div>';
         }
 
-        html += '<div><h3 class="text-white font-semibold mb-2">Leads por status</h3>';
-        if (!leadSt.length) html += '<p class="text-gray-500">Nenhum lead nesta campanha.</p>';
+        html += '<div><h3 class="text-ink font-semibold mb-2">Leads por status</h3>';
+        if (!leadSt.length) html += '<p class="text-faint">Nenhum lead nesta campanha.</p>';
         else {
-            html += '<table class="w-full text-left border border-gray-700 rounded overflow-hidden"><thead class="bg-gray-800"><tr><th class="px-3 py-2">Status</th><th class="px-3 py-2">Qtd</th></tr></thead><tbody>';
+            html += '<table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-3 py-2 text-ink">Status</th><th class="px-3 py-2 text-ink">Qtd</th></tr></thead><tbody>';
             for (const r of leadSt) {
-                html += `<tr class="border-t border-gray-700"><td class="px-3 py-1">${esc(r.status)}</td><td class="px-3 py-1">${esc(r.n)}</td></tr>`;
+                html += `<tr class="border-t border-[color:var(--card-border)]"><td class="px-3 py-1 text-ink">${esc(r.status)}</td><td class="px-3 py-1 text-ink">${esc(r.n)}</td></tr>`;
             }
             html += '</tbody></table>';
         }
         html += '</div>';
 
-        html += '<div><h3 class="text-white font-semibold mb-2">Instâncias</h3>';
-        if (!inst.length) html += '<p class="text-gray-500">Nenhuma instância vinculada.</p>';
+        html += '<div><h3 class="text-ink font-semibold mb-2">Instâncias</h3>';
+        if (!inst.length) html += '<p class="text-faint">Nenhuma instância vinculada.</p>';
         else {
-            html += '<table class="w-full text-left border border-gray-700 rounded overflow-hidden"><thead class="bg-gray-800"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Nome</th><th class="px-3 py-2">Provider</th></tr></thead><tbody>';
+            html += '<table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-3 py-2 text-ink">ID</th><th class="px-3 py-2 text-ink">Nome</th><th class="px-3 py-2 text-ink">Provider</th></tr></thead><tbody>';
             for (const r of inst) {
-                html += `<tr class="border-t border-gray-700"><td class="px-3 py-1">${esc(r.id)}</td><td class="px-3 py-1">${esc(r.name)}</td><td class="px-3 py-1">${esc(r.api_provider)}</td></tr>`;
+                html += `<tr class="border-t border-[color:var(--card-border)]"><td class="px-3 py-1 text-ink">${esc(r.id)}</td><td class="px-3 py-1 text-ink">${esc(r.name)}</td><td class="px-3 py-1 text-ink">${esc(r.api_provider)}</td></tr>`;
             }
             html += '</tbody></table>';
         }
         html += '</div>';
 
-        html += '<div><h3 class="text-white font-semibold mb-2">Etapas (cadência)</h3>';
-        if (!steps.length) html += '<p class="text-gray-500">Nenhuma etapa cadastrada.</p>';
+        html += '<div><h3 class="text-ink font-semibold mb-2">Etapas (cadência)</h3>';
+        if (!steps.length) html += '<p class="text-faint">Nenhuma etapa cadastrada.</p>';
         else {
-            html += '<table class="w-full text-left border border-gray-700 rounded overflow-hidden text-xs"><thead class="bg-gray-800"><tr><th class="px-2 py-2">#</th><th class="px-2 py-2">Rótulo</th><th class="px-2 py-2">Dias</th><th class="px-2 py-2">Criada</th></tr></thead><tbody>';
+            html += '<table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden text-xs"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-2 py-2 text-ink">#</th><th class="px-2 py-2 text-ink">Rótulo</th><th class="px-2 py-2 text-ink">Dias</th><th class="px-2 py-2 text-ink">Criada</th></tr></thead><tbody>';
             for (const r of steps) {
-                html += `<tr class="border-t border-gray-700"><td class="px-2 py-1">${esc(r.step_number)}</td><td class="px-2 py-1">${esc(r.step_label)}</td><td class="px-2 py-1">${esc(r.delay_days)}</td><td class="px-2 py-1">${esc(r.created_at)}</td></tr>`;
+                html += `<tr class="border-t border-[color:var(--card-border)]"><td class="px-2 py-1 text-ink">${esc(r.step_number)}</td><td class="px-2 py-1 text-ink">${esc(r.step_label)}</td><td class="px-2 py-1 text-ink">${esc(r.delay_days)}</td><td class="px-2 py-1 text-ink">${esc(r.created_at)}</td></tr>`;
             }
             html += '</tbody></table>';
         }
         html += '</div>';
 
-        html += '<div><h3 class="text-white font-semibold mb-2">Chunks Uazapi (campaign_stage_sends, até 200)</h3>';
-        if (!stages.length) html += '<p class="text-gray-500">Nenhum registro (campanha sem disparo por etapa ou legado).</p>';
+        html += '<div><h3 class="text-ink font-semibold mb-2">Chunks Uazapi (campaign_stage_sends, até 200)</h3>';
+        if (!stages.length) html += '<p class="text-faint">Nenhum registro (campanha sem disparo por etapa ou legado).</p>';
         else {
-            html += '<div class="overflow-x-auto"><table class="w-full text-left border border-gray-700 rounded overflow-hidden text-xs"><thead class="bg-gray-800"><tr><th class="px-2 py-2">Etapa</th><th class="px-2 py-2">Inst.</th><th class="px-2 py-2">Agendado</th><th class="px-2 py-2">Status</th><th class="px-2 py-2">Plano</th><th class="px-2 py-2">OK</th><th class="px-2 py-2">Falha</th><th class="px-2 py-2">Folder</th></tr></thead><tbody>';
+            html += '<div class="overflow-x-auto"><table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden text-xs"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-2 py-2 text-ink">Etapa</th><th class="px-2 py-2 text-ink">Inst.</th><th class="px-2 py-2 text-ink">Agendado</th><th class="px-2 py-2 text-ink">Status</th><th class="px-2 py-2 text-ink">Plano</th><th class="px-2 py-2 text-ink">OK</th><th class="px-2 py-2 text-ink">Falha</th><th class="px-2 py-2 text-ink">Folder</th></tr></thead><tbody>';
             for (const r of stages) {
-                html += `<tr class="border-t border-gray-700"><td class="px-2 py-1">${esc(r.stage)}</td><td class="px-2 py-1">${esc(r.instance_id)}</td><td class="px-2 py-1">${esc(r.scheduled_for)}</td><td class="px-2 py-1">${esc(r.status)}</td><td class="px-2 py-1">${esc(r.planned_count)}</td><td class="px-2 py-1">${esc(r.success_count)}</td><td class="px-2 py-1">${esc(r.failed_count)}</td><td class="px-2 py-1 break-all">${esc(r.uazapi_folder_id)}</td></tr>`;
+                html += `<tr class="border-t border-[color:var(--card-border)]"><td class="px-2 py-1 text-ink">${esc(r.stage)}</td><td class="px-2 py-1 text-ink">${esc(r.instance_id)}</td><td class="px-2 py-1 text-ink">${esc(r.scheduled_for)}</td><td class="px-2 py-1 text-ink">${esc(r.status)}</td><td class="px-2 py-1 text-ink">${esc(r.planned_count)}</td><td class="px-2 py-1 text-ink">${esc(r.success_count)}</td><td class="px-2 py-1 text-ink">${esc(r.failed_count)}</td><td class="px-2 py-1 break-all text-ink">${esc(r.uazapi_folder_id)}</td></tr>`;
             }
             html += '</tbody></table></div>';
         }

@@ -7,48 +7,58 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
     tailwind.config = {
+        darkMode: 'class',
         theme: {
             extend: {
                 colors: {
-                    bg: '#0b1020',
-                    card: '#0f1630',
-                    primary: '#4f7cff',
-                    accent: '#8b5cf6',
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
                 }
             }
         }
     }
 </script>
 <style>
-    /* Custom Neon/Glass Effects */
     .glass-panel {
-        background: rgba(15, 22, 48, 0.7);
+        background: var(--card-bg);
         backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        border: 1px solid var(--card-border);
+        box-shadow: var(--shadow);
     }
 
     .neon-input {
-        background: rgba(12, 20, 48, 0.8);
-        border: 1px solid rgba(79, 124, 255, 0.3);
-        box-shadow: 0 0 10px rgba(79, 124, 255, 0.05);
+        background: var(--input-bg);
+        border: 1px solid var(--input-border);
+        color: var(--text);
+        box-shadow: 0 0 10px color-mix(in srgb, var(--primary) 6%, transparent);
         transition: all 0.3s ease;
     }
 
+    .neon-input::placeholder {
+        color: var(--input-placeholder);
+    }
+
     .neon-input:focus {
-        border-color: #4f7cff;
-        box-shadow: 0 0 15px rgba(79, 124, 255, 0.3);
+        border-color: var(--input-focus-border);
+        box-shadow: 0 0 0 1px var(--ring);
         outline: none;
     }
 
     .btn-cyber {
-        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        background: var(--btn-primary-gradient);
         position: relative;
         overflow: hidden;
         transition: all 0.3s ease;
         letter-spacing: 1px;
         font-weight: 700;
         border: none;
+        color: #fff;
     }
 
     .btn-cyber::before {
@@ -67,7 +77,7 @@
     }
 
     .btn-cyber:hover {
-        box-shadow: 0 0 20px rgba(139, 92, 246, 0.6);
+        box-shadow: var(--btn-primary-hover-shadow);
         transform: translateY(-2px);
     }
 
@@ -75,21 +85,21 @@
     h1,
     h2,
     h3 {
-        color: #e8ecf6;
+        color: var(--text);
     }
 
     /* Cadence Accordion */
     .cadence-step {
-        border: 1px solid rgba(79, 124, 255, 0.15);
-        background: rgba(12, 20, 48, 0.5);
+        border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--card-border));
+        background: color-mix(in srgb, var(--input-bg) 92%, transparent);
         border-radius: 12px;
         overflow: hidden;
         transition: all 0.3s ease;
     }
 
     .cadence-step.active {
-        border-color: rgba(79, 124, 255, 0.4);
-        box-shadow: 0 0 20px rgba(79, 124, 255, 0.08);
+        border-color: color-mix(in srgb, var(--primary) 45%, var(--card-border));
+        box-shadow: 0 0 18px color-mix(in srgb, var(--primary) 12%, transparent);
     }
 
     .cadence-step-header {
@@ -102,7 +112,7 @@
     }
 
     .cadence-step-header:hover {
-        background: rgba(79, 124, 255, 0.05);
+        background: color-mix(in srgb, var(--primary) 8%, transparent);
     }
 
     .cadence-step-body {
@@ -133,7 +143,7 @@
         max-width: 120px;
         max-height: 80px;
         border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        border: 1px solid var(--card-border);
         object-fit: cover;
     }
 
@@ -146,7 +156,7 @@
     .cadence-toggle-track {
         width: 44px;
         height: 24px;
-        background: #374151;
+        background: color-mix(in srgb, var(--muted) 45%, var(--card));
         border-radius: 9999px;
         position: relative;
         cursor: pointer;
@@ -154,7 +164,7 @@
     }
 
     .cadence-toggle-track.on {
-        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        background: var(--btn-primary-gradient);
     }
 
     .cadence-toggle-thumb {
@@ -184,7 +194,7 @@
                 class="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 mb-2">
                 Nova Campanha
             </h1>
-            <p class="text-gray-400">Configure o disparo em massa para seus leads extraídos.</p>
+            <p class="text-faint">Configure o disparo em massa para seus leads extraídos.</p>
         </div>
 
         <div class="glass-panel p-8 rounded-2xl relative overflow-hidden">
@@ -197,21 +207,21 @@
 
                 <!-- Nome da Campanha -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-300 mb-2">Nome da Campanha</label>
+                    <label class="block text-sm font-semibold text-ink mb-2">Nome da Campanha</label>
                     <input type="text" id="name" placeholder="Ex: Prospecção Dentistas SP" required
-                        class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600">
+                        class="neon-input w-full px-4 py-3 rounded-xl">
                 </div>
 
                 <!-- Seleção de Lista (Job) -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-300 mb-2">Lista de Leads (Extração)</label>
+                    <label class="block text-sm font-semibold text-ink mb-2">Lista de Leads (Extração)</label>
                     <div class="relative">
                         <select id="job_id" required
-                            class="neon-input w-full px-4 py-3 rounded-xl text-white appearance-none cursor-pointer">
+                            class="neon-input w-full px-4 py-3 rounded-xl appearance-none cursor-pointer">
                             <option value="" disabled selected>Carregando extrações...</option>
                         </select>
                         <div
-                            class="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-gray-400">
+                            class="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-faint">
                             <svg class="w-4 h-4 fill-current" viewBox="0 0 20 20">
                                 <path
                                     d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
@@ -241,25 +251,25 @@
 
                 <!-- Campo de Contexto do Negócio (Para IA) -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-300 mb-2">
+                    <label class="block text-sm font-semibold text-ink mb-2">
                         Fale sobre seu negócio
-                        <span class="text-xs font-normal text-gray-500 ml-2">(Usado pela IA para gerar mensagens)</span>
+                        <span class="text-xs font-normal text-faint ml-2">(Usado pela IA para gerar mensagens)</span>
                     </label>
                     <textarea id="business_context" rows="3"
                         placeholder="Ex: Sou dentista em São Paulo. Oferecemos limpeza, clareamento e aparelhos ortodônticos com preços justos..."
-                        class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600"></textarea>
+                        class="neon-input w-full px-4 py-3 rounded-xl"></textarea>
                 </div>
 
                 <!-- Templates de Mensagem -->
                 <div>
                     <div class="flex justify-between items-center mb-2">
-                        <label class="block text-sm font-semibold text-gray-300">
-                            Mensagem <span class="text-xs font-normal text-gray-500 ml-2">(Use {nome} para
+                        <label class="block text-sm font-semibold text-ink">
+                            Mensagem <span class="text-xs font-normal text-faint ml-2">(Use {nome} para
                                 personalizar)</span>
                         </label>
                         <div class="flex gap-2">
                             <select id="loadTemplateSelect"
-                                class="text-xs bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-600 focus:border-primary focus:outline-none">
+                                class="text-xs bg-slate-100 dark:bg-gray-800 text-ink dark:text-gray-300 px-2 py-1 rounded border border-[color:var(--card-border)] focus:border-primary focus:outline-none">
                                 <option value="">📂 Carregar Modelo...</option>
                             </select>
                             <button type="button" id="mainAIBtn"
@@ -277,7 +287,7 @@
                         <!-- Template 1 (Default) - sem wrapper para não ter botão X -->
                         <textarea name="message_template" rows="4" required
                             placeholder="Olá {nome}, vi sua empresa no Google Maps e..."
-                            class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 template-input"></textarea>
+                            class="neon-input w-full px-4 py-3 rounded-xl template-input"></textarea>
                     </div>
 
                     <!-- Botão Anexar na mensagem principal (usado pelo Step 1 quando cadência ativa) -->
@@ -285,7 +295,7 @@
                         <input type="file" id="media_step_1" accept="image/*,video/*" class="hidden"
                             onchange="handleMediaUpload(1, this)">
                         <button type="button" onclick="document.getElementById('media_step_1').click()"
-                            class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                            class="text-xs bg-slate-100/90 dark:bg-gray-700/50 text-ink dark:text-gray-300 px-3 py-1.5 rounded-lg border border-[color:var(--card-border)] hover:bg-slate-200/90 dark:hover:bg-gray-700 transition-colors flex items-center gap-1">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                     d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -314,7 +324,7 @@
                         </button>
 
                         <button type="button" id="saveTemplateBtn"
-                            class="text-xs text-gray-400 hover:text-white flex items-center gap-1">
+                            class="text-xs text-faint hover:text-ink flex items-center gap-1">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                     d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4">
@@ -323,7 +333,7 @@
                             Salvar como Modelo
                         </button>
                     </div>
-                    <p class="text-xs text-gray-500 mt-1">Adicione até 5 variações para rotacionar o envio e evitar
+                    <p class="text-xs text-faint mt-1">Adicione até 5 variações para rotacionar o envio e evitar
                         bloqueios.</p>
                 </div>
 
@@ -332,15 +342,15 @@
                 <!-- ============================================ -->
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
-                    <label class="block text-sm font-semibold text-gray-300">
+                    <label class="block text-sm font-semibold text-ink">
                         🚀 Envio Inteligente
                     </label>
                     {% if is_super_admin and use_message_outbox %}
-                    <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa envio individual na fila do sistema: entre mensagens, <strong class="text-gray-300">ritmo aleatório definido pelo sistema</strong> (sem campo neste formulário para ajustar o intervalo entre disparos).</p>
+                    <p class="text-xs text-faint mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa envio individual na fila do sistema: entre mensagens, <strong class="text-ink">ritmo aleatório definido pelo sistema</strong> (sem campo neste formulário para ajustar o intervalo entre disparos).</p>
                     {% else %}
-                    <p class="text-xs text-gray-500 mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa ritmo humanizado automático (pausas variadas entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).</p>
+                    <p class="text-xs text-faint mt-2">Ao marcar pelo menos uma instância abaixo, o disparo usa ritmo humanizado automático (pausas variadas entre mensagens e, às vezes, um intervalo mais longo entre blocos de envio).</p>
                     {% endif %}
-                    <p class="text-xs text-gray-500 mt-2">Os envios <strong class="text-gray-300">não rodam fora</strong> da faixa definida em <strong class="text-emerald-300">Horário de envio</strong>, nem em finais de semana, a menos que você ative os toggles de sábado/domingo.</p>
+                    <p class="text-xs text-faint mt-2">Os envios <strong class="text-ink">não rodam fora</strong> da faixa definida em <strong class="text-emerald-300">Horário de envio</strong>, nem em finais de semana, a menos que você ative os toggles de sábado/domingo.</p>
                     <p class="text-xs text-amber-400/90 mt-3">✓ A lista será validada automaticamente antes do envio (números sem WhatsApp removidos).</p>
                 </div>
 
@@ -349,19 +359,19 @@
                 <!-- ============================================ -->
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
-                    <label class="block text-sm font-semibold text-gray-300 mb-1">
+                    <label class="block text-sm font-semibold text-ink mb-1">
                         📨 Mensagens por dia
                     </label>
-                    <p class="text-xs text-gray-500 mb-3">Quantas mensagens serão enviadas por dia nesta campanha. Máximo do seu plano: <strong class="text-blue-400">{{ plan_daily_limit }}</strong>.</p>
+                    <p class="text-xs text-faint mb-3">Quantas mensagens serão enviadas por dia nesta campanha. Máximo do seu plano: <strong class="text-blue-400">{{ plan_daily_limit }}</strong>.</p>
                     <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ plan_daily_limit }}" data-step="5">
                         <button type="button" id="dailyLimitDec"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(-1)">−</button>
-                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-white w-10 text-center">{{ plan_daily_limit }}</span>
+                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-ink w-10 text-center">{{ plan_daily_limit }}</span>
                         <button type="button" id="dailyLimitInc"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(1)">+</button>
-                        <span class="text-xs text-gray-500">msgs/dia</span>
+                        <span class="text-xs text-faint">msgs/dia</span>
                     </div>
                     <input type="hidden" id="daily_limit_value" value="{{ plan_daily_limit }}">
                 </div>
@@ -373,10 +383,10 @@
                     style="background: rgba(139, 92, 246, 0.04); border: 1px solid rgba(139, 92, 246, 0.2);">
                     <div class="flex justify-between items-center">
                         <div>
-                            <label class="block text-sm font-semibold text-gray-300">
+                            <label class="block text-sm font-semibold text-ink">
                                 🔄 Cadência de Follow-up
                             </label>
-                            <p class="text-xs text-gray-500 mt-1">Ative para enviar mensagens de acompanhamento
+                            <p class="text-xs text-faint mt-1">Ative para enviar mensagens de acompanhamento
                                 automaticamente</p>
                         </div>
                         <div class="cadence-toggle-track" id="cadenceToggle" onclick="toggleCadence()">
@@ -388,16 +398,16 @@
 
                 <div id="cadenceSetupModeBox" class="glass-panel p-4 rounded-xl hidden"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.2);">
-                    <label class="block text-sm font-semibold text-gray-300 mb-2">Configuração dos follow-ups (Envio Inteligente)</label>
-                    <p class="text-xs text-gray-500 mb-3">Escolha se quer definir mensagens/dias agora ou configurar depois no botão de cada etapa do Kanban.</p>
+                    <label class="block text-sm font-semibold text-ink mb-2">Configuração dos follow-ups (Envio Inteligente)</label>
+                    <p class="text-xs text-faint mb-3">Escolha se quer definir mensagens/dias agora ou configurar depois no botão de cada etapa do Kanban.</p>
                     <div class="flex flex-col gap-2">
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input type="radio" name="cadence_setup_mode" value="kanban_later" checked class="text-blue-600 focus:ring-blue-500">
-                            <span class="text-sm text-gray-300">Configurar depois no Kanban (recomendado)</span>
+                            <span class="text-sm text-ink">Configurar depois no Kanban (recomendado)</span>
                         </label>
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input type="radio" name="cadence_setup_mode" value="now" class="text-blue-600 focus:ring-blue-500">
-                            <span class="text-sm text-gray-300">Configurar agora (mensagens + dias na criação)</span>
+                            <span class="text-sm text-ink">Configurar agora (mensagens + dias na criação)</span>
                         </label>
                     </div>
                 </div>
@@ -413,11 +423,11 @@
                             <div class="flex items-center gap-3">
                                 <span class="step-badge bg-blue-500/20 text-blue-400 border border-blue-500/30">Etapa
                                     1</span>
-                                <span class="text-sm font-semibold text-gray-200">Mensagem Inicial</span>
+                                <span class="text-sm font-semibold text-ink">Mensagem Inicial</span>
                             </div>
                             <div class="flex items-center gap-2">
-                                <span class="text-xs text-gray-500">Dia 0</span>
-                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="1"
+                                <span class="text-xs text-faint">Dia 0</span>
+                                <svg class="w-4 h-4 text-faint transition-transform step-chevron" data-step="1"
                                     viewBox="0 0 20 20" fill="currentColor">
                                     <path fill-rule="evenodd"
                                         d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
@@ -427,10 +437,10 @@
                         </div>
                         <div class="cadence-step-body open" data-step-body="1">
                             <div class="cadence-step-body-inner space-y-3">
-                                <p class="text-xs text-gray-500">Primeira mensagem de prospecção. Usa os templates
+                                <p class="text-xs text-faint">Primeira mensagem de prospecção. Usa os templates
                                     configurados acima. Anexe mídia na seção Mensagem acima.</p>
                                 <button type="button" onclick="document.getElementById('media_step_1').click()"
-                                    class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                    class="text-xs bg-slate-100/90 dark:bg-gray-700/50 text-ink dark:text-gray-300 px-3 py-1.5 rounded-lg border border-[color:var(--card-border)] hover:bg-slate-200/90 dark:hover:bg-gray-700 transition-colors flex items-center gap-1">
                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -449,11 +459,11 @@
                                 <span
                                     class="step-badge bg-purple-500/20 text-purple-400 border border-purple-500/30">Etapa
                                     2</span>
-                                <span class="text-sm font-semibold text-gray-200">Follow-up 1</span>
+                                <span class="text-sm font-semibold text-ink">Follow-up 1</span>
                             </div>
                             <div class="flex items-center gap-2">
-                                <span class="text-xs text-gray-500">Dia 3</span>
-                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="2"
+                                <span class="text-xs text-faint">Dia 3</span>
+                                <svg class="w-4 h-4 text-faint transition-transform step-chevron" data-step="2"
                                     viewBox="0 0 20 20" fill="currentColor">
                                     <path fill-rule="evenodd"
                                         d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
@@ -465,10 +475,10 @@
                             <div class="cadence-step-body-inner space-y-3">
                                 <div class="flex items-center gap-4">
                                     <div class="flex-1">
-                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
+                                        <label class="text-xs text-faint mb-1 block">Aguardar (dias) após etapa
                                             anterior:</label>
                                         <input type="number" id="delay_step_2" value="3" min="0" max="30"
-                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center"
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-sm text-center"
                                             title="Dias após a etapa anterior antes de enviar este follow-up.">
                                     </div>
                                     <button type="button" onclick="generateCadenceCopy(2)"
@@ -482,12 +492,12 @@
                                 </div>
                                 <textarea id="msg_step_2" rows="3"
                                     placeholder="Olá {nome}, te mandei uma mensagem outro dia sobre..."
-                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-sm"></textarea>
                                 <div class="flex items-center gap-3">
                                     <input type="file" id="media_step_2" accept="image/*,video/*" class="hidden"
                                         onchange="handleMediaUpload(2, this)">
                                     <button type="button" onclick="document.getElementById('media_step_2').click()"
-                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        class="text-xs bg-slate-100/90 dark:bg-gray-700/50 text-ink dark:text-gray-300 px-3 py-1.5 rounded-lg border border-[color:var(--card-border)] hover:bg-slate-200/90 dark:hover:bg-gray-700 transition-colors flex items-center gap-1">
                                         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                 d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -515,11 +525,11 @@
                                 <span
                                     class="step-badge bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">Etapa
                                     3</span>
-                                <span class="text-sm font-semibold text-gray-200">Follow-up 2</span>
+                                <span class="text-sm font-semibold text-ink">Follow-up 2</span>
                             </div>
                             <div class="flex items-center gap-2">
-                                <span class="text-xs text-gray-500">Dia 7</span>
-                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="3"
+                                <span class="text-xs text-faint">Dia 7</span>
+                                <svg class="w-4 h-4 text-faint transition-transform step-chevron" data-step="3"
                                     viewBox="0 0 20 20" fill="currentColor">
                                     <path fill-rule="evenodd"
                                         d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
@@ -531,10 +541,10 @@
                             <div class="cadence-step-body-inner space-y-3">
                                 <div class="flex items-center gap-4">
                                     <div class="flex-1">
-                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
+                                        <label class="text-xs text-faint mb-1 block">Aguardar (dias) após etapa
                                             anterior:</label>
                                         <input type="number" id="delay_step_3" value="4" min="0" max="30"
-                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-sm text-center">
                                     </div>
                                     <button type="button" onclick="generateCadenceCopy(3)"
                                         class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1 mt-4">
@@ -547,12 +557,12 @@
                                 </div>
                                 <textarea id="msg_step_3" rows="3"
                                     placeholder="{nome}, tudo bem? Notei que ainda não respondeu..."
-                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-sm"></textarea>
                                 <div class="flex items-center gap-3">
                                     <input type="file" id="media_step_3" accept="image/*,video/*" class="hidden"
                                         onchange="handleMediaUpload(3, this)">
                                     <button type="button" onclick="document.getElementById('media_step_3').click()"
-                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        class="text-xs bg-slate-100/90 dark:bg-gray-700/50 text-ink dark:text-gray-300 px-3 py-1.5 rounded-lg border border-[color:var(--card-border)] hover:bg-slate-200/90 dark:hover:bg-gray-700 transition-colors flex items-center gap-1">
                                         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                 d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -579,11 +589,11 @@
                             <div class="flex items-center gap-3">
                                 <span class="step-badge bg-red-500/20 text-red-400 border border-red-500/30">Etapa
                                     4</span>
-                                <span class="text-sm font-semibold text-gray-200">Break-up</span>
+                                <span class="text-sm font-semibold text-ink">Break-up</span>
                             </div>
                             <div class="flex items-center gap-2">
-                                <span class="text-xs text-gray-500">Dia 8</span>
-                                <svg class="w-4 h-4 text-gray-400 transition-transform step-chevron" data-step="4"
+                                <span class="text-xs text-faint">Dia 8</span>
+                                <svg class="w-4 h-4 text-faint transition-transform step-chevron" data-step="4"
                                     viewBox="0 0 20 20" fill="currentColor">
                                     <path fill-rule="evenodd"
                                         d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
@@ -595,10 +605,10 @@
                             <div class="cadence-step-body-inner space-y-3">
                                 <div class="flex items-center gap-4">
                                     <div class="flex-1">
-                                        <label class="text-xs text-gray-400 mb-1 block">Aguardar (dias) após etapa
+                                        <label class="text-xs text-faint mb-1 block">Aguardar (dias) após etapa
                                             anterior:</label>
                                         <input type="number" id="delay_step_4" value="1" min="0" max="30"
-                                            class="neon-input w-20 px-3 py-2 rounded-lg text-white text-sm text-center">
+                                            class="neon-input w-20 px-3 py-2 rounded-lg text-sm text-center">
                                     </div>
                                     <button type="button" onclick="generateCadenceCopy(4)"
                                         class="text-xs bg-purple-600/20 text-purple-300 px-2 py-1 rounded border border-purple-500/30 hover:bg-purple-600/40 transition-colors flex items-center gap-1 mt-4">
@@ -611,14 +621,14 @@
                                 </div>
                                 <textarea id="msg_step_4" rows="3"
                                     placeholder="{nome}, como não tive retorno, entendo que talvez não seja o momento..."
-                                    class="neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 text-sm"></textarea>
+                                    class="neon-input w-full px-4 py-3 rounded-xl text-sm"></textarea>
                                 <p class="text-xs text-yellow-500/80">⚠️ Última tentativa. Após 24h sem resposta, o lead
                                     será marcado como "Perdido".</p>
                                 <div class="flex items-center gap-3">
                                     <input type="file" id="media_step_4" accept="image/*,video/*" class="hidden"
                                         onchange="handleMediaUpload(4, this)">
                                     <button type="button" onclick="document.getElementById('media_step_4').click()"
-                                        class="text-xs bg-gray-700/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-600/50 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                                        class="text-xs bg-slate-100/90 dark:bg-gray-700/50 text-ink dark:text-gray-300 px-3 py-1.5 rounded-lg border border-[color:var(--card-border)] hover:bg-slate-200/90 dark:hover:bg-gray-700 transition-colors flex items-center gap-1">
                                         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                 d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -646,21 +656,21 @@
                 <!-- ============================================ -->
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(34, 197, 94, 0.04); border: 1px solid rgba(34, 197, 94, 0.2);">
-                    <label class="block text-sm font-semibold text-gray-300 mb-3">
+                    <label class="block text-sm font-semibold text-ink mb-3">
                         ⏰ Horário de envio
                     </label>
-                    <p class="text-xs text-gray-500 mb-4">Define em quais horários e dias as mensagens serão enviadas</p>
+                    <p class="text-xs text-faint mb-4">Define em quais horários e dias as mensagens serão enviadas</p>
                     <div class="grid grid-cols-2 gap-4 mb-4">
                         <div>
-                            <label class="block text-xs font-medium text-gray-400 mb-1">Das</label>
+                            <label class="block text-xs font-medium text-faint mb-1">Das</label>
                             <input type="number" id="send_hour_start" min="0" max="23" value="8"
-                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-sm"
                                 placeholder="8">
                         </div>
                         <div>
-                            <label class="block text-xs font-medium text-gray-400 mb-1">Até (hora)</label>
+                            <label class="block text-xs font-medium text-faint mb-1">Até (hora)</label>
                             <input type="number" id="send_hour_end" min="0" max="23" value="20"
-                                class="neon-input w-full px-4 py-2 rounded-lg text-white text-sm"
+                                class="neon-input w-full px-4 py-2 rounded-lg text-sm"
                                 placeholder="20">
                         </div>
                     </div>
@@ -670,35 +680,35 @@
                     <div class="flex flex-wrap gap-6">
                         <label class="relative inline-flex items-center gap-3 cursor-pointer">
                             <input type="checkbox" id="send_saturday" class="sr-only peer">
-                            <div class="relative w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                            <div class="relative w-9 h-5 bg-slate-300 dark:bg-gray-700 peer-focus:outline-none rounded-full peer 
                                 peer-checked:after:translate-x-full peer-checked:after:border-white 
                                 after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
                                 after:bg-white after:border-gray-300 after:border after:rounded-full 
                                 after:h-4 after:w-4 after:transition-all 
                                 peer-checked:bg-green-600"></div>
-                            <span class="text-sm text-gray-300">Enviar aos sábados</span>
+                            <span class="text-sm text-ink">Enviar aos sábados</span>
                         </label>
                         <label class="relative inline-flex items-center gap-3 cursor-pointer">
                             <input type="checkbox" id="send_sunday" class="sr-only peer">
-                            <div class="relative w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                            <div class="relative w-9 h-5 bg-slate-300 dark:bg-gray-700 peer-focus:outline-none rounded-full peer 
                                 peer-checked:after:translate-x-full peer-checked:after:border-white 
                                 after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
                                 after:bg-white after:border-gray-300 after:border after:rounded-full 
                                 after:h-4 after:w-4 after:transition-all 
                                 peer-checked:bg-green-600"></div>
-                            <span class="text-sm text-gray-300">Enviar aos domingos</span>
+                            <span class="text-sm text-ink">Enviar aos domingos</span>
                         </label>
                     </div>
-                    <p class="text-xs text-gray-500 mt-2">Padrão: 8h às 20h, apenas dias úteis (seg-sex)</p>
+                    <p class="text-xs text-faint mt-2">Padrão: 8h às 20h, apenas dias úteis (seg-sex)</p>
                 </div>
 
                 <!-- Agendamento (Visual Only for now) -->
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-semibold text-gray-300 mb-2">Início (opcional)</label>
+                        <label class="block text-sm font-semibold text-ink mb-2">Início (opcional)</label>
                         <input type="datetime-local" id="scheduled_start"
-                            class="neon-input w-full px-4 py-3 rounded-xl text-white text-sm">
-                        <p class="text-xs text-gray-500 mt-1">Deixe vazio para iniciar imediatamente</p>
+                            class="neon-input w-full px-4 py-3 rounded-xl text-sm">
+                        <p class="text-xs text-faint mt-1">Deixe vazio para iniciar imediatamente</p>
                     </div>
                 </div>
 
@@ -707,16 +717,16 @@
                 <div class="glass-panel p-5 rounded-xl"
                     style="background: rgba(79, 124, 255, 0.04); border: 1px solid rgba(79, 124, 255, 0.15);">
                     <div class="flex justify-between items-center mb-3">
-                        <label class="block text-sm font-semibold text-gray-300">
+                        <label class="block text-sm font-semibold text-ink">
                             📱 Instâncias de WhatsApp
                             <span class="text-xs font-normal text-blue-400 ml-2">(Multi-instância)</span>
                         </label>
                         {% if instances|length > 1 %}
                         <div class="flex items-center gap-2" title="Alternar envios entre as instâncias seleccionadas">
-                            <span class="text-xs text-gray-400">Rotação</span>
+                            <span class="text-xs text-faint">Rotação</span>
                             <label class="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="rotation_toggle" class="sr-only peer" checked>
-                                <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer 
+                                <div class="w-9 h-5 bg-slate-300 dark:bg-gray-700 peer-focus:outline-none rounded-full peer 
                                     peer-checked:after:translate-x-full peer-checked:after:border-white 
                                     after:content-[''] after:absolute after:top-[2px] after:left-[2px] 
                                     after:bg-white after:border-gray-300 after:border after:rounded-full 
@@ -733,10 +743,10 @@
                             hover:bg-white/5 border border-transparent instance-checkbox-label"
                             data-instance-id="{{ inst.id }}" data-api-provider="{{ inst.api_provider|default('megaapi') }}">
                             <input type="checkbox" name="instance_ids" value="{{ inst.id }}"
-                                class="instance-checkbox rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
+                                class="instance-checkbox rounded border-[color:var(--card-border)] bg-[var(--input-bg)] text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
                                 {% if instances|length==1 %}checked{% endif %}>
                             <div class="flex-1 flex items-center justify-between">
-                                <span class="text-sm text-gray-200">{{ inst.name }}</span>
+                                <span class="text-sm text-ink">{{ inst.name }}</span>
                                 <span class="text-xs px-2 py-0.5 rounded-full
                                     {% if inst.status == 'connected' %}
                                     bg-green-500/10 text-green-400 border border-green-500/30
@@ -754,7 +764,7 @@
                         <strong class="text-amber-200">Modo uma instância:</strong> com várias caixas marcadas, todos os envios usarão apenas a <strong>primeira instância elegível</strong> (ordem fixa por ID; a quota diária pode deixar só uma linha activa). Para repartir pelas várias linhas, active <strong>Rotação</strong> acima.
                     </div>
 
-                    <p id="rotation-info" class="text-xs text-gray-500 mt-2">
+                    <p id="rotation-info" class="text-xs text-faint mt-2">
                         {% if instances|length > 1 %}
                         Selecione as instâncias para esta campanha. Com rotação activa, os leads alternam entre as linhas; desligada, usa-se só a primeira elegível.
                         {% else %}
@@ -775,7 +785,7 @@
 
                 <div id="initial-flow-summary" class="glass-panel p-4 rounded-xl border border-blue-500/20 bg-blue-500/5">
                     <p class="text-xs uppercase tracking-wider text-blue-300 mb-2">Resumo do disparo inicial</p>
-                    <div class="text-xs text-gray-300 space-y-1">
+                    <div class="text-xs text-ink space-y-1 opacity-95">
                         <p>• Multi-instância: selecione 1 ou mais instâncias compatíveis para escalar capacidade.</p>
                         <p>• Capacidade total: 30 por instância, por dia (ex.: 3 instâncias = 90/dia).</p>
                         <p>• Agendamento: "Início (opcional)" define quando a campanha começa.</p>
@@ -791,12 +801,12 @@
                         <span class="text-xl">⚠️</span>
                         <div>
                             <h3 class="text-sm font-bold text-yellow-400">Termos de Responsabilidade</h3>
-                            <p class="text-xs text-gray-400 mt-1 leading-relaxed">
+                            <p class="text-xs text-faint mt-1 leading-relaxed">
                                 Ao criar esta campanha, você declara estar ciente de que:
                             </p>
                         </div>
                     </div>
-                    <ul class="text-xs text-gray-400 space-y-2 ml-8 mb-4">
+                    <ul class="text-xs text-faint space-y-2 ml-8 mb-4">
                         <li>• O envio excessivo de mensagens pode levar ao <strong class="text-yellow-400">bloqueio
                                 temporário ou permanente</strong> do seu número de WhatsApp.</li>
                         <li>• A <strong class="text-yellow-400">responsabilidade pelo uso</strong> da ferramenta é
@@ -808,7 +818,7 @@
                     <label
                         class="flex items-center gap-3 cursor-pointer p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
                         <input type="checkbox" id="termsAccepted"
-                            class="rounded border-yellow-500/50 bg-gray-800 text-yellow-500 focus:ring-yellow-500 focus:ring-offset-0">
+                            class="rounded border-yellow-500/50 bg-slate-100 dark:bg-gray-800 text-yellow-600 dark:text-yellow-500 focus:ring-yellow-500 focus:ring-offset-0">
                         <span class="text-xs text-yellow-300 font-medium">Li e aceito os termos de responsabilidade
                             para disparo de mensagens</span>
                     </label>
@@ -924,7 +934,7 @@
         const newTextarea = document.createElement('textarea');
         newTextarea.rows = 4;
         newTextarea.placeholder = `Variação de mensagem ${currentCount + 1}...`;
-        newTextarea.className = 'neon-input w-full px-4 py-3 rounded-xl text-white placeholder-gray-600 template-input animate-fade-in';
+        newTextarea.className = 'neon-input w-full px-4 py-3 rounded-xl template-input animate-fade-in';
         newTextarea.name = 'message_template';
 
         // Botão X para excluir (acima do botão IA)
@@ -1598,9 +1608,9 @@
                 thumb.style.display = 'none';
                 // Add a video icon indicator instead
                 preview.innerHTML = `
-                    <div class="flex items-center gap-2 px-3 py-2 bg-gray-800/50 rounded-lg border border-gray-600/30">
+                    <div class="flex items-center gap-2 px-3 py-2 bg-slate-100/90 dark:bg-gray-800/50 rounded-lg border border-[color:var(--card-border)]">
                         <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
-                        <span class="text-xs text-gray-300">${file.name}</span>
+                        <span class="text-xs text-ink">${file.name}</span>
                         <button type="button" onclick="removeMedia(${stepNum})" class="text-xs text-red-400 hover:text-red-300">✕</button>
                     </div>`;
             }

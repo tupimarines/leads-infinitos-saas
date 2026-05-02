@@ -6,13 +6,18 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
     tailwind.config = {
+        darkMode: 'class',
         theme: {
             extend: {
                 colors: {
-                    bg: '#0b1020',
-                    card: '#0f1630',
-                    primary: '#4f7cff',
-                    accent: '#8b5cf6',
+                    surface: 'var(--bg)',
+                    elevated: 'var(--card)',
+                    ink: 'var(--text)',
+                    faint: 'var(--muted)',
+                    primary: 'var(--primary)',
+                    accent: 'var(--accent)',
+                    bg: 'var(--bg)',
+                    card: 'var(--card)',
                 }
             }
         }
@@ -20,33 +25,39 @@
 </script>
 <style>
     .glass-panel {
-        background: rgba(15, 22, 48, 0.7);
+        background: var(--card-bg);
         backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        border: 1px solid var(--card-border);
+        box-shadow: var(--shadow);
     }
 
     .neon-input {
-        background: rgba(12, 20, 48, 0.8);
-        border: 1px solid rgba(79, 124, 255, 0.3);
-        box-shadow: 0 0 10px rgba(79, 124, 255, 0.05);
+        background: var(--input-bg);
+        border: 1px solid var(--input-border);
+        color: var(--text);
+        box-shadow: 0 0 10px color-mix(in srgb, var(--primary) 6%, transparent);
         transition: all 0.3s ease;
     }
 
+    .neon-input::placeholder {
+        color: var(--input-placeholder);
+    }
+
     .neon-input:focus {
-        border-color: #4f7cff;
-        box-shadow: 0 0 15px rgba(79, 124, 255, 0.3);
+        border-color: var(--input-focus-border);
+        box-shadow: 0 0 0 1px var(--ring);
         outline: none;
     }
 
     .btn-cyber {
-        background: linear-gradient(90deg, #4f7cff, #8b5cf6);
+        background: var(--btn-primary-gradient);
         position: relative;
         overflow: hidden;
         transition: all 0.3s ease;
         letter-spacing: 1px;
         font-weight: 700;
         border: none;
+        color: #fff;
     }
 
     .btn-cyber::before {
@@ -63,23 +74,23 @@
     .btn-cyber:hover::before { left: 100%; }
 
     .btn-cyber:hover {
-        box-shadow: 0 0 20px rgba(139, 92, 246, 0.6);
+        box-shadow: var(--btn-primary-hover-shadow);
         transform: translateY(-2px);
     }
 
-    h1, h2, h3 { color: #e8ecf6; }
+    h1, h2, h3 { color: var(--text); }
 
     .cadence-step {
-        border: 1px solid rgba(79, 124, 255, 0.15);
-        background: rgba(12, 20, 48, 0.5);
+        border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--card-border));
+        background: color-mix(in srgb, var(--input-bg) 92%, transparent);
         border-radius: 12px;
         overflow: hidden;
         transition: all 0.3s ease;
     }
 
     .cadence-step.active {
-        border-color: rgba(79, 124, 255, 0.4);
-        box-shadow: 0 0 20px rgba(79, 124, 255, 0.08);
+        border-color: color-mix(in srgb, var(--primary) 45%, var(--card-border));
+        box-shadow: 0 0 18px color-mix(in srgb, var(--primary) 12%, transparent);
     }
 
     .cadence-step-header {
@@ -91,7 +102,7 @@
         transition: background 0.2s;
     }
 
-    .cadence-step-header:hover { background: rgba(79, 124, 255, 0.05); }
+    .cadence-step-header:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); }
 
     .cadence-step-body {
         max-height: 0;
@@ -116,14 +127,14 @@
     .cadence-toggle-track {
         width: 44px;
         height: 24px;
-        background: #374151;
+        background: color-mix(in srgb, var(--muted) 45%, var(--card));
         border-radius: 9999px;
         position: relative;
         cursor: pointer;
         transition: background 0.3s;
     }
 
-    .cadence-toggle-track.on { background: linear-gradient(90deg, #4f7cff, #8b5cf6); }
+    .cadence-toggle-track.on { background: var(--btn-primary-gradient); }
 
     .cadence-toggle-thumb {
         width: 20px;
