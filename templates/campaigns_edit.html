@@ -51,6 +51,12 @@
         outline: none;
     }
 
+    /* Native <select> dropdown: inherit white text from dark-only patterns breaks light theme */
+    select.neon-input option {
+        color: var(--text);
+        background-color: var(--card);
+    }
+
     .btn-cyber {
         background: var(--btn-primary-gradient);
         transition: all 0.3s ease;
@@ -183,7 +189,7 @@
                             class="neon-input w-full px-3 py-1.5 rounded-lg text-xs">
                         <input type="text" id="filterPhone" placeholder="Filtrar por Fone"
                             class="neon-input w-full px-3 py-1.5 rounded-lg text-xs">
-                        <select id="filterStatus" class="neon-input w-full px-3 py-1.5 rounded-lg text-white text-xs">
+                        <select id="filterStatus" class="neon-input w-full px-3 py-1.5 rounded-lg text-xs text-ink">
                             <option value="">Status: Todos</option>
                             <option value="pending">Pendente</option>
                             <option value="sent">Enviado</option>
