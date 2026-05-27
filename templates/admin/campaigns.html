@@ -42,6 +42,11 @@
                 title="Por usuário: manter só a campanha mais recente (dry-run ON) ou pausar as demais (OFF)">
                 ⏸ Pausar exceto recente
             </button>
+            <button type="button" onclick="openPendingBackupModal()"
+                class="btn bg-teal-700 hover:bg-teal-600 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                title="Exportar ZIP com leads pendentes sem 1º envio (antes de excluir campanhas manualmente)">
+                💾 Backup pendentes
+            </button>
             <button type="button" onclick="openForceChunkModal()"
                 class="btn bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
                 title="Forçar novo chunk inicial (Uazapi + cadência) com leads ainda pendentes">
@@ -179,6 +184,52 @@
     </div>
 </div>
 
+<!-- Modal: backup CSV pendentes iniciais (todas campanhas) -->
+<div id="pending-backup-modal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4 modal-backdrop"
+    onclick="if(event.target===this) closePendingBackupModal()">
+    <div class="bg-elevated border border-[color:var(--card-border)] rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl text-ink"
+        onclick="event.stopPropagation()">
+        <div class="px-5 py-4 border-b border-[color:var(--card-border)]">
+            <h2 class="text-lg font-semibold text-ink">Backup CSV — pendentes sem 1º envio</h2>
+            <p class="text-sm text-faint mt-1">
+                Gera um ZIP com um CSV por campanha (leads <strong class="text-ink">pending</strong>, passo 1).
+                <span class="text-amber-700 dark:text-amber-300/90">Isto não apaga campanhas</span> — use só antes do purge manual no admin.
+            </p>
+        </div>
+        <div class="px-5 py-4 space-y-4 text-sm border-b border-[color:var(--card-border)]">
+            <div class="flex flex-wrap items-end gap-4">
+                <div>
+                    <label class="block text-faint mb-1">Filtrar usuário (ID, opcional)</label>
+                    <input type="number" id="pending-backup-user-id" min="1"
+                        class="w-36 bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded px-3 py-2 text-ink"
+                        placeholder="todos" />
+                </div>
+                <div class="flex flex-col gap-1 pb-1">
+                    <span class="text-xs text-faint">Dry-run</span>
+                    <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+                        <input type="checkbox" id="pending-backup-dry-run-toggle" checked
+                            class="w-4 h-4 rounded border-[color:var(--input-border)]"
+                            onchange="syncPendingBackupUi()" />
+                        <span id="pending-backup-dry-run-label" class="text-sm font-medium text-amber-700 dark:text-amber-300">ON (preview JSON)</span>
+                    </label>
+                </div>
+                <button type="button" id="pending-backup-run-btn" onclick="runPendingInitialBackup()"
+                    class="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-600 text-white font-medium">
+                    Simular
+                </button>
+            </div>
+            <p id="pending-backup-summary" class="text-xs text-faint hidden"></p>
+        </div>
+        <div id="pending-backup-results" class="px-5 py-4 overflow-y-auto flex-1 text-sm text-faint min-h-[120px]">
+            <p>Com Dry-run ON, confira contagens; com OFF, o navegador baixa o ZIP.</p>
+        </div>
+        <div class="px-5 py-3 border-t border-[color:var(--card-border)] flex justify-end gap-2">
+            <button type="button" onclick="closePendingBackupModal()"
+                class="px-4 py-2 rounded-lg bg-slate-200 text-ink hover:bg-slate-300 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-600">Fechar</button>
+        </div>
+    </div>
+</div>
+
 <!-- Modal: dry-run pausar exceto campanha mais recente (por usuário) -->
 <div id="pause-except-latest-modal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4 modal-backdrop"
     onclick="if(event.target===this) closePauseExceptLatestDryRunModal()">
@@ -306,6 +357,118 @@
     function isPauseExceptLatestDryRunOn() {
         const el = document.getElementById('pause-dry-run-toggle');
         return el ? el.checked : true;
+    }
+
+    function isPendingBackupDryRunOn() {
+        const el = document.getElementById('pending-backup-dry-run-toggle');
+        return el ? el.checked : true;
+    }
+
+    function syncPendingBackupUi() {
+        const dryOn = isPendingBackupDryRunOn();
+        const btn = document.getElementById('pending-backup-run-btn');
+        const label = document.getElementById('pending-backup-dry-run-label');
+        if (label) {
+            label.textContent = dryOn ? 'ON (preview JSON)' : 'OFF (baixar ZIP)';
+            label.className = dryOn
+                ? 'text-sm font-medium text-amber-700 dark:text-amber-300'
+                : 'text-sm font-medium text-teal-700 dark:text-teal-300';
+        }
+        if (btn) {
+            btn.textContent = dryOn ? 'Simular' : 'Baixar ZIP';
+        }
+    }
+
+    function openPendingBackupModal() {
+        const m = document.getElementById('pending-backup-modal');
+        m.classList.remove('hidden');
+        m.classList.add('flex');
+        syncPendingBackupUi();
+        document.getElementById('pending-backup-user-id').focus();
+    }
+
+    function closePendingBackupModal() {
+        const m = document.getElementById('pending-backup-modal');
+        m.classList.add('hidden');
+        m.classList.remove('flex');
+    }
+
+    function renderPendingBackupPreview(data) {
+        const box = document.getElementById('pending-backup-results');
+        const summaryEl = document.getElementById('pending-backup-summary');
+        const s = data.summary || {};
+        summaryEl.classList.remove('hidden');
+        summaryEl.textContent =
+            `DRY-RUN — usuários: ${s.users ?? 0} · campanhas: ${s.campaigns ?? 0} · ` +
+            `com pendentes iniciais: ${s.campaigns_with_pending_initial ?? 0} · ` +
+            `leads no backup: ${s.pending_initial_leads ?? 0}`;
+
+        const users = data.users || [];
+        if (!users.length) {
+            box.innerHTML = '<p class="text-faint">Nenhuma campanha no filtro (status running/pending/paused).</p>';
+            return;
+        }
+        let html = '<div class="space-y-4">';
+        for (const u of users) {
+            html += `<section class="border border-[color:var(--card-border)] rounded-lg p-3">`;
+            html += `<div class="font-medium text-ink mb-2">${esc(u.email)} <span class="text-faint font-normal">(user ${esc(u.user_id)})</span></div>`;
+            html += '<ul class="space-y-1 text-xs">';
+            for (const c of (u.campaigns || [])) {
+                const n = c.pending_initial_count ?? 0;
+                html += `<li class="text-ink">${esc(c.name)} <span class="text-faint">ID ${esc(c.id)} · ${esc(c.status)} · pendentes iniciais: ${esc(n)}</span></li>`;
+            }
+            html += '</ul></section>';
+        }
+        html += '</div>';
+        box.innerHTML = html;
+    }
+
+    async function runPendingInitialBackup() {
+        const box = document.getElementById('pending-backup-results');
+        const btn = document.getElementById('pending-backup-run-btn');
+        const dryOn = isPendingBackupDryRunOn();
+        const uidRaw = (document.getElementById('pending-backup-user-id').value || '').trim();
+        const params = new URLSearchParams();
+        if (dryOn) params.set('dry_run', '1');
+        if (uidRaw) params.set('user_id', uidRaw);
+
+        btn.disabled = true;
+        document.getElementById('pending-backup-summary').classList.add('hidden');
+        box.innerHTML = '<p class="text-faint">' + (dryOn ? 'Carregando preview…' : 'Gerando ZIP…') + '</p>';
+        try {
+            const url = '/api/admin/campaigns/export-pending-initial-backup?' + params.toString();
+            if (dryOn) {
+                const res = await fetch(url, { credentials: 'same-origin' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    box.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(data.message || data.error || ('HTTP ' + res.status)) + '</p>';
+                    return;
+                }
+                renderPendingBackupPreview(data);
+                return;
+            }
+            const res = await fetch(url, { credentials: 'same-origin' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                box.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(data.message || data.error || ('HTTP ' + res.status)) + '</p>';
+                return;
+            }
+            const blob = await res.blob();
+            const disp = res.headers.get('Content-Disposition') || '';
+            let fname = 'pending_initial_backup.zip';
+            const m = /filename="?([^";]+)"?/i.exec(disp);
+            if (m) fname = m[1];
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = fname;
+            a.click();
+            URL.revokeObjectURL(a.href);
+            box.innerHTML = '<p class="text-teal-700 dark:text-teal-300">ZIP baixado: ' + esc(fname) + '</p>';
+        } catch (e) {
+            box.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(e.message) + '</p>';
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     function syncPauseExceptLatestUi() {
@@ -523,6 +686,12 @@
 
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
+        const pbm = document.getElementById('pending-backup-modal');
+        if (pbm && !pbm.classList.contains('hidden')) {
+            e.preventDefault();
+            closePendingBackupModal();
+            return;
+        }
         const pm = document.getElementById('pause-except-latest-modal');
         if (pm && !pm.classList.contains('hidden')) {
             e.preventDefault();
@@ -651,6 +820,14 @@
             html += `<div class="text-faint">${esc(k)}</div><div class="text-ink font-medium break-all">${esc(v)}</div>`;
         }
         html += '</div>';
+
+        if (c.id) {
+            const cid = esc(c.id);
+            html += '<div class="mt-4 flex flex-wrap gap-3 text-sm">'
+                + `<a class="text-blue-400 hover:underline" href="/api/admin/campaigns/${cid}/export-remanent-csv?scope=pending_initial" target="_blank" rel="noopener">CSV — pendentes sem 1º envio</a>`
+                + `<a class="text-blue-400 hover:underline" href="/api/admin/campaigns/${cid}/export-remanent-csv?scope=funnel" target="_blank" rel="noopener">CSV — funil remanescente</a>`
+                + '</div>';
+        }
 
         if (c.message_template) {
             html += '<div><h3 class="text-ink font-semibold mb-2 mt-4">Modelo de mensagem</h3><pre class="bg-slate-100 dark:bg-gray-800/80 rounded p-3 text-xs whitespace-pre-wrap break-words max-h-48 overflow-y-auto text-ink">' + esc(c.message_template) + '</pre></div>';

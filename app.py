@@ -44,6 +44,7 @@ import re
 import pandas as pd
 import io
 import csv
+import zipfile
 from openai import OpenAI
 from functools import wraps
 from typing import Optional
@@ -3441,20 +3442,16 @@ def campaign_kanban_data(campaign_id):
     return json.dumps(out)
 
 
-@app.route("/api/campaigns/<int:campaign_id>/export-remanent-csv")
-@login_required
-def export_remanent_csv(campaign_id):
+def _fetch_remanent_lead_rows(campaign_id: int, scope: str) -> list:
     """
-    CSV de leads remanescentes no funil (exclui convertido/perdido/respondeu).
-    scope=funnel (default): todos os passos ativos.
-    scope=breakup: apenas current_step=4 (coluna Break-up).
+    Leads exportáveis por escopo:
+    - funnel: funil ativo (exceto convertido/perdido/respondeu)
+    - breakup: current_step=4
+    - pending_initial: ainda sem 1º envio (status pending, passo 1)
     """
-    scope = (request.args.get("scope") or "funnel").strip().lower()
-    if scope not in ("funnel", "breakup"):
+    scope = (scope or "funnel").strip().lower()
+    if scope not in ("funnel", "breakup", "pending_initial"):
         scope = "funnel"
-    campaign = Campaign.get_by_id(campaign_id, current_user.id)
-    if not campaign:
-        abort(404)
 
     conn = get_db_connection()
     try:
@@ -3472,15 +3469,23 @@ def export_remanent_csv(campaign_id):
                     base + " AND current_step = 4 ORDER BY COALESCE(csv_row_order, id), id",
                     (campaign_id,),
                 )
+            elif scope == "pending_initial":
+                cur.execute(
+                    base
+                    + " AND status = 'pending' AND current_step = 1 ORDER BY COALESCE(csv_row_order, id), id",
+                    (campaign_id,),
+                )
             else:
                 cur.execute(
                     base + " ORDER BY current_step ASC, COALESCE(csv_row_order, id), id",
                     (campaign_id,),
                 )
-            rows = cur.fetchall() or []
+            return cur.fetchall() or []
     finally:
         conn.close()
 
+
+def _remanent_csv_response(rows: list, campaign_name: str, scope: str) -> Response:
     def _cell(v):
         if v is None:
             return ""
@@ -3520,13 +3525,369 @@ def export_remanent_csv(campaign_id):
             ]
         )
 
-    safe_name = re.sub(r"[^\w\-]+", "_", (campaign.name or "campanha"))[:80]
+    safe_name = re.sub(r"[^\w\-]+", "_", (campaign_name or "campanha"))[:80]
     fname = f"{safe_name}_remanescentes_{scope}.csv"
     return Response(
         "\ufeff" + buf.getvalue(),
         mimetype="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+@app.route("/api/campaigns/<int:campaign_id>/export-remanent-csv")
+@login_required
+def export_remanent_csv(campaign_id):
+    """
+    CSV de leads remanescentes no funil (exclui convertido/perdido/respondeu).
+    scope=funnel (default): todos os passos ativos.
+    scope=breakup: apenas current_step=4 (coluna Break-up).
+    scope=pending_initial: status pending e passo 1 (ainda sem 1º disparo).
+    """
+    scope = (request.args.get("scope") or "funnel").strip().lower()
+    campaign = Campaign.get_by_id(campaign_id, current_user.id)
+    if not campaign:
+        abort(404)
+
+    rows = _fetch_remanent_lead_rows(campaign_id, scope)
+    return _remanent_csv_response(rows, campaign.name, scope)
+
+
+@app.route("/api/admin/campaigns/<int:campaign_id>/export-remanent-csv")
+@login_required
+@admin_required
+def admin_export_remanent_csv(campaign_id):
+    """Superadmin: mesmo CSV de remanescentes, sem exigir ser dono da campanha."""
+    scope = (request.args.get("scope") or "funnel").strip().lower()
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT name FROM campaigns WHERE id = %s", (campaign_id,))
+            row = cur.fetchone()
+        if not row:
+            abort(404)
+        name = row.get("name") or "campanha"
+    finally:
+        conn.close()
+    rows = _fetch_remanent_lead_rows(campaign_id, scope)
+    return _remanent_csv_response(rows, name, scope)
+
+
+_DEFAULT_BACKUP_CAMPAIGN_STATUSES = ("running", "pending", "paused")
+
+
+def _parse_backup_campaign_statuses(raw) -> tuple:
+    """Lista de status de campanha para backup/purge (query ``statuses``, vírgula)."""
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_BACKUP_CAMPAIGN_STATUSES
+    parts = [p.strip().lower() for p in str(raw).split(",") if p.strip()]
+    return tuple(parts) if parts else _DEFAULT_BACKUP_CAMPAIGN_STATUSES
+
+
+def _slug_for_export_filename(name: str, max_len: int = 60) -> str:
+    s = re.sub(r"[^\w\-]+", "_", (name or "campanha").strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    return (s or "campanha")[:max_len]
+
+
+def _count_pending_initial_leads(conn, campaign_id: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::int AS n
+            FROM campaign_leads
+            WHERE campaign_id = %s
+              AND COALESCE(removed_from_funnel, FALSE) = FALSE
+              AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost', 'replied')
+              AND status = 'pending'
+              AND current_step = 1
+            """,
+            (campaign_id,),
+        )
+        row = cur.fetchone()
+        return int((row[0] if row else 0) or 0)
+
+
+def _remanent_rows_to_csv_text(rows: list) -> str:
+    """Mesmas colunas do export unitário (_remanent_csv_response), sem Response HTTP."""
+
+    def _cell(v):
+        if v is None:
+            return ""
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v)
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(
+        [
+            "id",
+            "phone",
+            "name",
+            "status",
+            "current_step",
+            "cadence_status",
+            "last_sent_stage",
+            "last_message_sent_at",
+            "whatsapp_link",
+            "notes",
+        ]
+    )
+    for r in rows:
+        w.writerow(
+            [
+                r.get("id"),
+                _cell(r.get("phone")),
+                _cell(r.get("name")),
+                _cell(r.get("status")),
+                r.get("current_step"),
+                _cell(r.get("cadence_status")),
+                _cell(r.get("last_sent_stage")),
+                _cell(r.get("last_message_sent_at")),
+                _cell(r.get("whatsapp_link")),
+                _cell(r.get("notes")),
+            ]
+        )
+    return buf.getvalue()
+
+
+def _fetch_campaigns_for_ops_backup(conn, *, user_id=None, statuses=None):
+    """Campanhas elegíveis ao backup em lote (por status operacional)."""
+    statuses = statuses or _DEFAULT_BACKUP_CAMPAIGN_STATUSES
+    params = [list(statuses)]
+    user_clause = ""
+    if user_id is not None:
+        user_clause = " AND c.user_id = %s"
+        params.append(int(user_id))
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT c.id, c.name, c.status, c.user_id, c.enable_cadence, c.use_uazapi_sender,
+                   u.email AS user_email
+            FROM campaigns c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.status = ANY(%s)
+            {user_clause}
+            ORDER BY c.user_id ASC, c.id ASC
+            """,
+            tuple(params),
+        )
+        return [dict(r) for r in (cur.fetchall() or [])]
+
+
+def _build_pending_initial_backup_plan(conn, *, user_id=None, statuses=None) -> dict:
+    campaigns = _fetch_campaigns_for_ops_backup(conn, user_id=user_id, statuses=statuses)
+    by_user: dict[int, dict] = {}
+    total_leads = 0
+    campaigns_in_zip = 0
+
+    for camp in campaigns:
+        cid = int(camp["id"])
+        uid = int(camp["user_id"])
+        pending_n = _count_pending_initial_leads(conn, cid)
+        block = by_user.setdefault(
+            uid,
+            {
+                "user_id": uid,
+                "email": camp.get("user_email") or "",
+                "campaigns": [],
+            },
+        )
+        block["campaigns"].append(
+            {
+                "id": cid,
+                "name": camp.get("name") or "",
+                "status": camp.get("status") or "",
+                "pending_initial_count": pending_n,
+                "enable_cadence": bool(camp.get("enable_cadence")),
+                "use_uazapi_sender": bool(camp.get("use_uazapi_sender")),
+            }
+        )
+        if pending_n > 0:
+            total_leads += pending_n
+            campaigns_in_zip += 1
+
+    users_list = [by_user[k] for k in sorted(by_user.keys())]
+    return {
+        "dry_run": True,
+        "criteria": {
+            "statuses": list(statuses or _DEFAULT_BACKUP_CAMPAIGN_STATUSES),
+            "scoped_user_id": user_id,
+            "omit_empty_campaigns_in_zip": True,
+        },
+        "summary": {
+            "users": len(users_list),
+            "campaigns": len(campaigns),
+            "campaigns_with_pending_initial": campaigns_in_zip,
+            "pending_initial_leads": total_leads,
+        },
+        "users": users_list,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _build_pending_initial_backup_zip(conn, *, user_id=None, statuses=None) -> io.BytesIO:
+    """
+    ZIP em memória: um CSV por campanha com pendentes iniciais.
+    Campanhas com 0 pendentes são omitidas (sem arquivo vazio).
+    """
+    campaigns = _fetch_campaigns_for_ops_backup(conn, user_id=user_id, statuses=statuses)
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for camp in campaigns:
+            cid = int(camp["id"])
+            uid = int(camp["user_id"])
+            rows = _fetch_remanent_lead_rows(cid, "pending_initial")
+            if not rows:
+                continue
+            slug = _slug_for_export_filename(camp.get("name") or "campanha")
+            arcname = f"{uid}_{cid}_{slug}_pending_initial.csv"
+            csv_text = "\ufeff" + _remanent_rows_to_csv_text(rows)
+            zf.writestr(arcname, csv_text.encode("utf-8"))
+    zbuf.seek(0)
+    return zbuf
+
+
+def _build_purge_active_dry_run(conn, *, user_id=None, statuses=None) -> dict:
+    """O que seria afetado se o operador excluir manualmente campanhas ativas (sem delete)."""
+    campaigns = _fetch_campaigns_for_ops_backup(conn, user_id=user_id, statuses=statuses)
+    by_user: dict[int, dict] = {}
+    total_leads = 0
+    total_pending_initial = 0
+
+    for camp in campaigns:
+        cid = int(camp["id"])
+        uid = int(camp["user_id"])
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*)::int FROM campaign_leads WHERE campaign_id = %s",
+                (cid,),
+            )
+            lead_total = int((cur.fetchone() or [0])[0] or 0)
+        pending_initial = _count_pending_initial_leads(conn, cid)
+        total_leads += lead_total
+        total_pending_initial += pending_initial
+        block = by_user.setdefault(
+            uid,
+            {
+                "user_id": uid,
+                "email": camp.get("user_email") or "",
+                "campaigns": [],
+            },
+        )
+        block["campaigns"].append(
+            {
+                "id": cid,
+                "name": camp.get("name") or "",
+                "status": camp.get("status") or "",
+                "total_leads": lead_total,
+                "pending_initial_count": pending_initial,
+                "enable_cadence": bool(camp.get("enable_cadence")),
+                "use_uazapi_sender": bool(camp.get("use_uazapi_sender")),
+            }
+        )
+
+    return {
+        "dry_run": True,
+        "action": "purge_manual_only",
+        "message": "Nenhuma campanha foi excluída. Use o admin para excluir após conferir o backup.",
+        "criteria": {
+            "statuses": list(statuses or _DEFAULT_BACKUP_CAMPAIGN_STATUSES),
+            "scoped_user_id": user_id,
+        },
+        "summary": {
+            "users": len(by_user),
+            "campaigns": len(campaigns),
+            "total_leads": total_leads,
+            "pending_initial_leads": total_pending_initial,
+        },
+        "users": [by_user[k] for k in sorted(by_user.keys())],
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+@app.route("/api/admin/campaigns/export-pending-initial-backup", methods=["GET"])
+@login_required
+@admin_required
+def admin_export_pending_initial_backup():
+    """
+    Backup ZIP: CSV ``pending_initial`` por campanha (running/pending/paused por padrão).
+    Query: ``user_id``, ``statuses`` (vírgula), ``dry_run=1`` (JSON plano, sem ZIP).
+    """
+    scoped_user_id = None
+    uid_raw = request.args.get("user_id")
+    if uid_raw is not None and str(uid_raw).strip() != "":
+        try:
+            scoped_user_id = int(uid_raw)
+        except (TypeError, ValueError):
+            return (
+                jsonify(
+                    {
+                        "error": "invalid_user_id",
+                        "message": "user_id deve ser inteiro.",
+                    }
+                ),
+                400,
+            )
+    statuses = _parse_backup_campaign_statuses(request.args.get("statuses"))
+    dry_run = _truthy_json_flag(request.args.get("dry_run"), default=False)
+
+    conn = get_db_connection()
+    try:
+        if dry_run:
+            return jsonify(
+                _build_pending_initial_backup_plan(
+                    conn, user_id=scoped_user_id, statuses=statuses
+                )
+            )
+        zbuf = _build_pending_initial_backup_zip(
+            conn, user_id=scoped_user_id, statuses=statuses
+        )
+    finally:
+        conn.close()
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fname = f"pending_initial_backup_{stamp}Z.zip"
+    return send_file(
+        zbuf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=fname,
+    )
+
+
+@app.route("/api/admin/campaigns/purge-active/dry-run", methods=["GET"])
+@login_required
+@admin_required
+def admin_purge_active_dry_run():
+    """
+    Dry-run: campanhas que entrariam num purge manual (mesmos filtros do backup em lote).
+    Query: ``user_id``, ``statuses``.
+    """
+    scoped_user_id = None
+    uid_raw = request.args.get("user_id")
+    if uid_raw is not None and str(uid_raw).strip() != "":
+        try:
+            scoped_user_id = int(uid_raw)
+        except (TypeError, ValueError):
+            return (
+                jsonify(
+                    {
+                        "error": "invalid_user_id",
+                        "message": "user_id deve ser inteiro.",
+                    }
+                ),
+                400,
+            )
+    statuses = _parse_backup_campaign_statuses(request.args.get("statuses"))
+    conn = get_db_connection()
+    try:
+        payload = _build_purge_active_dry_run(
+            conn, user_id=scoped_user_id, statuses=statuses
+        )
+        return jsonify(payload)
+    finally:
+        conn.close()
 
 
 @app.route('/api/campaigns/<int:campaign_id>/leads/<int:lead_id>/move', methods=['POST'])
@@ -4524,30 +4885,34 @@ def admin_campaign_outbox_resume(campaign_id):
         if guard:
             return guard
 
-        if row.get("use_uazapi_sender") and row.get("uazapi_folder_id"):
-            success, err = _uazapi_control_campaign(
-                campaign_id, int(row["user_id"]), "continue", admin_mode=True
-            )
-            if not success:
-                return jsonify({"error": "uazapi_control_failed", "message": err or "Falha na API Uazapi."}), 500
-        else:
-            with conn.cursor() as cur:
-                cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
-                if cur.rowcount == 0:
-                    conn.rollback()
-                    return (
-                        jsonify({"error": "conflict", "message": "Estado da campanha mudou; recarregue."}),
-                        409,
-                    )
-            conn.commit()
+        conn.close()
+        conn = None
+        success, err, extra = _resume_campaign_after_pause(
+            campaign_id,
+            int(row["user_id"]),
+            admin_mode=True,
+            trigger_initial_chunk=True,
+        )
+        if not success:
+            return jsonify(
+                {"error": "uazapi_control_failed", "message": err or "Falha ao retomar campanha."}
+            ), 500
 
-        return jsonify({"success": True, "status": "running"})
+        payload = {"success": True, "status": "running"}
+        if extra.get("initial_chunk"):
+            payload["initial_chunk"] = extra["initial_chunk"]
+        return jsonify(payload)
     except Exception as e:
-        conn.rollback()
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         print(f"[admin_outbox_resume] {e}")
         return jsonify({"error": "server_error", "message": str(e)}), 500
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 @app.route('/api/admin/campaigns/<int:campaign_id>', methods=['DELETE'])
@@ -6047,6 +6412,127 @@ def _uazapi_control_folder(campaign_id: int, user_id: int, folder_id: str, actio
         return False, str(e)
 
 
+def _resume_campaign_after_pause(
+    campaign_id: int,
+    user_id: int,
+    *,
+    admin_mode: bool = False,
+    trigger_initial_chunk: bool = True,
+) -> tuple[bool, Optional[str], dict]:
+    """
+    Retoma campanha ``paused`` → ``running``.
+
+    Cadência Uazapi: envio real está em ``campaign_stage_sends`` (pastas por chunk).
+    ``continue`` na ``uazapi_folder_id`` da linha ``campaigns`` pode falhar (pasta arquivada/inexistente)
+    sem impedir retomada — atualiza BD e opcionalmente agenda novo chunk inicial.
+
+    Campanha pasta única (sem cadência): exige ``edit_campaign`` continue na pasta da campanha.
+    """
+    conn = get_db_connection()
+    extra: dict = {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if admin_mode:
+                cur.execute(
+                    """
+                    SELECT id, status, use_uazapi_sender, uazapi_folder_id, enable_cadence
+                    FROM campaigns WHERE id = %s
+                    """,
+                    (campaign_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, status, use_uazapi_sender, uazapi_folder_id, enable_cadence
+                    FROM campaigns WHERE id = %s AND user_id = %s
+                    """,
+                    (campaign_id, user_id),
+                )
+            campaign = cur.fetchone()
+        if not campaign:
+            return False, "Campanha não encontrada", extra
+        if (campaign.get("status") or "").strip() != "paused":
+            return False, "Só é possível retomar campanha pausada.", extra
+
+        use_uaz = bool(campaign.get("use_uazapi_sender"))
+        folder_id = campaign.get("uazapi_folder_id")
+        enable_cadence = bool(campaign.get("enable_cadence"))
+
+        if use_uaz and enable_cadence:
+            with conn.cursor() as cur:
+                cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return False, "Estado da campanha mudou; recarregue.", extra
+            conn.commit()
+            if folder_id:
+                ok_legacy, err_legacy = _uazapi_control_campaign(
+                    campaign_id, user_id, "continue", admin_mode=admin_mode
+                )
+                if not ok_legacy:
+                    print(
+                        f"[resume] campaign_id={campaign_id}: continue pasta legada ignorado "
+                        f"(cadência): {err_legacy}"
+                    )
+            if trigger_initial_chunk:
+                cres = _continue_initial_chunk_core(
+                    campaign_id,
+                    user_id,
+                    log_label="resume-cadence+initial-chunk",
+                )
+                ib = cres.get("body") if isinstance(cres.get("body"), dict) else {}
+                if ib.get("per_send") is not None:
+                    extra["initial_chunk"] = {
+                        "success": ib.get("success"),
+                        "partial": ib.get("partial"),
+                        "instances_created": ib.get("instances_created", 0),
+                        "folders_created": ib.get("folders_created", 0),
+                        "per_send": ib.get("per_send", []),
+                        "message": ib.get("message"),
+                        "status_code": cres.get("status_code"),
+                    }
+            return True, None, extra
+
+        if use_uaz and folder_id:
+            success, err = _uazapi_control_campaign(
+                campaign_id, user_id, "continue", admin_mode=admin_mode
+            )
+            if not success:
+                return False, err or "Falha ao comunicar com API Uazapi", extra
+            if trigger_initial_chunk and enable_cadence:
+                cres = _continue_initial_chunk_core(
+                    campaign_id, user_id, log_label="resume+initial-chunk"
+                )
+                ib = cres.get("body") if isinstance(cres.get("body"), dict) else {}
+                if ib.get("per_send") is not None:
+                    extra["initial_chunk"] = {
+                        "success": ib.get("success"),
+                        "partial": ib.get("partial"),
+                        "instances_created": ib.get("instances_created", 0),
+                        "folders_created": ib.get("folders_created", 0),
+                        "per_send": ib.get("per_send", []),
+                        "message": ib.get("message"),
+                        "status_code": cres.get("status_code"),
+                    }
+            return True, None, extra
+
+        with conn.cursor() as cur:
+            cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
+            if cur.rowcount == 0:
+                conn.rollback()
+                return False, "Estado da campanha mudou; recarregue.", extra
+        conn.commit()
+        return True, None, extra
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, str(e), extra
+    finally:
+        conn.close()
+
+
 def _sql_resume_running_clear_system_disconnect_pause():
     """SET status=running e limpa metadados de pausa sistema por desconexão (Task 6)."""
     return """
@@ -6387,6 +6873,19 @@ def toggle_campaign_pause(campaign_id):
                 conn_g.close()
             if gr:
                 return gr
+            if campaign.get("use_uazapi_sender") and campaign.get("enable_cadence"):
+                success, err, extra = _resume_campaign_after_pause(
+                    campaign_id,
+                    current_user.id,
+                    admin_mode=False,
+                    trigger_initial_chunk=True,
+                )
+                if not success:
+                    return json.dumps({"error": err or "Erro ao retomar campanha"}), 500
+                resp_body = {"success": True, "new_status": "running"}
+                if extra.get("initial_chunk"):
+                    resp_body["initial_chunk"] = extra["initial_chunk"]
+                return json.dumps(resp_body)
 
         # Se use_uazapi_sender, delegar para Uazapi API (principal + follow-ups se cadência)
         if campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id'):
