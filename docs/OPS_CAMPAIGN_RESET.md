@@ -16,6 +16,17 @@
 | GET | `/api/admin/campaigns/export-pending-initial-backup` | `dry_run=1` → JSON; sem dry_run → ZIP |
 | GET | `/api/admin/campaigns/purge-active/dry-run` | Só simulação |
 | GET | `/api/admin/campaigns/<id>/export-remanent-csv?scope=pending_initial` | Uma campanha |
+| GET | `/api/admin/campaigns/<id>/export-restore-snapshot` | JSON: mensagens, cadência, payload para recriar |
+
+## Export pontual (IDs conhecidos)
+
+```bash
+python scripts/export_campaign_restore_bundle.py --campaign-ids 202,207,269,270
+```
+
+Gera em `backups/campaign_restore_<UTC>/`:
+- `campaign_<id>_<nome>_restore_snapshot.json` — mensagens iniciais, steps, instâncias, `create_campaign_payload`
+- `campaign_<id>_<nome>_pending_initial-pending-admin.csv` — leads ainda sem 1º envio
 
 Query comum: `user_id`, `statuses=running,pending,paused` (default).
 

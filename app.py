@@ -3572,6 +3572,35 @@ def admin_export_remanent_csv(campaign_id):
     return _remanent_csv_response(rows, name, scope)
 
 
+@app.route("/api/admin/campaigns/<int:campaign_id>/export-restore-snapshot", methods=["GET"])
+@login_required
+@admin_required
+def admin_export_restore_snapshot(campaign_id):
+    """
+    JSON para recriar campanha depois: mensagens iniciais, steps de cadência,
+    instâncias, horários, delays e create_campaign_payload (falta só job_id do CSV).
+    """
+    from utils.campaign_restore_snapshot import build_campaign_restore_snapshot, slug_for_filename
+
+    conn = get_db_connection()
+    try:
+        snapshot = build_campaign_restore_snapshot(conn, campaign_id)
+    except ValueError as e:
+        return jsonify({"error": "not_found", "message": str(e)}), 404
+    finally:
+        conn.close()
+
+    cname = (snapshot.get("campaign") or {}).get("name") or "campanha"
+    slug = slug_for_filename(cname)
+    fname = f"campaign_{campaign_id}_{slug}_restore_snapshot.json"
+    body = json.dumps(snapshot, ensure_ascii=False, indent=2)
+    return Response(
+        body,
+        mimetype="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 _DEFAULT_BACKUP_CAMPAIGN_STATUSES = ("running", "pending", "paused")
 
 

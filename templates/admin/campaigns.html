@@ -824,6 +824,7 @@
         if (c.id) {
             const cid = esc(c.id);
             html += '<div class="mt-4 flex flex-wrap gap-3 text-sm">'
+                + `<a class="text-blue-400 hover:underline" href="/api/admin/campaigns/${cid}/export-restore-snapshot" target="_blank" rel="noopener">JSON — mensagens e regras (reimport)</a>`
                 + `<a class="text-blue-400 hover:underline" href="/api/admin/campaigns/${cid}/export-remanent-csv?scope=pending_initial" target="_blank" rel="noopener">CSV — pendentes sem 1º envio</a>`
                 + `<a class="text-blue-400 hover:underline" href="/api/admin/campaigns/${cid}/export-remanent-csv?scope=funnel" target="_blank" rel="noopener">CSV — funil remanescente</a>`
                 + '</div>';
