@@ -28,6 +28,17 @@ Gera em `backups/campaign_restore_<UTC>/`:
 - `campaign_<id>_<nome>_restore_snapshot.json` — mensagens iniciais, steps, instâncias, `create_campaign_payload`
 - `campaign_<id>_<nome>_pending_initial-pending-admin.csv` — leads ainda sem 1º envio
 
+## Recriar a partir do backup
+
+```bash
+python scripts/recreate_campaigns_from_restore_bundle.py \
+  --backup-dir /app/backups/campaign_restore_20260527_190516 \
+  --source-campaign-ids 202,207,269,270 \
+  --daily-limit 30
+```
+
+Dry-run antes: acrescente `--dry-run`.
+
 Query comum: `user_id`, `statuses=running,pending,paused` (default).
 
 ## Script — 4 usuários (10, 13, 41, 40)
