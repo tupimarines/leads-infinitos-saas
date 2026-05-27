@@ -37,6 +37,11 @@
                 class="btn bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-medium transition-colors">
                 📋 Auditoria disparos
             </a>
+            <button type="button" onclick="openPauseExceptLatestDryRunModal()"
+                class="btn bg-amber-700 hover:bg-amber-600 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                title="Por usuário: manter só a campanha mais recente (dry-run ON) ou pausar as demais (OFF)">
+                ⏸ Pausar exceto recente
+            </button>
             <button type="button" onclick="openForceChunkModal()"
                 class="btn bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
                 title="Forçar novo chunk inicial (Uazapi + cadência) com leads ainda pendentes">
@@ -138,11 +143,24 @@
             </p>
 
             <!-- Actions -->
-            <div class="grid grid-cols-3 gap-1">
+            <div class="grid {% if campaign.status in ('running', 'pending', 'paused') %}grid-cols-4{% else %}grid-cols-3{% endif %} gap-1">
                 <button type="button" onclick="event.stopPropagation(); openCampaignDetail({{ campaign.id }})"
                     class="px-2 py-1.5 rounded text-xs font-medium bg-blue-600/20 text-blue-300 border border-blue-500/30 hover:bg-blue-600/40 transition-colors truncate">
                     📋 Detalhes
                 </button>
+                {% if campaign.status == 'paused' %}
+                <button type="button" onclick="event.stopPropagation(); adminTogglePause({{ campaign.id }}, 'paused')"
+                    class="px-2 py-1.5 rounded text-xs font-medium bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/40 transition-colors truncate"
+                    title="Retomar envios (status running)">
+                    ▶ Despausar
+                </button>
+                {% elif campaign.status in ('running', 'pending') %}
+                <button type="button" onclick="event.stopPropagation(); adminTogglePause({{ campaign.id }}, '{{ campaign.status }}')"
+                    class="px-2 py-1.5 rounded text-xs font-medium bg-orange-600/20 text-orange-300 border border-orange-500/30 hover:bg-orange-600/40 transition-colors truncate"
+                    title="Pausar campanha">
+                    ⏸ Pausar
+                </button>
+                {% endif %}
                 <a href="/admin/campaigns/{{ campaign.id }}/edit" onclick="event.stopPropagation()"
                     class="px-2 py-1.5 rounded text-xs font-medium bg-amber-600/20 text-amber-300 border border-amber-500/30 hover:bg-amber-600/40 transition-colors text-center truncate">
                     ✏️ Editar
@@ -158,6 +176,54 @@
             Nenhuma campanha encontrada.
         </div>
         {% endfor %}
+    </div>
+</div>
+
+<!-- Modal: dry-run pausar exceto campanha mais recente (por usuário) -->
+<div id="pause-except-latest-modal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4 modal-backdrop"
+    onclick="if(event.target===this) closePauseExceptLatestDryRunModal()">
+    <div class="bg-elevated border border-[color:var(--card-border)] rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl text-ink"
+        onclick="event.stopPropagation()">
+        <div class="px-5 py-4 border-b border-[color:var(--card-border)]">
+            <h2 class="text-lg font-semibold text-ink">Pausar exceto a mais recente</h2>
+            <p id="pause-except-latest-hint" class="text-sm text-faint mt-1">Por usuário, entre campanhas <strong class="text-ink">running</strong> e
+                <strong class="text-ink">pending</strong>, mantém a mais recente (por data de criação). Com <strong class="text-ink">Dry-run ON</strong> só simula; com <strong class="text-ink">OFF</strong> pausa as demais de verdade.</p>
+        </div>
+        <div class="px-5 py-4 space-y-4 text-sm border-b border-[color:var(--card-border)]">
+            <div class="flex flex-wrap items-end gap-4">
+                <div>
+                    <label class="block text-faint mb-1">Filtrar usuário (ID, opcional)</label>
+                    <input type="number" id="pause-dry-user-id" min="1"
+                        class="w-36 bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded px-3 py-2 text-ink"
+                        placeholder="todos" />
+                </div>
+                <label class="flex items-center gap-2 cursor-pointer pb-2">
+                    <input type="checkbox" id="pause-dry-only-conflicts" class="rounded border-[color:var(--input-border)]" />
+                    <span class="text-faint">Só usuários com 2+ campanhas ativas</span>
+                </label>
+                <div class="flex flex-col gap-1 pb-1">
+                    <span class="text-xs text-faint">Dry-run</span>
+                    <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+                        <input type="checkbox" id="pause-dry-run-toggle" checked
+                            class="w-4 h-4 rounded border-[color:var(--input-border)]"
+                            onchange="syncPauseExceptLatestUi()" />
+                        <span id="pause-dry-run-toggle-label" class="text-sm font-medium text-amber-700 dark:text-amber-300">ON (simulação)</span>
+                    </label>
+                </div>
+                <button type="button" id="pause-dry-run-btn" onclick="runPauseExceptLatest()"
+                    class="px-4 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 text-white font-medium">
+                    Simular
+                </button>
+            </div>
+            <p id="pause-dry-summary" class="text-xs text-faint hidden"></p>
+        </div>
+        <div id="pause-dry-results" class="px-5 py-4 overflow-y-auto flex-1 text-sm text-faint min-h-[120px]">
+            <p>Escolha Dry-run ON para simular ou OFF para pausar de verdade, depois clique no botão de ação.</p>
+        </div>
+        <div class="px-5 py-3 border-t border-[color:var(--card-border)] flex justify-end gap-2">
+            <button type="button" onclick="closePauseExceptLatestDryRunModal()"
+                class="px-4 py-2 rounded-lg bg-slate-200 text-ink hover:bg-slate-300 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-600">Fechar</button>
+        </div>
     </div>
 </div>
 
@@ -207,10 +273,14 @@
     onclick="if(event.target===this) closeCampaignDetail()">
     <div class="bg-elevated border border-[color:var(--card-border)] rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl text-ink"
         onclick="event.stopPropagation()">
-        <div class="flex items-center justify-between px-5 py-4 border-b border-[color:var(--card-border)]">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-[color:var(--card-border)] gap-3">
             <h2 class="text-lg font-semibold text-ink">Detalhes da campanha</h2>
-            <button type="button" onclick="closeCampaignDetail()"
-                class="text-faint hover:text-ink text-2xl leading-none">&times;</button>
+            <div class="flex items-center gap-2 ml-auto">
+                <button type="button" id="campaign-detail-pause-btn" class="hidden px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors"
+                    onclick="event.stopPropagation()"></button>
+                <button type="button" onclick="closeCampaignDetail()"
+                    class="text-faint hover:text-ink text-2xl leading-none shrink-0">&times;</button>
+            </div>
         </div>
         <div id="campaign-detail-body" class="px-5 py-4 overflow-y-auto text-sm text-faint space-y-6">
             <p class="text-faint">Carregando…</p>
@@ -231,6 +301,169 @@
         const m = document.getElementById('campaign-detail-modal');
         m.classList.add('hidden');
         m.classList.remove('flex');
+    }
+
+    function isPauseExceptLatestDryRunOn() {
+        const el = document.getElementById('pause-dry-run-toggle');
+        return el ? el.checked : true;
+    }
+
+    function syncPauseExceptLatestUi() {
+        const dryOn = isPauseExceptLatestDryRunOn();
+        const btn = document.getElementById('pause-dry-run-btn');
+        const label = document.getElementById('pause-dry-run-toggle-label');
+        const hint = document.getElementById('pause-except-latest-hint');
+        if (label) {
+            label.textContent = dryOn ? 'ON (simulação)' : 'OFF (pausa real)';
+            label.className = dryOn
+                ? 'text-sm font-medium text-amber-700 dark:text-amber-300'
+                : 'text-sm font-medium text-red-600 dark:text-red-400';
+        }
+        if (btn) {
+            btn.textContent = dryOn ? 'Simular' : 'Pausar agora';
+            btn.className = dryOn
+                ? 'px-4 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 text-white font-medium'
+                : 'px-4 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white font-medium';
+        }
+        if (hint) {
+            hint.innerHTML = dryOn
+                ? 'Por usuário, entre campanhas <strong class="text-ink">running</strong> e <strong class="text-ink">pending</strong>, mostra qual permaneceria ativa. <span class="text-amber-700 dark:text-amber-300/90">Dry-run ON — não altera nada.</span>'
+                : 'Por usuário, <span class="text-red-600 dark:text-red-400 font-medium">pausará de verdade</span> todas as ativas exceto a mais recente. Revise o plano com Dry-run ON antes.';
+        }
+    }
+
+    function openPauseExceptLatestDryRunModal() {
+        const m = document.getElementById('pause-except-latest-modal');
+        m.classList.remove('hidden');
+        m.classList.add('flex');
+        syncPauseExceptLatestUi();
+        document.getElementById('pause-dry-user-id').focus();
+    }
+
+    function closePauseExceptLatestDryRunModal() {
+        const m = document.getElementById('pause-except-latest-modal');
+        m.classList.add('hidden');
+        m.classList.remove('flex');
+    }
+
+    function renderPauseExceptLatestDryRun(data) {
+        const box = document.getElementById('pause-dry-results');
+        const summaryEl = document.getElementById('pause-dry-summary');
+        const s = data.summary || {};
+        const executed = data.dry_run === false;
+        summaryEl.classList.remove('hidden');
+        let summaryText =
+            `Usuários no relatório: ${s.users_in_report ?? 0} · ` +
+            `com 2+ ativas: ${s.users_with_multiple_active ?? 0} · ` +
+            `com 1 ativa: ${s.users_with_single_active ?? 0} · ` +
+            `permanecem ativas: ${s.campaigns_would_stay_active ?? 0} · ` +
+            (executed
+                ? `pausadas: ${s.campaigns_paused ?? 0} · falhas: ${s.campaigns_pause_failed ?? 0}`
+                : `seriam pausadas: ${s.campaigns_would_pause ?? 0}`);
+        if (executed) {
+            summaryText = 'EXECUTADO — ' + summaryText;
+        } else {
+            summaryText = 'DRY-RUN — ' + summaryText;
+        }
+        summaryEl.textContent = summaryText;
+
+        const users = data.users || [];
+        if (!users.length) {
+            box.innerHTML = '<p class="text-faint">Nenhum usuário com campanha running/pending no filtro aplicado.</p>';
+            return;
+        }
+
+        let html = '<div class="space-y-6">';
+        for (const u of users) {
+            const keep = u.keep || {};
+            const pauses = u.would_pause || [];
+            html += `<section class="border border-[color:var(--card-border)] rounded-lg overflow-hidden">`;
+            html += `<div class="bg-slate-100 dark:bg-gray-800/80 px-3 py-2 flex flex-wrap justify-between gap-2">`;
+            html += `<span class="text-ink font-medium">${esc(u.user_email)} <span class="text-faint font-normal">(user ${esc(u.user_id)})</span></span>`;
+            html += `<span class="text-xs text-faint">${esc(u.active_count)} ativa(s)</span>`;
+            html += `</div><div class="p-3 space-y-3">`;
+            html += `<div class="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2">`;
+            html += `<div class="text-xs text-emerald-600 dark:text-emerald-400 font-semibold uppercase tracking-wide mb-1">Permanece ativa</div>`;
+            html += `<div class="text-ink font-medium">${esc(keep.name)} <span class="text-faint font-normal">ID ${esc(keep.id)} · ${esc(keep.status)} · criada ${esc(keep.created_at || '—')}</span></div>`;
+            if (keep.use_uazapi_sender) {
+                html += `<div class="text-xs text-faint mt-1">Uazapi${keep.enable_cadence ? ' + cadência' : ''}${keep.uazapi_folder_id ? ' · pasta campanha: ' + esc(keep.uazapi_folder_id) : ''}</div>`;
+            }
+            html += `</div>`;
+            if (pauses.length) {
+                const pauseLabel = executed ? 'Pausadas (planejadas)' : `Seriam pausadas (${pauses.length})`;
+                html += `<div><div class="text-xs text-orange-600 dark:text-orange-400 font-semibold uppercase tracking-wide mb-2">${pauseLabel}</div>`;
+                html += `<ul class="space-y-2">`;
+                for (const p of pauses) {
+                    html += `<li class="rounded border border-orange-500/25 bg-orange-500/5 px-3 py-2 text-ink">`;
+                    html += `${esc(p.name)} <span class="text-faint">ID ${esc(p.id)} · ${esc(p.status)} · criada ${esc(p.created_at || '—')}</span>`;
+                    html += `</li>`;
+                }
+                html += `</ul></div>`;
+            } else {
+                html += `<p class="text-xs text-faint">Nenhuma outra campanha ativa para este usuário.</p>`;
+            }
+            html += `</div></section>`;
+        }
+        html += '</div>';
+
+        if (executed && (data.errors || []).length) {
+            html += '<section class="mt-6 border border-red-500/40 rounded-lg p-3"><div class="text-xs text-red-500 font-semibold uppercase mb-2">Falhas ao pausar</div><ul class="space-y-1 text-sm">';
+            for (const e of data.errors) {
+                html += `<li class="text-red-600 dark:text-red-400">ID ${esc(e.campaign_id)}: ${esc(e.error || 'erro')}</li>`;
+            }
+            html += '</ul></section>';
+        }
+
+        box.innerHTML = html;
+    }
+
+    async function runPauseExceptLatest() {
+        const box = document.getElementById('pause-dry-results');
+        const btn = document.getElementById('pause-dry-run-btn');
+        const dryOn = isPauseExceptLatestDryRunOn();
+        const uidRaw = (document.getElementById('pause-dry-user-id').value || '').trim();
+        const onlyConflicts = document.getElementById('pause-dry-only-conflicts').checked;
+        const body = {
+            dry_run: dryOn,
+            only_conflicts: onlyConflicts,
+            confirm: !dryOn,
+        };
+        if (uidRaw) body.user_id = parseInt(uidRaw, 10);
+        if (ADMIN_CSRF) body.csrf_token = ADMIN_CSRF;
+
+        if (!dryOn) {
+            const msg = uidRaw
+                ? `Pausar de verdade as campanhas ativas mais antigas do usuário ${uidRaw}? A mais recente de cada um permanece running/pending.`
+                : 'Pausar de verdade as campanhas ativas mais antigas de TODOS os usuários? Em cada usuário, só a mais recente permanece ativa.';
+            if (!confirm(msg + '\n\nRecomendado: rode antes com Dry-run ON.')) {
+                return;
+            }
+        }
+
+        btn.disabled = true;
+        box.innerHTML = '<p class="text-faint">' + (dryOn ? 'Simulando…' : 'Pausando…') + '</p>';
+        document.getElementById('pause-dry-summary').classList.add('hidden');
+        try {
+            const res = await fetch('/api/admin/campaigns/pause-except-latest', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ADMIN_CSRF || '' },
+                credentials: 'same-origin',
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                box.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(data.message || data.error || ('HTTP ' + res.status)) + '</p>';
+                return;
+            }
+            renderPauseExceptLatestDryRun(data);
+            if (!dryOn && (data.summary?.campaigns_paused || 0) > 0) {
+                setTimeout(() => window.location.reload(), 1500);
+            }
+        } catch (e) {
+            box.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(e.message) + '</p>';
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     function openForceChunkModal() {
@@ -290,6 +523,12 @@
 
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
+        const pm = document.getElementById('pause-except-latest-modal');
+        if (pm && !pm.classList.contains('hidden')) {
+            e.preventDefault();
+            closePauseExceptLatestDryRunModal();
+            return;
+        }
         const fm = document.getElementById('force-chunk-modal');
         if (fm && !fm.classList.contains('hidden')) {
             e.preventDefault();
@@ -318,8 +557,66 @@
             const fc = document.getElementById('force-campaign-id');
             if (fc) fc.value = id;
             body.innerHTML = renderCampaignDetail(data);
+            wireCampaignDetailPauseBtn(id, (data.campaign || {}).status);
         } catch (err) {
             body.innerHTML = '<p class="text-red-600 dark:text-red-400">' + esc(err.message) + '</p>';
+        }
+    }
+
+    function wireCampaignDetailPauseBtn(campaignId, status) {
+        const btn = document.getElementById('campaign-detail-pause-btn');
+        if (!btn) return;
+        const st = (status || '').trim();
+        if (st === 'paused') {
+            btn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/40';
+            btn.textContent = '▶ Despausar';
+            btn.onclick = (e) => { e.stopPropagation(); adminTogglePause(campaignId, 'paused', { reloadDetail: true }); };
+            btn.classList.remove('hidden');
+        } else if (st === 'running' || st === 'pending') {
+            btn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-orange-600/20 text-orange-300 border border-orange-500/30 hover:bg-orange-600/40';
+            btn.textContent = '⏸ Pausar';
+            btn.onclick = (e) => { e.stopPropagation(); adminTogglePause(campaignId, st, { reloadDetail: true }); };
+            btn.classList.remove('hidden');
+        } else {
+            btn.classList.add('hidden');
+            btn.onclick = null;
+        }
+    }
+
+    async function adminTogglePause(campaignId, currentStatus, options = {}) {
+        const isPaused = currentStatus === 'paused';
+        const path = isPaused
+            ? `/api/admin/campaigns/${campaignId}/outbox/resume`
+            : `/api/admin/campaigns/${campaignId}/outbox/pause`;
+        const body = {};
+        if (ADMIN_CSRF) body.csrf_token = ADMIN_CSRF;
+        if (isPaused && options.confirmDisconnected) {
+            body.confirm_resume_while_disconnected = true;
+        }
+        try {
+            const res = await fetch(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ADMIN_CSRF || '' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.status === 409 && data.error === 'instance_disconnected' && !options.confirmDisconnected) {
+                if (confirm((data.message || 'Instância desconectada.') + '\n\nRetomar mesmo assim?')) {
+                    return adminTogglePause(campaignId, currentStatus, { ...options, confirmDisconnected: true });
+                }
+                return;
+            }
+            if (!res.ok) {
+                alert(data.message || data.error || ('Erro HTTP ' + res.status));
+                return;
+            }
+            if (options.reloadDetail) {
+                await openCampaignDetail(campaignId);
+            } else {
+                window.location.reload();
+            }
+        } catch (e) {
+            alert('Falha de rede: ' + e.message);
         }
     }
 

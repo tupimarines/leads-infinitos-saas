@@ -4051,11 +4051,311 @@ def admin_campaign_dispatch_audit(campaign_id):
     )
 
 
+_ACTIVE_CAMPAIGN_STATUSES_FOR_PAUSE_PLAN = ("running", "pending")
+
+
+def _campaign_row_for_pause_plan(row: dict) -> dict:
+    """Serialização mínima de campanha para dry-run pause-except-latest."""
+    return {
+        "id": int(row["id"]),
+        "name": row.get("name") or "",
+        "status": (row.get("status") or "").strip(),
+        "created_at": _isoformat_dt(row.get("created_at")),
+        "use_uazapi_sender": bool(row.get("use_uazapi_sender")),
+        "enable_cadence": bool(row.get("enable_cadence")),
+        "uazapi_folder_id": row.get("uazapi_folder_id"),
+    }
+
+
+def _build_pause_except_latest_dry_run(
+    conn,
+    *,
+    user_id: Optional[int] = None,
+    only_conflicts: bool = False,
+) -> dict:
+    """
+    Por usuário: entre campanhas ``running``/``pending``, mantém a mais recente
+    (``created_at`` DESC, ``id`` DESC) e lista as demais que seriam pausadas.
+    """
+    params: list = []
+    user_clause = ""
+    if user_id is not None:
+        user_clause = " AND c.user_id = %s"
+        params.append(int(user_id))
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT c.id, c.name, c.status, c.created_at, c.user_id,
+                   c.use_uazapi_sender, c.enable_cadence, c.uazapi_folder_id,
+                   u.email AS user_email
+            FROM campaigns c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.status IN ('running', 'pending')
+            {user_clause}
+            ORDER BY c.user_id ASC, c.created_at DESC NULLS LAST, c.id DESC
+            """,
+            tuple(params),
+        )
+        rows = [dict(r) for r in (cur.fetchall() or [])]
+
+    by_user: dict[int, list[dict]] = {}
+    for row in rows:
+        uid = int(row["user_id"])
+        by_user.setdefault(uid, []).append(row)
+
+    users_out = []
+    total_would_pause = 0
+    users_multiple = 0
+    users_single = 0
+
+    for uid in sorted(by_user.keys()):
+        camps = by_user[uid]
+        keep_row = camps[0]
+        pause_rows = camps[1:]
+        if only_conflicts and len(camps) < 2:
+            continue
+        if len(camps) > 1:
+            users_multiple += 1
+        else:
+            users_single += 1
+        total_would_pause += len(pause_rows)
+        users_out.append(
+            {
+                "user_id": uid,
+                "user_email": keep_row.get("user_email") or "",
+                "active_count": len(camps),
+                "keep": _campaign_row_for_pause_plan(keep_row),
+                "would_pause": [_campaign_row_for_pause_plan(r) for r in pause_rows],
+            }
+        )
+
+    return {
+        "dry_run": True,  # sobrescrito pelo caller em execução real
+        "criteria": {
+            "active_statuses": list(_ACTIVE_CAMPAIGN_STATUSES_FOR_PAUSE_PLAN),
+            "keep_rule": "most_recent_by_created_at_then_id",
+            "scoped_user_id": user_id,
+            "only_conflicts": only_conflicts,
+        },
+        "summary": {
+            "users_in_report": len(users_out),
+            "users_with_multiple_active": users_multiple,
+            "users_with_single_active": users_single,
+            "campaigns_would_stay_active": len(users_out),
+            "campaigns_would_pause": total_would_pause,
+        },
+        "users": users_out,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _parse_pause_except_latest_scope(*, user_id_raw, only_conflicts_raw):
+    """Resolve filtros comuns (query ou JSON body)."""
+    scoped_user_id = None
+    if user_id_raw is not None and str(user_id_raw).strip() != "":
+        try:
+            scoped_user_id = int(user_id_raw)
+        except (TypeError, ValueError):
+            return None, None, (
+                jsonify({"error": "invalid_user_id", "message": "user_id deve ser inteiro."}),
+                400,
+            )
+    only_conflicts = str(only_conflicts_raw or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    return scoped_user_id, only_conflicts, None
+
+
+def _truthy_json_flag(value, *, default=False) -> bool:
+    if value is None:
+        return default
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _admin_pause_campaign_active(campaign_id: int) -> dict:
+    """Pausa campanha running/pending (admin; mesma regra do pause unitário, sem gate outbox)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_id, use_uazapi_sender, uazapi_folder_id
+                FROM campaigns WHERE id = %s
+                """,
+                (campaign_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return {"campaign_id": campaign_id, "ok": False, "error": "not_found"}
+        st = (row.get("status") or "").strip()
+        if st not in _ACTIVE_CAMPAIGN_STATUSES_FOR_PAUSE_PLAN:
+            return {
+                "campaign_id": campaign_id,
+                "ok": False,
+                "error": "skip_status",
+                "status": st,
+            }
+        if row.get("use_uazapi_sender") and row.get("uazapi_folder_id"):
+            success, err = _uazapi_control_campaign(
+                campaign_id, int(row["user_id"]), "stop", admin_mode=True
+            )
+            return {
+                "campaign_id": campaign_id,
+                "ok": bool(success),
+                "error": err,
+                "via": "uazapi_folder",
+            }
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaigns SET status = 'paused'
+                WHERE id = %s AND status IN ('running', 'pending')
+                """,
+                (campaign_id,),
+            )
+            ok = cur.rowcount > 0
+        if ok:
+            conn.commit()
+            return {"campaign_id": campaign_id, "ok": True, "via": "db"}
+        conn.rollback()
+        return {"campaign_id": campaign_id, "ok": False, "error": "conflict"}
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {"campaign_id": campaign_id, "ok": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/campaigns/pause-except-latest/dry-run", methods=["GET"])
+@login_required
+@admin_required
+def admin_campaigns_pause_except_latest_dry_run():
+    """
+    Dry-run (GET legado): por usuário, qual campanha running/pending permanece ativa (mais recente)
+    e quais seriam pausadas. Não altera o banco nem a Uazapi.
+
+    Query: ``user_id`` (opcional), ``only_conflicts`` (1/true = só usuários com 2+ ativas).
+    Preferir POST ``/api/admin/campaigns/pause-except-latest`` com ``dry_run: true``.
+    """
+    scoped_user_id, only_conflicts, err = _parse_pause_except_latest_scope(
+        user_id_raw=request.args.get("user_id"),
+        only_conflicts_raw=request.args.get("only_conflicts"),
+    )
+    if err:
+        return err
+
+    conn = get_db_connection()
+    try:
+        payload = _build_pause_except_latest_dry_run(
+            conn,
+            user_id=scoped_user_id,
+            only_conflicts=only_conflicts,
+        )
+        return jsonify(payload)
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/campaigns/pause-except-latest", methods=["POST"])
+@login_required
+@admin_required
+def admin_campaigns_pause_except_latest():
+    """
+    Por usuário: mantém a campanha running/pending mais recente; pausa as demais se ``dry_run`` é false.
+
+    JSON: ``dry_run`` (default true), ``user_id``, ``only_conflicts``, ``confirm`` (obrigatório se dry_run false).
+    """
+    body = request.get_json(silent=True) or {}
+    dry_run = _truthy_json_flag(body.get("dry_run"), default=True)
+
+    scoped_user_id, only_conflicts, err = _parse_pause_except_latest_scope(
+        user_id_raw=body.get("user_id"),
+        only_conflicts_raw=body.get("only_conflicts"),
+    )
+    if err:
+        return err
+
+    if not dry_run:
+        csrf_err = _verify_json_csrf()
+        if csrf_err:
+            return csrf_err
+        if not _admin_outbox_mutate_rate_allow(current_user.id):
+            return (
+                jsonify(
+                    {
+                        "error": "rate_limited",
+                        "message": "Muitas requisições. Tente novamente em um minuto.",
+                    }
+                ),
+                429,
+            )
+        if not _truthy_json_flag(body.get("confirm")):
+            return (
+                jsonify(
+                    {
+                        "error": "confirm_required",
+                        "message": "Envie confirm: true para executar pausas reais.",
+                    }
+                ),
+                400,
+            )
+
+    conn = get_db_connection()
+    try:
+        payload = _build_pause_except_latest_dry_run(
+            conn,
+            user_id=scoped_user_id,
+            only_conflicts=only_conflicts,
+        )
+        if dry_run:
+            return jsonify(payload)
+
+        payload["dry_run"] = False
+        paused = []
+        errors = []
+        for user_block in payload.get("users") or []:
+            for camp in user_block.get("would_pause") or []:
+                cid = int(camp["id"])
+                result = _admin_pause_campaign_active(cid)
+                entry = {
+                    "campaign_id": cid,
+                    "name": camp.get("name"),
+                    "user_id": user_block.get("user_id"),
+                    **result,
+                }
+                if result.get("ok"):
+                    paused.append(entry)
+                else:
+                    errors.append(entry)
+
+        summary = dict(payload.get("summary") or {})
+        summary["campaigns_paused"] = len(paused)
+        summary["campaigns_pause_failed"] = len(errors)
+        payload["summary"] = summary
+        payload["paused"] = paused
+        payload["errors"] = errors
+        return jsonify(payload)
+    finally:
+        conn.close()
+
+
 @app.route("/api/admin/users/<int:user_id>/campaigns-active")
 @login_required
 def admin_user_active_campaigns_api(user_id):
     """
-    Superadmin + USE_MESSAGE_OUTBOX: campanhas ``running`` / ``pending`` do usuário (dropdown auditoria).
+    Superadmin + USE_MESSAGE_OUTBOX: campanhas ``running`` / ``pending`` / ``paused`` do usuário
+    (dropdown auditoria — inclui pausadas para leitura do JSONL histórico).
     """
     gate = _require_message_outbox_phase1_api()
     if gate:
@@ -4067,9 +4367,9 @@ def admin_user_active_campaigns_api(user_id):
                 """
                 SELECT id, name, status, use_uazapi_sender, enable_cadence
                 FROM campaigns
-                WHERE user_id = %s AND status IN ('running', 'pending')
+                WHERE user_id = %s AND status IN ('running', 'pending', 'paused')
                 ORDER BY
-                    CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                    CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
                     name ASC
                 """,
                 (user_id,),

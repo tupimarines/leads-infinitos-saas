@@ -45,7 +45,7 @@
                 </select>
             </div>
             <div>
-                <label class="block text-sm text-faint mb-1">Campanha ativa (running / pending)</label>
+                <label class="block text-sm text-faint mb-1">Campanha (running / pending / pausada)</label>
                 <select id="audit-campaign" disabled
                     class="w-full rounded-lg bg-slate-100 dark:bg-gray-800 border border-[color:var(--card-border)] text-ink dark:text-white px-3 py-2 text-sm">
                     <option value="">Selecione um usuário primeiro</option>
@@ -117,14 +117,14 @@
         }
         const list = data.campaigns || [];
         if (!list.length) {
-            selCamp.innerHTML = '<option value="">Nenhuma campanha running/pending</option>';
+            selCamp.innerHTML = '<option value="">Nenhuma campanha running/pending/pausada</option>';
             return;
         }
         selCamp.innerHTML = '<option value="" selected disabled>Selecione uma campanha…</option>';
         list.forEach(c => {
             const opt = document.createElement('option');
             opt.value = c.id;
-            const st = (c.status === 'running') ? '🟢' : '🟡';
+            const st = (c.status === 'running') ? '🟢' : (c.status === 'paused') ? '⏸️' : '🟡';
             opt.textContent = `${st} ${c.name} (ID ${c.id})`;
             selCamp.appendChild(opt);
         });
