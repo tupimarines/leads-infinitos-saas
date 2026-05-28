@@ -361,8 +361,8 @@ def test_superadmin_post_api_campaigns_new_outbox_skips_advanced_and_enqueues(
     monkeypatch,
 ):
     """
-    Criador normal: ``POST /api/campaigns`` com superadmin + ``USE_MESSAGE_OUTBOX`` não chama
-    ``create_advanced_campaign`` e enfileira ``campaign_message_outbox`` (paridade com admin).
+    Superadmin em ``POST /api/campaigns`` com ``USE_MESSAGE_OUTBOX`` não chama
+    ``create_advanced_campaign`` e enfileira ``campaign_message_outbox``.
     """
     from psycopg2.extras import RealDictCursor
 
@@ -386,6 +386,68 @@ def test_superadmin_post_api_campaigns_new_outbox_skips_advanced_and_enqueues(
                         'name': 'Outbox User Route Campaign',
                         'job_id': job_id,
                         'message_templates': ['Olá {nome}, rota /api/campaigns!'],
+                        'instance_ids': [instance_id],
+                        'use_uazapi_sender': True,
+                        'rotation_mode': 'single',
+                        'send_hour_start': ctd.DEFAULT_TEST_SEND_HOUR_START,
+                        'send_hour_end': ctd.DEFAULT_TEST_SEND_HOUR_END,
+                        'send_saturday': True,
+                        'send_sunday': True,
+                    }
+                    res = client.post(
+                        '/api/campaigns',
+                        data=json.dumps(payload),
+                        content_type='application/json',
+                    )
+
+                assert res.status_code in (200, 201), res.get_data(as_text=True)
+                mock_adv.assert_not_called()
+
+                data = json.loads(res.get_data(as_text=True))
+                campaign_id = data.get('campaign_id') or data.get('id')
+                assert campaign_id
+
+                with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM campaign_message_outbox WHERE campaign_id = %s AND status = 'pending'",
+                        (campaign_id,),
+                    )
+                    assert cur.fetchone()['n'] >= 1
+
+
+def test_regular_user_post_api_campaigns_outbox_skips_advanced_and_enqueues(
+    db_conn,
+    ensure_target_user,
+    ensure_instance,
+    ensure_scraping_job,
+    monkeypatch,
+):
+    """
+    Utilizador normal (fora de SUPER_ADMIN_EMAILS): ``POST /api/campaigns`` com
+    ``USE_MESSAGE_OUTBOX`` não chama ``create_advanced_campaign`` e enfileira outbox.
+    """
+    from psycopg2.extras import RealDictCursor
+
+    user_id = ensure_target_user
+    instance_id = ensure_instance
+    job_id = ensure_scraping_job
+
+    with use_message_outbox_env(monkeypatch):
+        with patch('services.uazapi.UazapiService.create_advanced_campaign') as mock_adv:
+            with patch('utils.limits.can_create_campaign_today', return_value=True):
+                app_mod = __import__('app', fromlist=['app'])
+                flask_app = app_mod.app
+                flask_app.config['TESTING'] = True
+                flask_app.config['LOGIN_DISABLED'] = True
+
+                with flask_app.test_client() as client:
+                    with client.session_transaction() as sess:
+                        sess['_user_id'] = str(user_id)
+
+                    payload = {
+                        'name': 'Outbox Regular User Campaign',
+                        'job_id': job_id,
+                        'message_templates': ['Olá {nome}, utilizador normal!'],
                         'instance_ids': [instance_id],
                         'use_uazapi_sender': True,
                         'rotation_mode': 'single',

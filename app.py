@@ -7134,8 +7134,93 @@ def upload_csv_leads():
         print(f"Erro no upload: {e}")
         return json.dumps({'error': str(e)}), 500
 
+
+def _enqueue_uazapi_initial_outbox(
+    campaign_id: int,
+    leads: list,
+    allowed_instances: list,
+    *,
+    rotation_mode: str = "single",
+    scheduled_start=None,
+    flow: str = "create_campaign_core",
+) -> tuple[int, datetime]:
+    """
+    Enfileira etapa ``initial`` em ``campaign_message_outbox`` (worker → ``/send/text``).
+    Retorna (n_rows, next_run_at).
+    """
+    parsed_ss = (
+        _parse_iso_datetime_local(scheduled_start) if scheduled_start else None
+    )
+    now_utc = datetime.utcnow()
+    if parsed_ss:
+        next_run_at_val = max(now_utc, parsed_ss)
+    else:
+        next_run_at_val = now_utc
+    n_allowed = len(allowed_instances)
+    conn_o = get_db_connection()
+    try:
+        with conn_o.cursor() as cur:
+            for i, lead in enumerate(leads):
+                if rotation_mode == "round_robin":
+                    inst = allowed_instances[i % n_allowed]
+                else:
+                    inst = allowed_instances[0]
+                lead_id = int(lead["id"])
+                instance_id = int(inst["instance_id"])
+                idempotency_key = f"campaign-{campaign_id}-lead-{lead_id}-initial"
+                payload_summary = json.dumps(
+                    {
+                        "stage": "initial",
+                        "enqueue": flow,
+                        "rotation_mode": rotation_mode,
+                    }
+                )
+                queued_at_val = now_utc + timedelta(
+                    seconds=i // 1_000_000, microseconds=i % 1_000_000
+                )
+                cur.execute(
+                    """
+                    INSERT INTO campaign_message_outbox (
+                        campaign_id, campaign_lead_id, instance_id,
+                        stage, step_priority, status, queued_at,
+                        next_run_at, idempotency_key, payload_summary
+                    )
+                    VALUES (
+                        %s, %s, %s, 'initial', 0, 'pending',
+                        %s, %s, %s, %s::jsonb
+                    )
+                    """,
+                    (
+                        campaign_id,
+                        lead_id,
+                        instance_id,
+                        queued_at_val,
+                        next_run_at_val,
+                        idempotency_key,
+                        payload_summary,
+                    ),
+                )
+            lead_ids_out = [int(x["id"]) for x in leads]
+            cur.execute(
+                """
+                UPDATE campaign_leads
+                SET current_step = 1
+                WHERE campaign_id = %s AND id = ANY(%s)
+                """,
+                (campaign_id, lead_ids_out),
+            )
+            cur.execute(
+                "UPDATE campaigns SET status = 'running' WHERE id = %s",
+                (campaign_id,),
+            )
+        conn_o.commit()
+    finally:
+        conn_o.close()
+    return len(leads), next_run_at_val
+
+
 def _create_campaign_core(user_id, data, admin_id=None):
-    """Cria campanha para ``user_id``. Se ``admin_id`` veio do painel admin, grava ``created_by_admin_id`` (auditoria). Fila outbox (Fase 1): só com ``USE_MESSAGE_OUTBOX`` e operador superadmin (``_phase1_outbox_operator_is_superadmin``); ver ADR-4 em ``utils/config.py``."""
+    """Cria campanha para ``user_id``. Se ``admin_id`` veio do painel admin, grava ``created_by_admin_id`` (auditoria). Com ``USE_MESSAGE_OUTBOX``, enfileira ``campaign_message_outbox`` (envio unitário ``/send/text``) em vez de ``create_advanced_campaign``."""
     def extract_phone_from_whatsapp_link(link):
         """Helper to extract phone from whatsapp link"""
         if not link: return None
@@ -7510,11 +7595,11 @@ def _create_campaign_core(user_id, data, admin_id=None):
             conn.close()
         
         # 6. Uazapi: se use_uazapi_sender, distribuir leads em chunks de 30 por instância (assíncronas).
-        # ``USE_MESSAGE_OUTBOX``: Task 6 / ADR-4 — flag + operador superadmin: enfileirar ``campaign_message_outbox``
+        # ``USE_MESSAGE_OUTBOX``: enfileirar ``campaign_message_outbox`` (worker → ``/send/text``)
         # sem ``create_advanced_campaign``; ``next_run_at`` inicial respeita ``scheduled_start``.
         if use_uazapi_sender:
             use_message_outbox = USE_MESSAGE_OUTBOX
-            use_outbox_enqueue = use_message_outbox and _phase1_outbox_operator_is_superadmin(admin_id)
+            use_outbox_enqueue = use_message_outbox
             from utils.limits import can_create_campaign_today
             from utils.sync_uazapi import _normalize_phone_for_api
 
@@ -7589,76 +7674,17 @@ def _create_campaign_core(user_id, data, admin_id=None):
                 conn.close()
 
                 if use_outbox_enqueue and leads:
-                    parsed_ss = (
-                        _parse_iso_datetime_local(scheduled_start)
-                        if scheduled_start
-                        else None
+                    n_rows, next_run_at_val = _enqueue_uazapi_initial_outbox(
+                        campaign_id,
+                        leads,
+                        allowed_instances,
+                        rotation_mode=rotation_mode,
+                        scheduled_start=scheduled_start,
+                        flow="create_campaign_core",
                     )
-                    now_utc = datetime.utcnow()
-                    if parsed_ss:
-                        next_run_at_val = max(now_utc, parsed_ss)
-                    else:
-                        next_run_at_val = now_utc
-                    n_allowed = len(allowed_instances)
-                    conn_o = get_db_connection()
-                    try:
-                        with conn_o.cursor() as cur:
-                            for i, lead in enumerate(leads):
-                                if rotation_mode == "round_robin":
-                                    inst = allowed_instances[i % n_allowed]
-                                else:
-                                    inst = allowed_instances[0]
-                                lead_id = int(lead["id"])
-                                instance_id = int(inst["instance_id"])
-                                idempotency_key = f"campaign-{campaign_id}-lead-{lead_id}-initial"
-                                payload_summary = json.dumps(
-                                    {
-                                        "stage": "initial",
-                                        "enqueue": "create_campaign",
-                                        "rotation_mode": rotation_mode,
-                                    }
-                                )
-                                # Monotonic per campaign (Task 3): micros cap at 999999; spill to seconds.
-                                queued_at_val = now_utc + timedelta(
-                                    seconds=i // 1_000_000, microseconds=i % 1_000_000
-                                )
-                                cur.execute(
-                                    """
-                                    INSERT INTO campaign_message_outbox (
-                                        campaign_id, campaign_lead_id, instance_id,
-                                        stage, step_priority, status, queued_at,
-                                        next_run_at, idempotency_key, payload_summary
-                                    )
-                                    VALUES (
-                                        %s, %s, %s, 'initial', 0, 'pending',
-                                        %s, %s, %s, %s::jsonb
-                                    )
-                                    """,
-                                    (
-                                        campaign_id,
-                                        lead_id,
-                                        instance_id,
-                                        queued_at_val,
-                                        next_run_at_val,
-                                        idempotency_key,
-                                        payload_summary,
-                                    ),
-                                )
-                            lead_ids_out = [int(x["id"]) for x in leads]
-                            cur.execute(
-                                """
-                                UPDATE campaign_leads
-                                SET current_step = 1
-                                WHERE campaign_id = %s AND id = ANY(%s)
-                                """,
-                                (campaign_id, lead_ids_out),
-                            )
-                        conn_o.commit()
-                    finally:
-                        conn_o.close()
                     print(
                         f"[UAZAPI] Outbox enqueue campaign_id={campaign_id} "
-                        f"rows={len(leads)} next_run_at={next_run_at_val.isoformat()} "
+                        f"rows={n_rows} next_run_at={next_run_at_val.isoformat()} "
                         f"(create_advanced_campaign skipped)"
                     )
                 else:
@@ -7810,15 +7836,8 @@ def _create_campaign_core(user_id, data, admin_id=None):
 @app.route('/api/campaigns', methods=['POST'])
 @login_required
 def create_campaign():
-    """Criador normal (Minhas Campanhas). Com ``USE_MESSAGE_OUTBOX`` e superadmin, passa ``admin_id`` para ``_create_campaign_core`` — mesma fila outbox que ``POST /api/admin/campaigns`` para o próprio utilizador (Fase 1 / ADR-4)."""
-    admin_id = (
-        current_user.id
-        if (USE_MESSAGE_OUTBOX and is_super_admin())
-        else None
-    )
-    return _create_campaign_core(
-        current_user.id, request.json, admin_id=admin_id
-    )
+    """Criador normal (Minhas Campanhas). Outbox quando ``USE_MESSAGE_OUTBOX`` (sem gate superadmin)."""
+    return _create_campaign_core(current_user.id, request.json)
 
 
 @app.route("/dashboard")
@@ -8592,6 +8611,35 @@ def _force_uazapi_initial_chunk_no_cadence(
 
     def _chunk(lst, n):
         return [lst[i : i + n] for i in range(0, len(lst), n)]
+
+    rotation_mode = (campaign.get("rotation_mode") or "single").strip()
+    if rotation_mode not in ("single", "round_robin"):
+        rotation_mode = "single"
+
+    if USE_MESSAGE_OUTBOX and leads:
+        n_rows, next_run_at_val = _enqueue_uazapi_initial_outbox(
+            campaign_id,
+            list(leads),
+            allowed,
+            rotation_mode=rotation_mode,
+            scheduled_start=sched_raw,
+            flow="force_uazapi_initial_chunk_no_cadence",
+        )
+        print(
+            f"[UAZAPI] {log_label} outbox enqueue campaign_id={campaign_id} "
+            f"rows={n_rows} next_run_at={next_run_at_val.isoformat()} "
+            f"(create_advanced_campaign skipped)"
+        )
+        return {
+            "ok": True,
+            "status_code": 200,
+            "body": {
+                "success": True,
+                "message": f"{n_rows} envio(s) enfileirado(s) (outbox /send/text).",
+                "mode": "message_outbox",
+                "rows_enqueued": n_rows,
+            },
+        }
 
     lead_chunks = _chunk(list(leads), per_instance_limit)
 

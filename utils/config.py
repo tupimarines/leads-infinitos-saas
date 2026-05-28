@@ -24,16 +24,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
-# Fila Postgres ``campaign_message_outbox`` (envio unitário Uazapi) em vez de pastas
-# ``create_advanced_campaign`` na criação (Task 6) + tick no worker. Default: desligado
-# (ambiente: ``USE_MESSAGE_OUTBOX=true`` / ``1`` / ``yes`` / ``on``).
-USE_MESSAGE_OUTBOX = _env_bool("USE_MESSAGE_OUTBOX", False)
+# Fila Postgres ``campaign_message_outbox`` (envio unitário ``/send/text`` via worker) em vez de
+# pastas ``create_advanced_campaign`` na Uazapi. Default: ligado (``USE_MESSAGE_OUTBOX=false``
+# só para rollback de emergência).
+USE_MESSAGE_OUTBOX = _env_bool("USE_MESSAGE_OUTBOX", True)
 
-# ADR-4 / Fase 1 (tech-spec Task 13): o gate da fila outbox na criação e nas APIs admin de
-# polling/pausa é **duplo** — (1) ``USE_MESSAGE_OUTBOX`` no ambiente e (2) email do **operador**
-# em ``SUPER_ADMIN_EMAILS`` (``is_super_admin``). A coluna ``campaigns.created_by_admin_id``
-# identifica quem criou no painel admin **apenas para auditoria**; não substitui nem reforça
-# o gate (não usar “created_by_admin_id IS NOT NULL” como condição de outbox).
+# Criação de campanha: com ``USE_MESSAGE_OUTBOX`` activo, todos os utilizadores entram na fila
+# ``campaign_message_outbox`` (envio unitário). APIs admin de polling/pausa outbox (fase 1)
+# continuam restritas a ``SUPER_ADMIN_EMAILS``. ``campaigns.created_by_admin_id`` é só auditoria
+# (painel admin); não define modo de envio.
 
 # --- Task 14 / observabilidade ops (Prometheus) ---
 # ``EXPOSE_PROMETHEUS_METRICS``: expõe ``GET /metrics`` no processo Flask (default off).
