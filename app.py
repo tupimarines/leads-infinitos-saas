@@ -4832,12 +4832,33 @@ def admin_campaign_outbox_pause(campaign_id):
                 409,
             )
 
-        if row.get("use_uazapi_sender") and row.get("uazapi_folder_id"):
+        use_uaz = bool(row.get("use_uazapi_sender"))
+        folder_id = row.get("uazapi_folder_id")
+        needs_uazapi_stop = (
+            use_uaz
+            and folder_id
+            and not _campaign_has_message_outbox_rows(campaign_id)
+            and not _campaign_has_chunk_stage_sends(campaign_id)
+        )
+        if needs_uazapi_stop:
             success, err = _uazapi_control_campaign(
                 campaign_id, int(row["user_id"]), "stop", admin_mode=True
             )
             if not success:
                 return jsonify({"error": "uazapi_control_failed", "message": err or "Falha na API Uazapi."}), 500
+        elif use_uaz:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE campaigns SET status = 'paused' WHERE id = %s AND status IN ('running', 'pending')",
+                    (campaign_id,),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return (
+                        jsonify({"error": "conflict", "message": "Estado da campanha mudou; recarregue."}),
+                        409,
+                    )
+            conn.commit()
         else:
             with conn.cursor() as cur:
                 cur.execute(
@@ -6410,6 +6431,97 @@ def api_scraping_jobs():
     except Exception as e:
         return json.dumps({'error': str(e)}), 500
 
+def _campaign_has_message_outbox_rows(campaign_id: int) -> bool:
+    """True se a campanha usa fila ``campaign_message_outbox`` (envio /send/text)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM campaign_message_outbox WHERE campaign_id = %s LIMIT 1",
+                (campaign_id,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _campaign_has_chunk_stage_sends(campaign_id: int) -> bool:
+    """True se há chunks Uazapi em ``campaign_stage_sends`` (legado por pasta, com ou sem cadência UI)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM campaign_stage_sends WHERE campaign_id = %s LIMIT 1",
+                (campaign_id,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _uazapi_resume_flexible_folder_continue(
+    campaign_id: int,
+    user_id: int,
+    *,
+    folder_id: Optional[str],
+    admin_mode: bool,
+    trigger_initial_chunk: bool,
+    log_label: str,
+    extra: dict,
+) -> tuple[bool, Optional[str], dict]:
+    """
+    Retoma no BD; ``continue`` na pasta ``campaigns.uazapi_folder_id`` é best-effort.
+    Opcionalmente agenda/materializa próximo chunk inicial (cadência ou chunks legados).
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
+            if cur.rowcount == 0:
+                conn.rollback()
+                return False, "Estado da campanha mudou; recarregue.", extra
+        conn.commit()
+    finally:
+        conn.close()
+
+    if folder_id:
+        ok_legacy, err_legacy = _uazapi_control_campaign(
+            campaign_id, user_id, "continue", admin_mode=admin_mode
+        )
+        if not ok_legacy:
+            print(
+                f"[resume] campaign_id={campaign_id}: continue pasta legada ignorado "
+                f"({log_label}): {err_legacy}"
+            )
+
+    if trigger_initial_chunk:
+        cres = _continue_initial_chunk_core(
+            campaign_id,
+            user_id,
+            log_label=log_label,
+        )
+        ib = cres.get("body") if isinstance(cres.get("body"), dict) else {}
+        if ib.get("per_send") is not None:
+            extra["initial_chunk"] = {
+                "success": ib.get("success"),
+                "partial": ib.get("partial"),
+                "instances_created": ib.get("instances_created", 0),
+                "folders_created": ib.get("folders_created", 0),
+                "per_send": ib.get("per_send", []),
+                "message": ib.get("message"),
+                "status_code": cres.get("status_code"),
+            }
+        elif ib:
+            extra["initial_chunk"] = {
+                "success": cres.get("ok"),
+                "message": ib.get("message") or ib.get("error"),
+                "status_code": cres.get("status_code"),
+                "mode": ib.get("mode"),
+                "rows_enqueued": ib.get("rows_enqueued"),
+            }
+    return True, None, extra
+
+
 def _uazapi_control_folder(campaign_id: int, user_id: int, folder_id: str, action: str):
     """
     Helper: executa action (stop|continue) em um folder_id Uazapi.
@@ -6455,7 +6567,10 @@ def _resume_campaign_after_pause(
     ``continue`` na ``uazapi_folder_id`` da linha ``campaigns`` pode falhar (pasta arquivada/inexistente)
     sem impedir retomada — atualiza BD e opcionalmente agenda novo chunk inicial.
 
-    Campanha pasta única (sem cadência): exige ``edit_campaign`` continue na pasta da campanha.
+    Fila outbox, cadência ou chunks em ``campaign_stage_sends``: retoma no BD; pasta em
+    ``campaigns.uazapi_folder_id`` pode estar ``done`` — não bloquear retomada.
+
+    Campanha pasta única (sem outbox/chunks/cadência): exige ``edit_campaign`` continue.
     """
     conn = get_db_connection()
     extra: dict = {}
@@ -6486,41 +6601,30 @@ def _resume_campaign_after_pause(
         use_uaz = bool(campaign.get("use_uazapi_sender"))
         folder_id = campaign.get("uazapi_folder_id")
         enable_cadence = bool(campaign.get("enable_cadence"))
+        has_outbox = _campaign_has_message_outbox_rows(campaign_id)
+        has_chunks = _campaign_has_chunk_stage_sends(campaign_id)
 
-        if use_uaz and enable_cadence:
+        if use_uaz and has_outbox:
             with conn.cursor() as cur:
                 cur.execute(_sql_resume_running_clear_system_disconnect_pause(), (campaign_id,))
                 if cur.rowcount == 0:
                     conn.rollback()
                     return False, "Estado da campanha mudou; recarregue.", extra
             conn.commit()
-            if folder_id:
-                ok_legacy, err_legacy = _uazapi_control_campaign(
-                    campaign_id, user_id, "continue", admin_mode=admin_mode
-                )
-                if not ok_legacy:
-                    print(
-                        f"[resume] campaign_id={campaign_id}: continue pasta legada ignorado "
-                        f"(cadência): {err_legacy}"
-                    )
-            if trigger_initial_chunk:
-                cres = _continue_initial_chunk_core(
-                    campaign_id,
-                    user_id,
-                    log_label="resume-cadence+initial-chunk",
-                )
-                ib = cres.get("body") if isinstance(cres.get("body"), dict) else {}
-                if ib.get("per_send") is not None:
-                    extra["initial_chunk"] = {
-                        "success": ib.get("success"),
-                        "partial": ib.get("partial"),
-                        "instances_created": ib.get("instances_created", 0),
-                        "folders_created": ib.get("folders_created", 0),
-                        "per_send": ib.get("per_send", []),
-                        "message": ib.get("message"),
-                        "status_code": cres.get("status_code"),
-                    }
             return True, None, extra
+
+        if use_uaz and (enable_cadence or has_chunks):
+            return _uazapi_resume_flexible_folder_continue(
+                campaign_id,
+                user_id,
+                folder_id=folder_id,
+                admin_mode=admin_mode,
+                trigger_initial_chunk=trigger_initial_chunk,
+                log_label="resume-chunks+initial-chunk"
+                if has_chunks and not enable_cadence
+                else "resume-cadence+initial-chunk",
+                extra=extra,
+            )
 
         if use_uaz and folder_id:
             success, err = _uazapi_control_campaign(
