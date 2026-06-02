@@ -6495,10 +6495,12 @@ def _uazapi_resume_flexible_folder_continue(
             )
 
     if trigger_initial_chunk:
+        _unlock_initial_chunks_before_force(campaign_id, f"{log_label}-pre-chunk")
         cres = _continue_initial_chunk_core(
             campaign_id,
             user_id,
             log_label=log_label,
+            cancel_scheduled=True,
         )
         ib = cres.get("body") if isinstance(cres.get("body"), dict) else {}
         if ib.get("per_send") is not None:
@@ -8574,6 +8576,51 @@ def _initial_chunk_materialization_outcomes(created_ids):
     return summarize_initial_chunk_materialization_rows([dict(r) for r in rows])
 
 
+def _unlock_initial_chunks_before_force(campaign_id: int, log_label: str) -> tuple[int, int]:
+    """
+    Destrava instância antes de forçar chunk (checkbox admin ``cancel_scheduled``):
+    - ``scheduled`` / ``waiting_reconnect`` → ``failed``
+    - ``running`` / ``partial`` / ``queued`` com ``success_count + failed_count = 0`` → ``failed``
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW()
+                WHERE campaign_id = %s AND stage = 'initial'
+                  AND status IN ('scheduled', 'waiting_reconnect')
+                """,
+                (campaign_id,),
+            )
+            n_sched = cur.rowcount
+            cur.execute(
+                """
+                UPDATE campaign_stage_sends
+                SET status = 'failed',
+                    last_materialize_error = COALESCE(
+                        NULLIF(TRIM(last_materialize_error), ''),
+                        'force_unlock: chunk ativo sem envios (success+failed=0)'
+                    ),
+                    updated_at = NOW()
+                WHERE campaign_id = %s AND stage = 'initial'
+                  AND status IN ('running', 'partial', 'queued')
+                  AND COALESCE(success_count, 0) + COALESCE(failed_count, 0) = 0
+                """,
+                (campaign_id,),
+            )
+            n_stuck = cur.rowcount
+        conn.commit()
+        if n_sched or n_stuck:
+            print(
+                f"[UAZAPI] {log_label} campaign_id={campaign_id}: unlock "
+                f"scheduled/waiting_reconnect={n_sched} stuck_active_zero_progress={n_stuck}"
+            )
+        return n_sched, n_stuck
+    finally:
+        conn.close()
+
+
 def _force_uazapi_initial_chunk_no_cadence(
     campaign_id, user_id, log_label, cancel_scheduled, campaign
 ):
@@ -8637,23 +8684,7 @@ def _force_uazapi_initial_chunk_no_cadence(
 
     allowed = list(instances)
     if cancel_scheduled:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW()
-                WHERE campaign_id = %s AND stage = 'initial' AND status IN ('scheduled', 'waiting_reconnect')
-                """,
-                (campaign_id,),
-            )
-            n_cancel = cur.rowcount
-        conn.commit()
-        conn.close()
-        if n_cancel:
-            print(
-                f"[UAZAPI] {log_label} (no_cadence) campaign_id={campaign_id}: "
-                f"cancelados {n_cancel} chunk(s) scheduled/waiting_reconnect"
-            )
+        _unlock_initial_chunks_before_force(campaign_id, f"{log_label} (no_cadence)")
 
     conn_busy = get_db_connection()
     with conn_busy.cursor(cursor_factory=RealDictCursor) as cur:
@@ -9033,19 +9064,10 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
 
         allowed = list(instances)
 
-        # cancel_scheduled: cancela chunks agendados para liberar slot imediato
         if cancel_scheduled:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE campaign_stage_sends SET status = 'failed', updated_at = NOW()
-                    WHERE campaign_id = %s AND stage = 'initial' AND status IN ('scheduled', 'waiting_reconnect')
-                    """,
-                    (campaign_id,),
-                )
-                if cur.rowcount > 0:
-                    print(f"[UAZAPI] {log_label} campaign_id={campaign_id}: cancelados {cur.rowcount} chunk(s) agendado(s)")
-            conn.commit()
+            conn.close()
+            _unlock_initial_chunks_before_force(campaign_id, log_label)
+            conn = get_db_connection()
 
         # Bloqueia só se houver chunk ativo (não done/failed). Done permite próximo chunk.
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

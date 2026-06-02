@@ -285,11 +285,11 @@
         onclick="event.stopPropagation()">
         <div class="px-5 py-4 border-b border-[color:var(--card-border)]">
             <h2 class="text-lg font-semibold text-ink">Forçar chunk inicial (Uazapi)</h2>
-            <p class="text-sm text-faint mt-1">Cria o próximo lote de envio inicial (Uazapi) para pendentes que
-                ainda não tiveram mensagem. <span class="text-amber-700 dark:text-amber-300/90">Com cadência:</span> agendamento
-                + materialize imediato. <span class="text-amber-700 dark:text-amber-300/90">Sem cadência:</span> criação direta
-                (create_advanced) como no fluxo de nova campanha. Opcional: cancela chunks
-                iniciais agendados/retomada presos.</p>
+            <p class="text-sm text-faint mt-1">Cria o próximo lote de envio inicial para pendentes que
+                ainda não tiveram mensagem. Com <span class="text-amber-700 dark:text-amber-300/90">outbox</span> ativo no servidor,
+                enfileira <span class="text-amber-700 dark:text-amber-300/90">/send/text</span>; senão usa pastas Uazapi (advanced).
+                <span class="text-amber-700 dark:text-amber-300/90">Com cadência:</span> agendamento + materialize.
+                A opção abaixo também falha chunks <span class="text-amber-700 dark:text-amber-300/90">running</span> com 0 envios.</p>
         </div>
         <div class="px-5 py-4 space-y-4 text-sm text-ink">
             <div>
@@ -306,7 +306,7 @@
             </div>
             <label class="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" id="force-cancel-scheduled" checked class="rounded border-[color:var(--input-border)]" />
-                <span>Cancelar chunks iniciais agendados/retomada (recomendado p/ destravar)</span>
+                <span>Destravar chunks presos (agendados, retomada ou running com 0 envios)</span>
             </label>
             <pre id="force-chunk-output" class="hidden text-xs bg-slate-200/90 dark:bg-black/50 border border-[color:var(--card-border)] rounded p-3 max-h-64 overflow-y-auto text-left whitespace-pre-wrap break-words text-faint"></pre>
         </div>
