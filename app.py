@@ -8750,6 +8750,7 @@ def _force_uazapi_initial_chunk_no_cadence(
     rotation_mode = (campaign.get("rotation_mode") or "single").strip()
     if rotation_mode not in ("single", "round_robin"):
         rotation_mode = "single"
+    sched_raw = campaign.get("scheduled_start")
 
     if USE_MESSAGE_OUTBOX and leads:
         n_rows, next_run_at_val = _enqueue_uazapi_initial_outbox(
@@ -8795,7 +8796,6 @@ def _force_uazapi_initial_chunk_no_cadence(
     delay_max_sec = int(d_hi * 60)
 
     scheduled_for_param = None
-    sched_raw = campaign.get("scheduled_start")
     if sched_raw:
         try:
             dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
