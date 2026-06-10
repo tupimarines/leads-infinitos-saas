@@ -84,7 +84,7 @@ from utils.uazapi_support_notify import (
     maybe_send_reconnect_support_whatsapp,
 )
 
-from worker_message_outbox import process_message_outbox_tick
+from worker_message_outbox import process_message_outbox_tick, schedule_next_initial_outbox_batch
 from utils.outbox_prometheus import maybe_start_outbox_metrics_http_server
 
 _logger_cadence = logging.getLogger(__name__)
@@ -2061,7 +2061,7 @@ def process_cadence():
                 cur.execute("""
                     SELECT c.id, c.name, c.user_id, c.cadence_config, c.enable_cadence, c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                            c.use_uazapi_sender, c.uazapi_folder_id, c.delay_min_minutes, c.delay_max_minutes,
-                           c.scheduled_start
+                           c.scheduled_start, c.rotation_mode, c.daily_limit
                     FROM campaigns c
                     WHERE c.status IN ('running', 'pending', 'completed')
                       AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
@@ -2278,6 +2278,15 @@ def schedule_next_initial_chunk(campaign, conn):
     """
     cid = campaign['id']
     if not campaign.get('use_uazapi_sender') or not uazapi_service:
+        return
+
+    if USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, cid):
+        n_outbox = schedule_next_initial_outbox_batch(conn, campaign)
+        if n_outbox > 0:
+            print(
+                f"  📤 [Initial Outbox] Campaign '{campaign.get('name')}': "
+                f"enfileirados {n_outbox} envio(s) initial (outbox /send/text)"
+            )
         return
 
     # Leads pendentes no stage initial (chunk 2, 3, ...)

@@ -21,7 +21,8 @@ from psycopg2.extras import RealDictCursor
 from services.uazapi import UazapiService
 from utils.campaign_dispatch_audit import append_dispatch_audit_event
 from utils.config import SUPER_ADMIN_EMAILS, USE_MESSAGE_OUTBOX
-from utils.limits import check_initial_chunk_daily_quota_for_campaign
+from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
+from utils.limits import check_initial_chunk_daily_quota_for_campaign, get_user_daily_limit
 from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
 from utils.outbox_prometheus import observe_campaign_outbox_send_attempt
 from utils.uazapi_outbox_errors import classify_outbox_send_failure
@@ -227,6 +228,220 @@ def _choose_outbox_row(candidates: list[dict]) -> dict:
     if len(rr_front) > 1 and _rotation_mode_round_robin(head):
         return _pick_instance_round_robin(rr_front)
     return head
+
+
+def _campaign_uses_message_outbox(conn, campaign_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM campaign_message_outbox WHERE campaign_id = %s LIMIT 1",
+            (campaign_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
+    """
+    Enfileira o próximo lote ``initial`` em ``campaign_message_outbox`` quando a campanha
+    já migrou para outbox. Substitui ``campaign_stage_sends`` em ``schedule_next_initial_chunk``.
+    """
+    if not USE_MESSAGE_OUTBOX:
+        return 0
+
+    cid = int(campaign["id"])
+    uid = int(campaign.get("user_id") or 0)
+    if not uid or not _campaign_uses_message_outbox(conn, cid):
+        return 0
+
+    camp_win = {
+        "send_hour_start": campaign.get("send_hour_start"),
+        "send_hour_end": campaign.get("send_hour_end"),
+        "send_saturday": campaign.get("send_saturday"),
+        "send_sunday": campaign.get("send_sunday"),
+    }
+    if not is_campaign_send_window(camp_win):
+        return 0
+    if not check_initial_chunk_daily_quota_for_campaign(cid):
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM campaign_message_outbox
+            WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+              AND status IN ('pending', 'sending')
+            LIMIT 1
+            """,
+            (cid,),
+        )
+        if cur.fetchone():
+            return 0
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM campaign_leads
+            WHERE campaign_id = %s
+              AND status = 'pending'
+              AND current_step = 1
+              AND COALESCE(removed_from_funnel, FALSE) = FALSE
+              AND COALESCE(cadence_status, 'active') NOT IN ('converted', 'lost')
+            """,
+            (cid,),
+        )
+        pending_row = cur.fetchone()
+    if not pending_row or int(pending_row[0] or 0) <= 0:
+        return 0
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT i.id AS instance_id
+            FROM campaign_instances ci
+            JOIN instances i ON i.id = ci.instance_id
+            WHERE ci.campaign_id = %s
+              AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+              AND i.apikey IS NOT NULL
+              AND TRIM(i.apikey) <> ''
+            ORDER BY i.id ASC
+            """,
+            (cid,),
+        )
+        instances = cur.fetchall() or []
+    if not instances:
+        return 0
+
+    daily_limit = int(campaign.get("daily_limit") or 0)
+    if daily_limit <= 0:
+        daily_limit = int(get_user_daily_limit(uid) or 30)
+    _, total_limit = uazapi_initial_chunk_distribution_limits(
+        daily_limit, len(instances)
+    )
+
+    rotation_mode = (campaign.get("rotation_mode") or "single").strip().lower()
+    if rotation_mode not in ("single", "round_robin"):
+        rotation_mode = "single"
+    n_inst = len(instances)
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT cl.id
+            FROM campaign_leads cl
+            WHERE cl.campaign_id = %s
+              AND cl.status = 'pending'
+              AND cl.current_step = 1
+              AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+              AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
+              AND NOT EXISTS (
+                  SELECT 1 FROM campaign_message_outbox o
+                  WHERE o.campaign_lead_id = cl.id
+                    AND LOWER(TRIM(o.stage)) = 'initial'
+                    AND o.status IN ('pending', 'sending', 'sent')
+              )
+            ORDER BY COALESCE(cl.send_batch, 999) ASC,
+                     COALESCE(cl.csv_row_order, cl.id) ASC,
+                     cl.id ASC
+            LIMIT %s
+            """,
+            (cid, total_limit),
+        )
+        leads = cur.fetchall() or []
+    if not leads:
+        return 0
+
+    now_utc = datetime.utcnow()
+    next_run_at_val = now_utc
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_stage_sends
+                SET status = 'failed',
+                    last_materialize_error = COALESCE(
+                        NULLIF(TRIM(last_materialize_error), ''),
+                        'outbox: legacy chunk auto-failed (campanha usa fila outbox)'
+                    ),
+                    updated_at = NOW()
+                WHERE campaign_id = %s AND stage = 'initial'
+                  AND status IN ('scheduled', 'running', 'partial', 'queued', 'waiting_reconnect')
+                  AND COALESCE(success_count, 0) + COALESCE(failed_count, 0) = 0
+                """,
+                (cid,),
+            )
+            for i, lr in enumerate(leads):
+                lead_id = int(lr["id"])
+                if rotation_mode == "round_robin":
+                    inst = instances[i % n_inst]
+                else:
+                    inst = instances[0]
+                instance_id = int(inst["instance_id"])
+                idempotency_key = f"campaign-{cid}-lead-{lead_id}-initial"
+                payload_summary = json.dumps(
+                    {
+                        "stage": "initial",
+                        "enqueue": "schedule_next_initial_outbox_batch",
+                        "rotation_mode": rotation_mode,
+                    },
+                    ensure_ascii=False,
+                )
+                queued_at_val = now_utc + timedelta(
+                    seconds=i // 1_000_000, microseconds=i % 1_000_000
+                )
+                cur.execute(
+                    """
+                    INSERT INTO campaign_message_outbox (
+                        campaign_id, campaign_lead_id, instance_id,
+                        stage, step_priority, status, queued_at,
+                        next_run_at, idempotency_key, payload_summary
+                    )
+                    VALUES (
+                        %s, %s, %s, 'initial', 0, 'pending',
+                        %s, %s, %s, %s::jsonb
+                    )
+                    ON CONFLICT (campaign_lead_id, stage) DO NOTHING
+                    """,
+                    (
+                        cid,
+                        lead_id,
+                        instance_id,
+                        queued_at_val,
+                        next_run_at_val,
+                        idempotency_key,
+                        payload_summary,
+                    ),
+                )
+            lead_ids_out = [int(lr["id"]) for lr in leads]
+            cur.execute(
+                """
+                UPDATE campaign_leads
+                SET current_step = 1
+                WHERE campaign_id = %s AND id = ANY(%s)
+                """,
+                (cid, lead_ids_out),
+            )
+            cur.execute(
+                "UPDATE campaigns SET status = 'running' WHERE id = %s",
+                (cid,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "schedule_next_initial_outbox_batch failed campaign_id=%s", cid
+        )
+        return 0
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "schedule_next_initial_outbox_batch",
+                "campaign_id": cid,
+                "rows_enqueued": len(leads),
+            },
+            ensure_ascii=False,
+        )
+    )
+    return len(leads)
 
 
 def enqueue_missing_cadence_outbox_rows(conn) -> None:
