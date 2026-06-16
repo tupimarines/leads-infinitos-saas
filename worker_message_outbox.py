@@ -260,10 +260,16 @@ def _log_outbox_schedule_skip(campaign_id: int, reason: str) -> None:
     )
 
 
-def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
+def schedule_next_initial_outbox_batch(
+    conn, campaign: dict, *, force: bool = False
+) -> int:
     """
     Enfileira o próximo lote ``initial`` em ``campaign_message_outbox`` quando a campanha
     já migrou para outbox. Substitui ``campaign_stage_sends`` em ``schedule_next_initial_chunk``.
+
+    ``force=True`` (admin / Forçar chunk): enfileira imediatamente, como antes.
+    Automático: fora da janela BRT agenda ``next_run_at`` no próximo slot válido em vez de
+    ignorar a campanha até o dia seguinte.
     """
     if not USE_MESSAGE_OUTBOX:
         return 0
@@ -279,9 +285,6 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
         "send_saturday": campaign.get("send_saturday"),
         "send_sunday": campaign.get("send_sunday"),
     }
-    if not is_campaign_send_window(camp_win):
-        _log_outbox_schedule_skip(cid, "outside_send_window")
-        return 0
     if not check_initial_chunk_daily_quota_for_campaign(cid):
         _log_outbox_schedule_skip(cid, "daily_quota_exceeded")
         return 0
@@ -374,7 +377,24 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
         return 0
 
     now_utc = datetime.utcnow()
-    next_run_at_val = now_utc
+    if force or is_campaign_send_window(camp_win):
+        next_run_at_val = now_utc
+    else:
+        try:
+            next_run_at_val = next_valid_send_utc_naive(camp_win, now_utc, margin_minutes=0)
+        except ValueError:
+            _log_outbox_schedule_skip(cid, "no_valid_send_window")
+            return 0
+        logger.info(
+            json.dumps(
+                {
+                    "event": "schedule_next_initial_outbox_deferred",
+                    "campaign_id": cid,
+                    "next_run_at": next_run_at_val.isoformat(),
+                },
+                ensure_ascii=False,
+            )
+        )
 
     try:
         with conn.cursor() as cur:
@@ -467,6 +487,54 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
         )
     )
     return len(leads)
+
+
+def _load_campaign_row_for_outbox_schedule(
+    conn, campaign_id: int
+) -> Optional[dict]:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, name, user_id, status, enable_cadence,
+                   send_hour_start, send_hour_end, send_saturday, send_sunday,
+                   use_uazapi_sender, scheduled_start, rotation_mode, daily_limit
+            FROM campaigns
+            WHERE id = %s
+            """,
+            (campaign_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _try_schedule_next_initial_outbox_after_batch(conn, campaign_id: int) -> None:
+    """
+    Quando o lote initial atual termina (sem pending/sending na outbox), tenta enfileirar
+    o próximo lote no mesmo tick — no dia seguinte a cota diária já liberou.
+    """
+    if not USE_MESSAGE_OUTBOX:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM campaign_message_outbox
+            WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+              AND status IN ('pending', 'sending')
+            LIMIT 1
+            """,
+            (campaign_id,),
+        )
+        if cur.fetchone():
+            return
+    camp = _load_campaign_row_for_outbox_schedule(conn, campaign_id)
+    if not camp or (camp.get("status") or "") not in ("running", "pending"):
+        return
+    n = schedule_next_initial_outbox_batch(conn, camp)
+    if n > 0:
+        print(
+            f"  📤 [Initial Outbox] Campaign '{camp.get('name')}': "
+            f"próximo lote enfileirado ({n}) após conclusão do lote anterior"
+        )
 
 
 def maybe_schedule_outbox_initial_batches(conn) -> None:
@@ -1220,6 +1288,8 @@ def _persist_outcome(
                 campaign_id,
                 outbox_id,
             )
+        if success and stage == "initial":
+            _try_schedule_next_initial_outbox_after_batch(conn, campaign_id)
     except Exception as e:
         conn.rollback()
         observe_campaign_outbox_send_attempt("persist_failed", latency_ms)

@@ -8737,38 +8737,33 @@ def _force_uazapi_initial_chunk_no_cadence(
     except Exception:
         variations = [str(msg_raw).strip() or "Olá!"]
 
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """SELECT id, phone, whatsapp_link, name FROM campaign_leads
-               WHERE campaign_id = %s AND status = 'pending'
-               ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC LIMIT %s""",
-            (campaign_id, total_limit),
-        )
-        leads = cur.fetchall() or []
-    conn.close()
-
-    def _chunk(lst, n):
-        return [lst[i : i + n] for i in range(0, len(lst), n)]
-
     rotation_mode = (campaign.get("rotation_mode") or "single").strip()
     if rotation_mode not in ("single", "round_robin"):
         rotation_mode = "single"
     sched_raw = campaign.get("scheduled_start")
 
-    if USE_MESSAGE_OUTBOX and leads:
-        n_rows, next_run_at_val = _enqueue_uazapi_initial_outbox(
-            campaign_id,
-            list(leads),
-            allowed,
-            rotation_mode=rotation_mode,
-            scheduled_start=sched_raw,
-            flow="force_uazapi_initial_chunk_no_cadence",
-        )
+    if USE_MESSAGE_OUTBOX:
+        from worker_message_outbox import schedule_next_initial_outbox_batch
+
+        camp_row = dict(campaign)
+        camp_row["user_id"] = user_id
+        conn_o = get_db_connection()
+        try:
+            n_rows = schedule_next_initial_outbox_batch(conn_o, camp_row, force=True)
+        finally:
+            conn_o.close()
+        if n_rows <= 0:
+            return {
+                "ok": False,
+                "status_code": 429,
+                "body": {
+                    "error": "Não foi possível enfileirar outbox (cota diária ou sem leads elegíveis).",
+                    "code": "outbox_enqueue_empty",
+                },
+            }
         print(
             f"[UAZAPI] {log_label} outbox enqueue campaign_id={campaign_id} "
-            f"rows={n_rows} next_run_at={next_run_at_val.isoformat()} "
-            f"(create_advanced_campaign skipped)"
+            f"rows={n_rows} (schedule_next_initial_outbox_batch force=True)"
         )
         return {
             "ok": True,
@@ -8780,6 +8775,30 @@ def _force_uazapi_initial_chunk_no_cadence(
                 "rows_enqueued": n_rows,
             },
         }
+
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT id, phone, whatsapp_link, name FROM campaign_leads
+               WHERE campaign_id = %s AND status = 'pending'
+               ORDER BY COALESCE(send_batch, 999) ASC, COALESCE(csv_row_order, id) ASC, id ASC LIMIT %s""",
+            (campaign_id, total_limit),
+        )
+        leads = cur.fetchall() or []
+    conn.close()
+
+    if not leads:
+        return {
+            "ok": False,
+            "status_code": 400,
+            "body": {
+                "error": "Nenhum lead pendente para enviar nesta etapa",
+                "code": "no_pending_leads",
+            },
+        }
+
+    def _chunk(lst, n):
+        return [lst[i : i + n] for i in range(0, len(lst), n)]
 
     lead_chunks = _chunk(list(leads), per_instance_limit)
 
@@ -9007,7 +9026,8 @@ def _continue_initial_chunk_core(campaign_id, user_id, log_label="continue-initi
             cur.execute(
                 """SELECT c.id, c.name, c.message_template, c.use_uazapi_sender, c.enable_cadence,
                           c.delay_min_minutes, c.delay_max_minutes, c.daily_limit,
-                          c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday, c.scheduled_start
+                          c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
+                          c.scheduled_start, c.rotation_mode
                    FROM campaigns c
                    WHERE c.id = %s AND c.user_id = %s""",
                 (campaign_id, user_id),
