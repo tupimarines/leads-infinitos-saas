@@ -94,6 +94,17 @@ def test_compute_ui_sent_in_column_stage_wrong_column():
     assert app_mod.compute_ui_sent_in_column_stage(row, outbox_sent_stages=set()) is False
 
 
+def test_reconciled_single_folder_skips_when_outbox_rows_exist(monkeypatch):
+    """Painel não deve usar pasta legada se a campanha já tem fila outbox."""
+    monkeypatch.setattr(app_mod, "_campaign_has_message_outbox_rows", lambda _cid: True)
+    row = {
+        "use_uazapi_sender": True,
+        "uazapi_folder_id": "r20563ad1789d09",
+        "enable_cadence": False,
+    }
+    assert app_mod._reconciled_uazapi_single_folder_list_folders(273, row, 163) is None
+
+
 @pytest.fixture
 def db_conn():
     from app import get_db_connection

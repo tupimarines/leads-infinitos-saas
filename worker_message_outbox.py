@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 # Última instância servida no tick outbox (round-robin entre instâncias quando ``rotation_mode == round_robin``).
 _last_outbox_instance_id: Optional[int] = None
+# Throttle de logs de skip do agendamento automático (campaign_id, reason) → monotonic.
+_outbox_schedule_skip_logged_at: dict[tuple[int, str], float] = {}
 
 STAGE_TO_STEP_NUMBER = {"initial": 1, "follow1": 2, "follow2": 3, "breakup": 4}
 
@@ -239,6 +241,25 @@ def _campaign_uses_message_outbox(conn, campaign_id: int) -> bool:
         return cur.fetchone() is not None
 
 
+def _log_outbox_schedule_skip(campaign_id: int, reason: str) -> None:
+    """Evita spam: no máximo um log por (campanha, motivo) a cada 10 min."""
+    key = (int(campaign_id), reason)
+    now = time.monotonic()
+    if now - _outbox_schedule_skip_logged_at.get(key, 0.0) < 600:
+        return
+    _outbox_schedule_skip_logged_at[key] = now
+    logger.info(
+        json.dumps(
+            {
+                "event": "schedule_next_initial_outbox_skipped",
+                "campaign_id": campaign_id,
+                "reason": reason,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
     """
     Enfileira o próximo lote ``initial`` em ``campaign_message_outbox`` quando a campanha
@@ -259,8 +280,10 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
         "send_sunday": campaign.get("send_sunday"),
     }
     if not is_campaign_send_window(camp_win):
+        _log_outbox_schedule_skip(cid, "outside_send_window")
         return 0
     if not check_initial_chunk_daily_quota_for_campaign(cid):
+        _log_outbox_schedule_skip(cid, "daily_quota_exceeded")
         return 0
 
     with conn.cursor() as cur:
@@ -274,6 +297,7 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
             (cid,),
         )
         if cur.fetchone():
+            _log_outbox_schedule_skip(cid, "initial_outbox_in_flight")
             return 0
 
         cur.execute(
@@ -346,6 +370,7 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
         )
         leads = cur.fetchall() or []
     if not leads:
+        _log_outbox_schedule_skip(cid, "no_eligible_pending_leads")
         return 0
 
     now_utc = datetime.utcnow()
@@ -442,6 +467,40 @@ def schedule_next_initial_outbox_batch(conn, campaign: dict) -> int:
         )
     )
     return len(leads)
+
+
+def maybe_schedule_outbox_initial_batches(conn) -> None:
+    """
+    Varre campanhas ``running``/``pending`` com fila outbox e tenta enfileirar o próximo lote
+    initial. Chamado a cada tick do cadence (não depende só do loop de cadência legado).
+    """
+    if not USE_MESSAGE_OUTBOX:
+        return
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.name, c.user_id, c.enable_cadence,
+                   c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
+                   c.use_uazapi_sender, c.scheduled_start, c.rotation_mode, c.daily_limit
+            FROM campaigns c
+            WHERE c.status IN ('running', 'pending')
+              AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM campaign_message_outbox o
+                  WHERE o.campaign_id = c.id LIMIT 1
+              )
+            ORDER BY c.id ASC
+            """
+        )
+        campaigns = cur.fetchall() or []
+    for camp in campaigns:
+        camp = dict(camp)
+        n = schedule_next_initial_outbox_batch(conn, camp)
+        if n > 0:
+            print(
+                f"  📤 [Initial Outbox] Campaign '{camp.get('name')}': "
+                f"enfileirados {n} envio(s) initial (outbox /send/text)"
+            )
 
 
 def enqueue_missing_cadence_outbox_rows(conn) -> None:

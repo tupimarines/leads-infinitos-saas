@@ -84,7 +84,11 @@ from utils.uazapi_support_notify import (
     maybe_send_reconnect_support_whatsapp,
 )
 
-from worker_message_outbox import process_message_outbox_tick, schedule_next_initial_outbox_batch
+from worker_message_outbox import (
+    maybe_schedule_outbox_initial_batches,
+    process_message_outbox_tick,
+    schedule_next_initial_outbox_batch,
+)
 from utils.outbox_prometheus import maybe_start_outbox_metrics_http_server
 
 _logger_cadence = logging.getLogger(__name__)
@@ -2026,6 +2030,7 @@ def process_cadence():
             # Outbox Uazapi (ADR-5): claim → HTTP → persistência; só com flag (utils.config)
             if USE_MESSAGE_OUTBOX:
                 process_message_outbox_tick(conn)
+                maybe_schedule_outbox_initial_batches(conn)
 
             # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)
             _materialize_scheduled_stage_sends(conn)

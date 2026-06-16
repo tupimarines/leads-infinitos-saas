@@ -8364,6 +8364,10 @@ def get_campaign_stats(campaign_id):
                 "initial_planned": cadence_rec["initial_planned"],
             }
 
+        # Outbox: contadores vêm de campaign_leads (já carregados acima); pasta legada ignorada.
+        elif _campaign_has_message_outbox_rows(campaign_id):
+            uazapi_debug = {"source": "campaign_leads_outbox"}
+
         # Campanhas Uazapi SEM cadência: manter list_folders live no folder principal.
         elif campaign.get('use_uazapi_sender') and campaign.get('uazapi_folder_id') and not campaign.get('enable_cadence'):
             try:
@@ -9588,7 +9592,12 @@ def _reconciled_uazapi_single_folder_list_folders(campaign_id, campaign_row, tot
     """
     SSOT com ``/api/campaigns/<id>/stats`` para Uazapi **sem** cadência: pasta principal
     em ``campaigns.uazapi_folder_id`` + ``list_folders`` (não usar só ``COUNT`` de leads em ``sent``).
+
+    Campanhas migradas para ``campaign_message_outbox`` usam ``campaign_leads`` / outbox — a pasta
+    legada em ``uazapi_folder_id`` fica desatualizada e não deve sobrescrever os contadores.
     """
+    if _campaign_has_message_outbox_rows(campaign_id):
+        return None
     if not (
         campaign_row.get("use_uazapi_sender")
         and campaign_row.get("uazapi_folder_id")
