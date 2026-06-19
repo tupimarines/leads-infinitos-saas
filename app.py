@@ -8743,22 +8743,46 @@ def _force_uazapi_initial_chunk_no_cadence(
     sched_raw = campaign.get("scheduled_start")
 
     if USE_MESSAGE_OUTBOX:
-        from worker_message_outbox import schedule_next_initial_outbox_batch
+        from worker_message_outbox import (
+            diagnose_initial_outbox_enqueue,
+            schedule_next_initial_outbox_batch,
+        )
 
         camp_row = dict(campaign)
         camp_row["user_id"] = user_id
         conn_o = get_db_connection()
         try:
-            n_rows = schedule_next_initial_outbox_batch(conn_o, camp_row, force=True)
+            n_rows, skip_reason = schedule_next_initial_outbox_batch(
+                conn_o, camp_row, force=True
+            )
         finally:
             conn_o.close()
         if n_rows <= 0:
+            conn_diag = get_db_connection()
+            try:
+                diag = diagnose_initial_outbox_enqueue(conn_diag, campaign_id)
+            finally:
+                conn_diag.close()
+            reason_messages = {
+                "daily_quota_exceeded": "Limite diário de envios iniciais atingido para hoje (BRT).",
+                "initial_outbox_sending": "Há envio initial em andamento (sending) na outbox.",
+                "initial_outbox_in_flight": "Já há envios initial pendentes ou em envio na outbox.",
+                "no_eligible_pending_leads": "Nenhum lead pendente sem linha na outbox (initial).",
+                "no_pending_leads": "Nenhum lead pendente no passo 1.",
+                "no_uazapi_instance": "Nenhuma instância Uazapi vinculada.",
+                "no_valid_send_window": "Janela de envio inválida na campanha.",
+                "persist_failed": "Falha ao gravar fila outbox.",
+            }
             return {
                 "ok": False,
                 "status_code": 429,
                 "body": {
-                    "error": "Não foi possível enfileirar outbox (cota diária ou sem leads elegíveis).",
-                    "code": "outbox_enqueue_empty",
+                    "error": reason_messages.get(
+                        skip_reason,
+                        "Não foi possível enfileirar outbox (cota diária ou sem leads elegíveis).",
+                    ),
+                    "code": skip_reason or "outbox_enqueue_empty",
+                    "diagnostics": diag,
                 },
             }
         print(

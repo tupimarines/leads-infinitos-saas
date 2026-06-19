@@ -22,7 +22,11 @@ from services.uazapi import UazapiService
 from utils.campaign_dispatch_audit import append_dispatch_audit_event
 from utils.config import SUPER_ADMIN_EMAILS, USE_MESSAGE_OUTBOX
 from utils.campaign_send_policy import uazapi_initial_chunk_distribution_limits
-from utils.limits import check_initial_chunk_daily_quota_for_campaign, get_user_daily_limit
+from utils.limits import (
+    check_initial_chunk_daily_quota_for_campaign,
+    get_user_daily_limit,
+    initial_chunk_quota_snapshot,
+)
 from utils.next_valid_uazapi_send import is_campaign_send_window, next_valid_send_utc_naive
 from utils.outbox_prometheus import observe_campaign_outbox_send_attempt
 from utils.uazapi_outbox_errors import classify_outbox_send_failure
@@ -262,7 +266,7 @@ def _log_outbox_schedule_skip(campaign_id: int, reason: str) -> None:
 
 def schedule_next_initial_outbox_batch(
     conn, campaign: dict, *, force: bool = False
-) -> int:
+) -> tuple[int, Optional[str]]:
     """
     Enfileira o próximo lote ``initial`` em ``campaign_message_outbox`` quando a campanha
     já migrou para outbox. Substitui ``campaign_stage_sends`` em ``schedule_next_initial_chunk``.
@@ -272,12 +276,12 @@ def schedule_next_initial_outbox_batch(
     ignorar a campanha até o dia seguinte.
     """
     if not USE_MESSAGE_OUTBOX:
-        return 0
+        return 0, "outbox_disabled"
 
     cid = int(campaign["id"])
     uid = int(campaign.get("user_id") or 0)
     if not uid or not _campaign_uses_message_outbox(conn, cid):
-        return 0
+        return 0, "no_outbox_rows"
 
     camp_win = {
         "send_hour_start": campaign.get("send_hour_start"),
@@ -285,23 +289,38 @@ def schedule_next_initial_outbox_batch(
         "send_saturday": campaign.get("send_saturday"),
         "send_sunday": campaign.get("send_sunday"),
     }
-    if not check_initial_chunk_daily_quota_for_campaign(cid):
+    quota = initial_chunk_quota_snapshot(cid)
+    if not quota.get("allows_more"):
         _log_outbox_schedule_skip(cid, "daily_quota_exceeded")
-        return 0
+        return 0, "daily_quota_exceeded"
+
+    remaining_slots = int(quota.get("remaining_slots") or 0)
+    if remaining_slots <= 0:
+        _log_outbox_schedule_skip(cid, "daily_quota_exceeded")
+        return 0, "daily_quota_exceeded"
+
+    in_flight_sql = (
+        """
+        SELECT 1 FROM campaign_message_outbox
+        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+          AND status = 'sending'
+        LIMIT 1
+        """
+        if force
+        else """
+        SELECT 1 FROM campaign_message_outbox
+        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+          AND status IN ('pending', 'sending')
+        LIMIT 1
+        """
+    )
 
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT 1 FROM campaign_message_outbox
-            WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
-              AND status IN ('pending', 'sending')
-            LIMIT 1
-            """,
-            (cid,),
-        )
+        cur.execute(in_flight_sql, (cid,))
         if cur.fetchone():
-            _log_outbox_schedule_skip(cid, "initial_outbox_in_flight")
-            return 0
+            reason = "initial_outbox_sending" if force else "initial_outbox_in_flight"
+            _log_outbox_schedule_skip(cid, reason)
+            return 0, reason
 
         cur.execute(
             """
@@ -316,7 +335,7 @@ def schedule_next_initial_outbox_batch(
         )
         pending_row = cur.fetchone()
     if not pending_row or int(pending_row[0] or 0) <= 0:
-        return 0
+        return 0, "no_pending_leads"
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -334,7 +353,7 @@ def schedule_next_initial_outbox_batch(
         )
         instances = cur.fetchall() or []
     if not instances:
-        return 0
+        return 0, "no_uazapi_instance"
 
     daily_limit = int(campaign.get("daily_limit") or 0)
     if daily_limit <= 0:
@@ -342,6 +361,7 @@ def schedule_next_initial_outbox_batch(
     _, total_limit = uazapi_initial_chunk_distribution_limits(
         daily_limit, len(instances)
     )
+    batch_limit = min(total_limit, remaining_slots)
 
     rotation_mode = (campaign.get("rotation_mode") or "single").strip().lower()
     if rotation_mode not in ("single", "round_robin"):
@@ -369,12 +389,12 @@ def schedule_next_initial_outbox_batch(
                      cl.id ASC
             LIMIT %s
             """,
-            (cid, total_limit),
+            (cid, batch_limit),
         )
         leads = cur.fetchall() or []
     if not leads:
         _log_outbox_schedule_skip(cid, "no_eligible_pending_leads")
-        return 0
+        return 0, "no_eligible_pending_leads"
 
     now_utc = datetime.utcnow()
     if force or is_campaign_send_window(camp_win):
@@ -384,7 +404,7 @@ def schedule_next_initial_outbox_batch(
             next_run_at_val = next_valid_send_utc_naive(camp_win, now_utc, margin_minutes=0)
         except ValueError:
             _log_outbox_schedule_skip(cid, "no_valid_send_window")
-            return 0
+            return 0, "no_valid_send_window"
         logger.info(
             json.dumps(
                 {
@@ -474,7 +494,7 @@ def schedule_next_initial_outbox_batch(
         logger.exception(
             "schedule_next_initial_outbox_batch failed campaign_id=%s", cid
         )
-        return 0
+        return 0, "persist_failed"
 
     logger.info(
         json.dumps(
@@ -486,7 +506,55 @@ def schedule_next_initial_outbox_batch(
             ensure_ascii=False,
         )
     )
-    return len(leads)
+    return len(leads), None
+
+
+def diagnose_initial_outbox_enqueue(conn, campaign_id: int) -> dict:
+    """Contagens para admin quando enfileirar outbox falha."""
+    cid = int(campaign_id)
+    quota = initial_chunk_quota_snapshot(cid)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, COUNT(*)::int AS n
+            FROM campaign_message_outbox
+            WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+            GROUP BY status
+            """,
+            (cid,),
+        )
+        outbox_by_status = {r[0]: r[1] for r in (cur.fetchall() or [])}
+        cur.execute(
+            """
+            SELECT COUNT(*)::int FROM campaign_leads
+            WHERE campaign_id = %s AND status = 'pending' AND current_step = 1
+              AND COALESCE(removed_from_funnel, FALSE) = FALSE
+            """,
+            (cid,),
+        )
+        pending_step1 = int((cur.fetchone() or [0])[0])
+        cur.execute(
+            """
+            SELECT COUNT(*)::int FROM campaign_leads cl
+            WHERE cl.campaign_id = %s AND cl.status = 'pending' AND cl.current_step = 1
+              AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+              AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
+              AND NOT EXISTS (
+                  SELECT 1 FROM campaign_message_outbox o
+                  WHERE o.campaign_lead_id = cl.id
+                    AND LOWER(TRIM(o.stage)) = 'initial'
+                    AND o.status IN ('pending', 'sending', 'sent')
+              )
+            """,
+            (cid,),
+        )
+        eligible = int((cur.fetchone() or [0])[0])
+    return {
+        "quota": quota,
+        "outbox_initial_by_status": outbox_by_status,
+        "pending_leads_step1": pending_step1,
+        "eligible_without_outbox_row": eligible,
+    }
 
 
 def _load_campaign_row_for_outbox_schedule(
@@ -529,7 +597,7 @@ def _try_schedule_next_initial_outbox_after_batch(conn, campaign_id: int) -> Non
     camp = _load_campaign_row_for_outbox_schedule(conn, campaign_id)
     if not camp or (camp.get("status") or "") not in ("running", "pending"):
         return
-    n = schedule_next_initial_outbox_batch(conn, camp)
+    n, _reason = schedule_next_initial_outbox_batch(conn, camp)
     if n > 0:
         print(
             f"  📤 [Initial Outbox] Campaign '{camp.get('name')}': "
@@ -563,7 +631,7 @@ def maybe_schedule_outbox_initial_batches(conn) -> None:
         campaigns = cur.fetchall() or []
     for camp in campaigns:
         camp = dict(camp)
-        n = schedule_next_initial_outbox_batch(conn, camp)
+        n, _reason = schedule_next_initial_outbox_batch(conn, camp)
         if n > 0:
             print(
                 f"  📤 [Initial Outbox] Campaign '{camp.get('name')}': "

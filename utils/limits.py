@@ -12,6 +12,7 @@ from psycopg2.extras import RealDictCursor
 from utils.config import SUPER_ADMIN_EMAILS
 from utils.campaign_send_policy import (
     INITIAL_CHUNK_DAILY_QUOTA_POLICY,
+    effective_initial_daily_caps,
     initial_chunk_daily_quota_allows,
 )
 INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
@@ -237,6 +238,9 @@ def get_sent_today_campaign_initial_count(campaign_id: int) -> int:
     Conta disparos iniciais enviados hoje (BRT) apenas nesta campanha.
     Mesma definição de \"inicial\" que `get_sent_today_count` / `check_daily_limit`
     (current_step=1 ou last_sent_stage='initial'), com filtro `c.id = campaign_id`.
+
+    Campanhas com fila outbox: usa o maior entre ``campaign_leads`` e linhas outbox
+    ``initial`` com ``status='sent'`` hoje (evita cota errada se o lead ainda está ``pending``).
     """
     query = """
     SELECT COUNT(cl.id) as count
@@ -256,9 +260,86 @@ def get_sent_today_campaign_initial_count(campaign_id: int) -> int:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query, (campaign_id,))
             row = cur.fetchone()
-        return row["count"] if row else 0
+        lead_count = int(row["count"] if row else 0)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM campaign_message_outbox WHERE campaign_id = %s LIMIT 1",
+                (campaign_id,),
+            )
+            if not cur.fetchone():
+                return lead_count
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM campaign_message_outbox
+                WHERE campaign_id = %s
+                  AND LOWER(TRIM(stage)) = 'initial'
+                  AND status = 'sent'
+                  AND date(updated_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
+                      = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
+                """,
+                (campaign_id,),
+            )
+            outbox_row = cur.fetchone()
+        outbox_count = int(outbox_row["count"] if outbox_row else 0)
+        return max(lead_count, outbox_count)
     finally:
         conn.close()
+
+
+def initial_chunk_quota_snapshot(campaign_id: int) -> dict:
+    """Diagnóstico: cotas, envios hoje e slots restantes para enfileirar iniciais."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT user_id, daily_limit FROM campaigns WHERE id = %s",
+                (campaign_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"allows_more": False, "remaining_slots": 0}
+
+    owner_id = int(row["user_id"])
+    plan_limit = int(get_user_daily_limit(owner_id))
+    raw_cap = row.get("daily_limit")
+    campaign_cap = int(raw_cap) if raw_cap is not None else plan_limit
+    if campaign_cap <= 0:
+        campaign_cap = plan_limit
+
+    sent_user = int(get_sent_today_count(owner_id))
+    sent_campaign = int(get_sent_today_campaign_initial_count(campaign_id))
+    caps = effective_initial_daily_caps(plan_limit, campaign_cap, INITIAL_CHUNK_DAILY_QUOTA_POLICY)
+    pol = caps["policy"]
+
+    user_rem = max(0, int(caps["user_cap"] or 0) - sent_user) if caps["user_cap"] is not None else None
+    camp_rem = max(0, int(caps["campaign_cap"] or 0) - sent_campaign) if caps["campaign_cap"] is not None else None
+
+    if pol == "g1":
+        remaining = user_rem or 0
+    elif pol == "g3":
+        remaining = camp_rem or 0
+    else:
+        remaining = min(user_rem or 0, camp_rem or 0)
+
+    allows = initial_chunk_daily_quota_allows(
+        sent_user,
+        sent_campaign,
+        plan_daily_limit=plan_limit,
+        campaign_daily_limit=campaign_cap,
+        policy=INITIAL_CHUNK_DAILY_QUOTA_POLICY,
+    )
+    return {
+        "policy": pol,
+        "plan_limit": plan_limit,
+        "campaign_cap": campaign_cap,
+        "sent_user_today": sent_user,
+        "sent_campaign_today": sent_campaign,
+        "allows_more": allows,
+        "remaining_slots": remaining,
+    }
 
 
 def check_initial_chunk_daily_quota_for_campaign(

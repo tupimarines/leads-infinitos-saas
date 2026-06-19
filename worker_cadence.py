@@ -2286,7 +2286,7 @@ def schedule_next_initial_chunk(campaign, conn):
         return
 
     if USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, cid):
-        n_outbox = schedule_next_initial_outbox_batch(conn, campaign)
+        n_outbox, _reason = schedule_next_initial_outbox_batch(conn, campaign)
         if n_outbox > 0:
             print(
                 f"  📤 [Initial Outbox] Campaign '{campaign.get('name')}': "

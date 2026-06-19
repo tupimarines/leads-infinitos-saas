@@ -82,13 +82,13 @@ class TestGetSentTodayCampaignInitialCount(unittest.TestCase):
     def test_query_filters_by_campaign_id(self, mock_conn):
         mock_cursor = MagicMock()
         mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
-        mock_cursor.fetchone.return_value = {"count": 3}
+        mock_cursor.fetchone.side_effect = [{"count": 3}, None]
 
         n = limits_module.get_sent_today_campaign_initial_count(42)
         self.assertEqual(n, 3)
-        sql, params = mock_cursor.execute.call_args[0]
-        self.assertIn("WHERE c.id = %s", sql)
-        self.assertEqual(params, (42,))
+        first_sql, first_params = mock_cursor.execute.call_args_list[0][0]
+        self.assertIn("WHERE c.id = %s", first_sql)
+        self.assertEqual(first_params, (42,))
 
 
 class TestCheckInitialChunkDailyQuotaForCampaign(unittest.TestCase):
