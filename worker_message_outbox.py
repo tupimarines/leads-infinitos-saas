@@ -748,9 +748,11 @@ def schedule_next_initial_outbox_batch(
 
 def diagnose_initial_outbox_enqueue(conn, campaign_id: int) -> dict:
     """Contagens para admin quando enfileirar outbox falha."""
+    from psycopg2.extras import RealDictCursor
+
     cid = int(campaign_id)
     quota = initial_chunk_quota_snapshot(cid)
-    with conn.cursor() as cur:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
             SELECT status, COUNT(*)::int AS n
@@ -760,19 +762,22 @@ def diagnose_initial_outbox_enqueue(conn, campaign_id: int) -> dict:
             """,
             (cid,),
         )
-        outbox_by_status = {r[0]: r[1] for r in (cur.fetchall() or [])}
+        outbox_by_status = {
+            r["status"]: int(r["n"]) for r in (cur.fetchall() or [])
+        }
         cur.execute(
             """
-            SELECT COUNT(*)::int FROM campaign_leads
+            SELECT COUNT(*)::int AS n FROM campaign_leads
             WHERE campaign_id = %s AND status = 'pending' AND current_step = 1
               AND COALESCE(removed_from_funnel, FALSE) = FALSE
             """,
             (cid,),
         )
-        pending_step1 = int((cur.fetchone() or [0])[0])
+        row = cur.fetchone()
+        pending_step1 = int((row or {}).get("n") or 0)
         cur.execute(
             """
-            SELECT COUNT(*)::int FROM campaign_leads cl
+            SELECT COUNT(*)::int AS n FROM campaign_leads cl
             WHERE cl.campaign_id = %s AND cl.status = 'pending' AND cl.current_step = 1
               AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
               AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
@@ -785,7 +790,8 @@ def diagnose_initial_outbox_enqueue(conn, campaign_id: int) -> dict:
             """,
             (cid,),
         )
-        eligible = int((cur.fetchone() or [0])[0])
+        row = cur.fetchone()
+        eligible = int((row or {}).get("n") or 0)
     return {
         "quota": quota,
         "outbox_initial_by_status": outbox_by_status,
