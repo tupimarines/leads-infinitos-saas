@@ -3,9 +3,9 @@ Política de cota para envios iniciais (chunk Uazapi / destrave).
 
 TD-12 (tech-spec recuperacao-scheduled-stale-worker-cadence-uazapi):
 - **g1**: apenas teto global do utilizador (plano / get_user_daily_limit).
-- **g2** (default): teto global **e** `campaigns.daily_limit` por campanha
+- **g2**: teto global **e** `campaigns.daily_limit` por campanha
   (ambos devem permitir mais um envio inicial contado como em check_daily_limit).
-- **g3**: apenas teto da campanha.
+- **g3** (default): apenas teto da campanha.
 
 Contagens em BRT alinham-se a `get_sent_today_count` / `check_daily_limit` em utils.limits.
 """
@@ -17,7 +17,7 @@ from typing import Literal, TypedDict
 InitialChunkQuotaPolicy = Literal["g1", "g2", "g3"]
 
 # SSOT da escolha de produto/engineering para este repositório (TD-12).
-INITIAL_CHUNK_DAILY_QUOTA_POLICY: InitialChunkQuotaPolicy = "g2"
+INITIAL_CHUNK_DAILY_QUOTA_POLICY: InitialChunkQuotaPolicy = "g3"
 
 
 class EffectiveInitialDailyCaps(TypedDict):

@@ -88,6 +88,8 @@ from worker_message_outbox import (
     maybe_schedule_outbox_initial_batches,
     process_message_outbox_tick,
     schedule_next_initial_outbox_batch,
+    enqueue_outbox_rows_for_leads,
+    supersede_legacy_follow_stage_sends,
 )
 from utils.outbox_prometheus import maybe_start_outbox_metrics_http_server
 
@@ -195,7 +197,7 @@ def _parse_json_lead_ids(raw):
 
 
 def get_db_connection():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=os.environ.get('DB_HOST', 'localhost'),
         database=os.environ.get('DB_NAME', 'leads_infinitos'),
         user=os.environ.get('DB_USER', 'postgres'),
@@ -203,6 +205,9 @@ def get_db_connection():
         port=os.environ.get('DB_PORT', '5432'),
         cursor_factory=RealDictCursor
     )
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE 'UTC'")
+    return conn
 
 def is_business_hours():
     now_brazil = datetime.now(BRAZIL_TZ)
@@ -1002,6 +1007,17 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
         step = stage_to_step.get(stage)
         if not step:
             continue
+        if USE_MESSAGE_OUTBOX and stage != "initial":
+            n_sup = supersede_legacy_follow_stage_sends(
+                conn, campaign_id, stage, scheduled_for
+            )
+            if n_sup:
+                conn.commit()
+                print(
+                    f"  ⏭️ [Materialize] campaign_id={campaign_id} stage={stage}: "
+                    f"{n_sup} send(s) legado superseded → outbox cadence"
+                )
+            continue
         # Ordenar por instance_id: chunks[0]→inst1, chunks[1]→inst2 (rotação, sem overlap de números)
         sends = sorted(sends, key=lambda x: x.get("instance_id") or 0)
         print(f"  📤 [Materialize] campaign_id={campaign_id} stage={stage} scheduled_for={scheduled_for} sends={len(sends)}")
@@ -1313,6 +1329,26 @@ def _materialize_scheduled_stage_sends(conn, force_send_ids=None):
                         (json.dumps({"error": "reserved_leads_mismatch"}), send_id),
                     )
                 conn.commit()
+                break
+
+            if USE_MESSAGE_OUTBOX:
+                lead_ids_outbox = [
+                    int(c["id"]) for c in rechunk if c and c.get("id") is not None
+                ]
+                n_ob = enqueue_outbox_rows_for_leads(
+                    conn,
+                    campaign_id=campaign_id,
+                    stage=stage,
+                    lead_ids=lead_ids_outbox,
+                    instance_id=int(send.get("instance_id") or 0),
+                    enqueue_source="materialize_legacy_to_outbox",
+                    supersede_send_id=send_id,
+                )
+                conn.commit()
+                print(
+                    f"  📤 [Materialize→Outbox] campaign_id={campaign_id} inst={send.get('instance_id')}: "
+                    f"{n_ob} envio(s) enfileirado(s) (sem create_advanced_campaign)"
+                )
                 break
 
             use_pacing = (
@@ -2267,25 +2303,16 @@ def _parse_rollover_time(rollover_str):
 
 def schedule_next_initial_chunk(campaign, conn):
     """
-    Para campanhas Uazapi: agenda o próximo chunk de 30 mensagens (stage initial) para
-    o próximo horário de envio. Corrige o bug onde chunks 2+ nunca eram enviados.
-
-    T6 / D1: com ``UAZAPI_SAME_DAY_INITIAL_CHUNK_AFTER_UNLOCK=1``, janela BRT ativa e cota
-    (``check_initial_chunk_daily_quota_for_campaign``), o alvo pode ser o mesmo dia em vez
-    do próximo slot matinal; telemetria ``same_day_after_unlock``. O ``scheduled_for`` gravado
-    passa por ``next_valid_send_utc_naive`` (TD-9/11).
-
-    Duplicação por instância: só pula se já existir send initial em um dos estados em
-    INITIAL_CHUNK_ACTIVE_SEND_STATUSES (scheduled/running/partial/queued; ver utils/limits.py).
-    Sends em failed ou done não bloqueiam — necessário para libertar a instância após deteção
-    de pasta órfã no sync periódico (utils/sync_uazapi.py). Pós-create_advanced na BD o estado
-    típico é ``running`` mesmo quando a API devolve ``queued`` na pasta.
+    Para campanhas Uazapi: agenda o próximo lote initial via outbox (``schedule_next_initial_outbox_batch``).
+    Com ``USE_MESSAGE_OUTBOX=false`` (rollback), usa ``campaign_stage_sends`` legado.
     """
     cid = campaign['id']
-    if not campaign.get('use_uazapi_sender') or not uazapi_service:
+    if not campaign.get('use_uazapi_sender'):
         return
 
-    if USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, cid):
+    if USE_MESSAGE_OUTBOX:
+        if not uazapi_service:
+            return
         n_outbox, _reason = schedule_next_initial_outbox_batch(conn, campaign)
         if n_outbox > 0:
             print(
@@ -2294,6 +2321,14 @@ def schedule_next_initial_chunk(campaign, conn):
             )
         return
 
+    _schedule_next_initial_chunk_legacy(campaign, conn)
+
+
+def _schedule_next_initial_chunk_legacy(campaign, conn):
+    """Legado: INSERT em ``campaign_stage_sends`` (só com ``USE_MESSAGE_OUTBOX=false``)."""
+    cid = campaign['id']
+    if not uazapi_service:
+        return
     # Leads pendentes no stage initial (chunk 2, 3, ...)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -2706,6 +2741,8 @@ def process_uazapi_initial_stage_rollovers(conn, campaigns_synced_this_tick=None
         can_api = bool(token and row.get("uazapi_folder_id"))
         has_body = bool((msg_text or "").strip()) or bool(media_file_data)
         want_api = can_api and has_body
+        if USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, cid):
+            want_api = False
 
         messages = []
         moved_ids = []
@@ -2795,6 +2832,8 @@ def process_rollover(campaign, conn):
     Só processa instâncias Uazapi.
     """
     cid = campaign['id']
+    if USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, cid):
+        return
     cadence_config = campaign.get('cadence_config') or {}
     if isinstance(cadence_config, str):
         try:
@@ -3188,6 +3227,24 @@ def process_rollover_fu_next(
 
     token = instance.get('apikey')
     if not token:
+        return
+
+    lead_ids = [l['id'] for l in rollover_leads]
+    if USE_MESSAGE_OUTBOX and _campaign_has_message_outbox(conn, cid):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_leads
+                SET current_step = %s, cadence_status = 'snoozed', snooze_until = %s
+                WHERE id = ANY(%s)
+                """,
+                (to_step, target_dt, lead_ids),
+            )
+        conn.commit()
+        print(
+            f"  🔄 [Rollover→Outbox] Campaign '{campaign['name']}': {len(lead_ids)} leads → "
+            f"{step_label} (snooze {target_dt.strftime('%d/%m %H:%M')} BRT); envio via outbox"
+        )
         return
 
     result = uazapi_service.create_advanced_campaign(

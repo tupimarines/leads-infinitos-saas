@@ -96,7 +96,7 @@ class TestCheckInitialChunkDailyQuotaForCampaign(unittest.TestCase):
     @patch("utils.limits.get_sent_today_count", return_value=5)
     @patch("utils.limits.get_user_daily_limit", return_value=30)
     @patch("utils.limits.get_db_connection")
-    def test_uses_campaign_owner_and_g2(
+    def test_uses_campaign_owner_and_g3_default(
         self, mock_conn, _mock_plan, _mock_sent_user, _mock_sent_camp
     ):
         mock_cursor = MagicMock()
@@ -108,6 +108,21 @@ class TestCheckInitialChunkDailyQuotaForCampaign(unittest.TestCase):
         mock_cursor.execute.assert_called_once()
         self.assertEqual(mock_cursor.execute.call_args[0][1], (100,))
         _mock_sent_user.assert_called_once_with(77)
+
+    @patch("utils.limits.get_sent_today_campaign_initial_count", return_value=1)
+    @patch("utils.limits.get_sent_today_count", return_value=30)
+    @patch("utils.limits.get_user_daily_limit", return_value=30)
+    @patch("utils.limits.get_db_connection")
+    def test_g3_default_ignores_user_plan_cap(
+        self, mock_conn, _mock_plan, _mock_sent_user, _mock_sent_camp
+    ):
+        mock_cursor = MagicMock()
+        mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = {"user_id": 77, "daily_limit": 10}
+
+        self.assertTrue(
+            limits_module.check_initial_chunk_daily_quota_for_campaign(100)
+        )
 
     @patch("utils.limits.get_sent_today_campaign_initial_count", return_value=10)
     @patch("utils.limits.get_sent_today_count", return_value=5)
@@ -121,6 +136,9 @@ class TestCheckInitialChunkDailyQuotaForCampaign(unittest.TestCase):
         mock_cursor.fetchone.return_value = {"user_id": 1, "daily_limit": 10}
 
         self.assertFalse(
+            limits_module.check_initial_chunk_daily_quota_for_campaign(200)
+        )
+        self.assertFalse(
             limits_module.check_initial_chunk_daily_quota_for_campaign(200, policy="g2")
         )
 
@@ -133,6 +151,44 @@ class TestCheckInitialChunkDailyQuotaForCampaign(unittest.TestCase):
         self.assertFalse(
             limits_module.check_initial_chunk_daily_quota_for_campaign(999999)
         )
+
+
+class TestInitialChunkQuotaSnapshot(unittest.TestCase):
+    @patch("utils.limits.get_sent_today_campaign_initial_count", return_value=2)
+    @patch("utils.limits.get_sent_today_count", return_value=30)
+    @patch("utils.limits.get_user_daily_limit", return_value=30)
+    @patch("utils.limits.get_db_connection")
+    def test_g3_default_uses_campaign_cap_only(
+        self, mock_conn, _mock_plan, _mock_sent_user, _mock_sent_camp
+    ):
+        mock_cursor = MagicMock()
+        mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = {"user_id": 5, "daily_limit": 10}
+
+        snap = limits_module.initial_chunk_quota_snapshot(42)
+
+        self.assertEqual(snap["policy"], "g3")
+        self.assertTrue(snap["allows_more"])
+        self.assertEqual(snap["remaining_slots"], 8)
+        self.assertEqual(snap["sent_campaign_today"], 2)
+        self.assertEqual(snap["campaign_cap"], 10)
+
+    @patch("utils.limits.get_sent_today_campaign_initial_count", return_value=10)
+    @patch("utils.limits.get_sent_today_count", return_value=0)
+    @patch("utils.limits.get_user_daily_limit", return_value=30)
+    @patch("utils.limits.get_db_connection")
+    def test_g3_default_false_when_campaign_cap_reached(
+        self, mock_conn, _mock_plan, _mock_sent_user, _mock_sent_camp
+    ):
+        mock_cursor = MagicMock()
+        mock_conn.return_value.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = {"user_id": 5, "daily_limit": 10}
+
+        snap = limits_module.initial_chunk_quota_snapshot(42)
+
+        self.assertEqual(snap["policy"], "g3")
+        self.assertFalse(snap["allows_more"])
+        self.assertEqual(snap["remaining_slots"], 0)
 
 
 if __name__ == "__main__":

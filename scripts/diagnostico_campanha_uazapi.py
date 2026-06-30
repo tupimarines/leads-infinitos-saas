@@ -157,6 +157,20 @@ def _load_db_bundle(cur, campaign_id: int, chunks_limit: int) -> dict[str, Any]:
     for r in cur.fetchall() or []:
         stage_sends.append(_json_friendly(dict(r)))
 
+    cur.execute(
+        """
+        SELECT status, COUNT(*)::int AS n
+        FROM campaign_message_outbox
+        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+        GROUP BY status
+        ORDER BY status
+        """,
+        (campaign_id,),
+    )
+    outbox_initial_by_status = {
+        r["status"]: r["n"] for r in (cur.fetchall() or []) if r.get("status")
+    }
+
     uaz_rows = [i for i in instances if (i.get("api_provider") or "").lower() == "uazapi"]
     primary = None
     for i in uaz_rows:
@@ -167,6 +181,8 @@ def _load_db_bundle(cur, campaign_id: int, chunks_limit: int) -> dict[str, Any]:
                 "apikey_masked": _mask_token(i.get("apikey")),
             }
             break
+
+    legacy_summary = _load_legacy_initial_chunks_summary(cur, campaign_id)
 
     return {
         "campaign": c,
@@ -181,6 +197,48 @@ def _load_db_bundle(cur, campaign_id: int, chunks_limit: int) -> dict[str, Any]:
         ],
         "uazapi_primary_instance": primary,
         "stage_sends": stage_sends,
+        "outbox_initial_by_status": outbox_initial_by_status,
+        "legacy_initial_chunks": legacy_summary,
+    }
+
+
+def _load_legacy_initial_chunks_summary(cur, campaign_id: int) -> dict[str, Any]:
+    """Resumo de campaign_stage_sends initial (modelo legado por pasta/chunk)."""
+    cur.execute(
+        """
+        SELECT status, COUNT(*)::int AS n,
+               COALESCE(SUM(planned_count), 0)::int AS planned_total,
+               COALESCE(SUM(success_count), 0)::int AS success_total,
+               COALESCE(SUM(failed_count), 0)::int AS failed_total
+        FROM campaign_stage_sends
+        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+        GROUP BY status
+        ORDER BY status
+        """,
+        (campaign_id,),
+    )
+    by_status = [_json_friendly(dict(r)) for r in (cur.fetchall() or [])]
+
+    cur.execute(
+        """
+        SELECT id, status, planned_count, success_count, failed_count,
+               uazapi_folder_id, scheduled_for, created_at, updated_at
+        FROM campaign_stage_sends
+        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+          AND status IN (
+              'scheduled', 'running', 'partial', 'queued', 'waiting_reconnect'
+          )
+        ORDER BY id
+        LIMIT 30
+        """,
+        (campaign_id,),
+    )
+    in_flight = [_json_friendly(dict(r)) for r in (cur.fetchall() or [])]
+
+    return {
+        "by_status": by_status,
+        "in_flight_count": len(in_flight),
+        "in_flight_rows": in_flight,
     }
 
 
@@ -218,7 +276,53 @@ def _folder_ids_from_bundle(bundle: dict[str, Any]) -> list[str]:
     return ids
 
 
-def _heuristics(bundle: dict[str, Any], api: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _print_outbox_consolidated_view(
+    outbox_diag: dict[str, Any],
+    legacy_summary: dict[str, Any],
+    legacy_offset: Optional[int] = None,
+) -> None:
+    """Visão consolidada: cota, outbox, elegibilidade e chunks legados."""
+    quota = outbox_diag.get("quota") or {}
+    outbox = outbox_diag.get("outbox_initial_by_status") or {}
+
+    print("\n=== Outbox initial (visão consolidada) ===\n")
+    print("--- Cota diária (quota snapshot) ---")
+    print(json.dumps(quota, ensure_ascii=False, indent=2, default=str))
+    print("\n--- Outbox initial por status ---")
+    print(json.dumps(outbox, ensure_ascii=False, indent=2))
+    print("\n--- Leads elegíveis ---")
+    print(
+        json.dumps(
+            {
+                "pending_leads_step1": outbox_diag.get("pending_leads_step1"),
+                "eligible_without_outbox_row": outbox_diag.get(
+                    "eligible_without_outbox_row"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    print("\n--- Chunks legados (campaign_stage_sends initial) ---")
+    legacy_payload = {
+        "by_status": legacy_summary.get("by_status") or [],
+        "in_flight_count": legacy_summary.get("in_flight_count", 0),
+    }
+    if legacy_offset is not None:
+        legacy_payload["legacy_offset_positions"] = legacy_offset
+    print(json.dumps(legacy_payload, ensure_ascii=False, indent=2, default=str))
+    in_flight = legacy_summary.get("in_flight_rows") or []
+    if in_flight:
+        print("\n--- Chunks legados em voo (detalhe) ---")
+        for row in in_flight:
+            print(json.dumps(row, ensure_ascii=False, default=str))
+
+
+def _heuristics(
+    bundle: dict[str, Any],
+    api: Optional[dict[str, Any]],
+    outbox_diag: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Sinais e medidas em PT-BR (pré-LLM)."""
     signals: list[str] = []
     measures: list[str] = []
@@ -312,6 +416,45 @@ def _heuristics(bundle: dict[str, Any], api: Optional[dict[str, Any]]) -> dict[s
             "ou admin sync se o DB estiver defasado em relação à Uazapi."
         )
 
+    if outbox_diag:
+        quota = outbox_diag.get("quota") or {}
+        if quota and not quota.get("allows_more"):
+            signals.append(
+                "Cota diária de envios iniciais esgotada (allows_more=false); "
+                f"remaining_slots={quota.get('remaining_slots')}."
+            )
+            measures.append(
+                "Aguardar próximo dia BRT ou ajustar campaigns.daily_limit; "
+                "confirmar sent_campaign_today vs campaign_cap no quota snapshot."
+            )
+        eligible = int(outbox_diag.get("eligible_without_outbox_row") or 0)
+        outbox_pending = int(
+            (outbox_diag.get("outbox_initial_by_status") or {}).get("pending", 0)
+        )
+        outbox_sending = int(
+            (outbox_diag.get("outbox_initial_by_status") or {}).get("sending", 0)
+        )
+        if eligible > 0 and outbox_pending == 0 and outbox_sending == 0 and quota.get(
+            "allows_more"
+        ):
+            signals.append(
+                f"Há {eligible} lead(s) elegível(is) sem linha na outbox e cota permite mais envios."
+            )
+            measures.append(
+                "Acionar resume/force chunk ou aguardar worker_cadence (maybe_schedule_outbox_initial_batches); "
+                "verificar janela BRT (send_hour_start/end)."
+            )
+        legacy = bundle.get("legacy_initial_chunks") or {}
+        if int(legacy.get("in_flight_count") or 0) > 0:
+            signals.append(
+                f"Existem {legacy['in_flight_count']} chunk(s) legado(s) initial em voo "
+                "(scheduled/running/partial/queued)."
+            )
+            measures.append(
+                "Campanhas com USE_MESSAGE_OUTBOX devem migrar para outbox; chunks legados sem progresso "
+                "são auto-failed ao enfileirar. Conferir legacy_offset_positions na visão consolidada."
+            )
+
     # dedupe measures order-preserving
     seen = set()
     uniq_measures = []
@@ -367,7 +510,13 @@ def _run_api(token: str, instance_id: int, campaign_id: int, folder_ids: list[st
     return out
 
 
-def _agent_prompt(bundle: dict[str, Any], api: Optional[dict[str, Any]], heur: dict[str, Any]) -> str:
+def _agent_prompt(
+    bundle: dict[str, Any],
+    api: Optional[dict[str, Any]],
+    heur: dict[str, Any],
+    outbox_diag: Optional[dict[str, Any]] = None,
+    legacy_offset: Optional[int] = None,
+) -> str:
     safe_api = None
     if api:
         safe_api = {
@@ -388,6 +537,8 @@ def _agent_prompt(bundle: dict[str, Any], api: Optional[dict[str, Any]], heur: d
         ),
         "data": {
             "db": bundle,
+            "outbox_diagnostics": outbox_diag,
+            "legacy_offset_positions": legacy_offset,
             "uazapi": safe_api,
             "precomputed_signals": heur.get("signals"),
             "precomputed_recommendations": heur.get("recommended_actions"),
@@ -417,10 +568,25 @@ def main() -> int:
     args = parser.parse_args()
     cid = args.campaign_id
 
+    from worker_message_outbox import (
+        _legacy_initial_outbox_offset,
+        diagnose_initial_outbox_enqueue,
+    )
+
     conn = _connect()
     cur = conn.cursor()
     bundle = _load_db_bundle(cur, cid, args.chunks_limit)
     token, instance_id = _fetch_primary_uazapi_token(cur, cid)
+
+    outbox_diag: dict[str, Any] = {}
+    legacy_offset: Optional[int] = None
+    if bundle.get("error") != "campaign_not_found":
+        outbox_diag = diagnose_initial_outbox_enqueue(conn, cid)
+        try:
+            legacy_offset = _legacy_initial_outbox_offset(conn, cid)
+        except Exception as exc:
+            legacy_offset = None
+            print(f"\n[aviso] legacy_offset indisponível: {exc}", file=sys.stderr)
     conn.close()
 
     if bundle.get("error") == "campaign_not_found":
@@ -451,12 +617,14 @@ def main() -> int:
             if fid:
                 chk["db_failed_count"] = db_failed_by_folder.get(str(fid), 0)
 
-    heur = _heuristics(bundle, api_part)
+    heur = _heuristics(bundle, api_part, outbox_diag)
 
     out_all: dict[str, Any] = {
         "campaign_id": cid,
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "db": bundle,
+        "outbox_diagnostics": outbox_diag,
+        "legacy_offset_positions": legacy_offset,
         "uazapi_api": api_part,
         "heuristics": heur,
     }
@@ -475,6 +643,11 @@ def main() -> int:
     print(f"Instância primária (Uazapi): instance_id={instance_id} token={_mask_token(token)}")
     print("\n--- Totais leads (funil, não removidos) ---")
     print(json.dumps(bundle.get("lead_totals_funnel"), ensure_ascii=False, indent=2))
+    _print_outbox_consolidated_view(
+        outbox_diag,
+        bundle.get("legacy_initial_chunks") or {},
+        legacy_offset=legacy_offset,
+    )
     print("\n--- Sinais (heurística) ---")
     for s in heur.get("signals") or []:
         print(f" • {s}")
@@ -494,7 +667,7 @@ def main() -> int:
             print("\n--- TOKEN (confidencial) ---\n" + token)
 
     print("\n========== PROMPT PARA AGENTE (cole no chat) ==========\n")
-    print(_agent_prompt(bundle, api_part, heur))
+    print(_agent_prompt(bundle, api_part, heur, outbox_diag, legacy_offset))
     print("\n========== fim do prompt ==========\n")
     print(
         "n8n: importe scripts/n8n-workflows/uazapi-diagnostico-campanha-advanced.json "

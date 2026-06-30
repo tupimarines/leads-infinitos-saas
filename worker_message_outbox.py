@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from services.uazapi import UazapiService
@@ -38,6 +39,20 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def get_db_connection():
+    conn = psycopg2.connect(
+        host=os.environ.get("DB_HOST", "localhost"),
+        database=os.environ.get("DB_NAME", "leads_infinitos"),
+        user=os.environ.get("DB_USER", "postgres"),
+        password=os.environ.get("DB_PASSWORD"),
+        port=os.environ.get("DB_PORT", "5432"),
+    )
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE 'UTC'")
+    return conn
+
+
 # Última instância servida no tick outbox (round-robin entre instâncias quando ``rotation_mode == round_robin``).
 _last_outbox_instance_id: Optional[int] = None
 # Throttle de logs de skip do agendamento automático (campaign_id, reason) → monotonic.
@@ -53,6 +68,9 @@ _CADENCE_OUTBOX_STAGES: tuple[tuple[str, int, int, int], ...] = (
 )
 
 _REAPER_MINUTES = int(os.environ.get("UAZAPI_OUTBOX_SENDING_REAPER_MINUTES", "20"))
+_OUTBOX_STALE_PENDING_TTL_MINUTES = int(
+    os.environ.get("UAZAPI_OUTBOX_STALE_PENDING_TTL_MINUTES", "30")
+)
 _OUTBOX_RETRY_BASE_SEC = int(os.environ.get("UAZAPI_OUTBOX_RETRY_BASE_SECONDS", "30"))
 _OUTBOX_RETRY_MAX_SEC = int(os.environ.get("UAZAPI_OUTBOX_RETRY_MAX_SECONDS", "3600"))
 
@@ -236,15 +254,6 @@ def _choose_outbox_row(candidates: list[dict]) -> dict:
     return head
 
 
-def _campaign_uses_message_outbox(conn, campaign_id: int) -> bool:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM campaign_message_outbox WHERE campaign_id = %s LIMIT 1",
-            (campaign_id,),
-        )
-        return cur.fetchone() is not None
-
-
 def _log_outbox_schedule_skip(campaign_id: int, reason: str) -> None:
     """Evita spam: no máximo um log por (campanha, motivo) a cada 10 min."""
     key = (int(campaign_id), reason)
@@ -255,7 +264,7 @@ def _log_outbox_schedule_skip(campaign_id: int, reason: str) -> None:
     logger.info(
         json.dumps(
             {
-                "event": "schedule_next_initial_outbox_skipped",
+                "event": "outbox_schedule_skip",
                 "campaign_id": campaign_id,
                 "reason": reason,
             },
@@ -264,12 +273,243 @@ def _log_outbox_schedule_skip(campaign_id: int, reason: str) -> None:
     )
 
 
+def _log_outbox_daily_quota_reached(campaign_id: int, quota: dict) -> None:
+    logger.info(
+        json.dumps(
+            {
+                "event": "outbox_daily_quota_reached",
+                "campaign_id": int(campaign_id),
+                "sent_campaign_today": quota.get("sent_campaign_today"),
+                "campaign_cap": quota.get("campaign_cap"),
+                "remaining_slots": quota.get("remaining_slots"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _defer_pending_initial_rows_to_next_window(
+    conn, campaign_id: int, camp_win: dict, *, reason: str = "daily_quota"
+) -> int:
+    """Reprograma initial ``pending`` para a próxima janela BRT válida (rollover diário)."""
+    now_utc = datetime.utcnow()
+    try:
+        next_at = next_valid_send_utc_naive(camp_win, now_utc, margin_minutes=0)
+    except ValueError:
+        return 0
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, next_run_at FROM campaign_message_outbox
+            WHERE campaign_id = %s
+              AND LOWER(TRIM(stage)) = 'initial'
+              AND status = 'pending'
+              AND next_run_at <= NOW()
+            """,
+            (int(campaign_id),),
+        )
+        rows = cur.fetchall() or []
+    deferred = 0
+    for row in rows:
+        oid = int(row["id"])
+        prev = row.get("next_run_at")
+        if prev is not None and prev >= next_at:
+            continue
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_message_outbox
+                SET next_run_at = %s, updated_at = NOW()
+                WHERE id = %s AND status = 'pending'
+                """,
+                (next_at, oid),
+            )
+            if cur.rowcount:
+                deferred += 1
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "outbox_next_day_deferred",
+                            "campaign_id": int(campaign_id),
+                            "outbox_id": oid,
+                            "reason": reason,
+                            "next_run_at": next_at.isoformat(),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+    return deferred
+
+
+def _recover_stale_pending_initial_outbox(conn, *, max_rows: int = 100) -> int:
+    """
+    No início do tick: initial ``pending`` com ``next_run_at`` vencido em campanhas
+    activas, fora da janela ou sem cota — reprograma para ``next_valid_send_utc_naive``.
+    """
+    if max_rows <= 0:
+        return 0
+    now_utc = datetime.utcnow()
+    ttl_min = max(1, _OUTBOX_STALE_PENDING_TTL_MINUTES)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT o.id, o.campaign_id, o.next_run_at,
+                   c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday
+            FROM campaign_message_outbox o
+            JOIN campaigns c ON c.id = o.campaign_id
+            WHERE LOWER(TRIM(o.stage)) = 'initial'
+              AND o.status = 'pending'
+              AND o.next_run_at <= NOW()
+              AND o.updated_at < (NOW() - (%s * INTERVAL '1 minute'))
+              AND c.status IN ('running', 'pending')
+            ORDER BY o.next_run_at ASC, o.id ASC
+            LIMIT %s
+            """,
+            (ttl_min, max_rows),
+        )
+        rows = cur.fetchall() or []
+
+    recovered = 0
+    for row in rows:
+        row = dict(row)
+        cid = int(row["campaign_id"])
+        camp_win = _campaign_dict_from_row(row)
+        if is_campaign_send_window(camp_win) and check_initial_chunk_daily_quota_for_campaign(
+            cid
+        ):
+            continue
+        try:
+            nv = next_valid_send_utc_naive(camp_win, now_utc, margin_minutes=0)
+        except ValueError:
+            continue
+        prev = row.get("next_run_at")
+        if prev is not None and nv <= prev:
+            continue
+        oid = int(row["id"])
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_message_outbox
+                SET next_run_at = %s, updated_at = NOW()
+                WHERE id = %s AND status = 'pending'
+                """,
+                (nv, oid),
+            )
+            if cur.rowcount:
+                recovered += 1
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "outbox_stale_pending_recovered",
+                            "campaign_id": cid,
+                            "outbox_id": oid,
+                            "next_run_at": nv.isoformat(),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+    return recovered
+
+
+def _reconcile_initial_outbox_in_flight(
+    conn, campaign_id: int, camp_win: dict, quota: dict, *, force: bool
+) -> tuple[bool, Optional[str]]:
+    """
+    ``sending`` bloqueia curto; ``pending`` futuro aguarda; ``pending`` vencido/stale
+    é recuperado para a próxima janela em vez de travar o dia seguinte.
+    """
+    if force:
+        return True, None
+
+    cid = int(campaign_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM campaign_message_outbox
+            WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+              AND status = 'sending'
+            LIMIT 1
+            """,
+            (cid,),
+        )
+        if cur.fetchone():
+            _log_outbox_schedule_skip(cid, "initial_outbox_sending")
+            return False, "initial_outbox_sending"
+
+    now_utc = datetime.utcnow()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, next_run_at FROM campaign_message_outbox
+            WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
+              AND status = 'pending'
+            ORDER BY next_run_at ASC NULLS FIRST, id ASC
+            """,
+            (cid,),
+        )
+        pending_rows = cur.fetchall() or []
+
+    if not pending_rows:
+        return True, None
+
+    has_future = False
+    has_active_due = False
+    for pr in pending_rows:
+        pr = dict(pr)
+        nr = pr.get("next_run_at")
+        if nr is not None and nr > now_utc:
+            has_future = True
+            continue
+        if is_campaign_send_window(camp_win) and quota.get("allows_more"):
+            has_active_due = True
+            continue
+        try:
+            nv = next_valid_send_utc_naive(camp_win, now_utc, margin_minutes=0)
+        except ValueError:
+            has_active_due = True
+            continue
+        oid = int(pr["id"])
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE campaign_message_outbox
+                SET next_run_at = %s, updated_at = NOW()
+                WHERE id = %s AND status = 'pending'
+                """,
+                (nv, oid),
+            )
+            if cur.rowcount:
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "outbox_stale_pending_recovered",
+                            "campaign_id": cid,
+                            "outbox_id": oid,
+                            "next_run_at": nv.isoformat(),
+                            "context": "schedule_reconcile",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+    if has_future:
+        _log_outbox_schedule_skip(cid, "initial_outbox_pending_scheduled")
+        return False, "initial_outbox_pending_scheduled"
+    if has_active_due:
+        _log_outbox_schedule_skip(cid, "initial_outbox_pending_active")
+        return False, "initial_outbox_pending_active"
+    return True, None
+
+
 def schedule_next_initial_outbox_batch(
     conn, campaign: dict, *, force: bool = False
 ) -> tuple[int, Optional[str]]:
     """
-    Enfileira o próximo lote ``initial`` em ``campaign_message_outbox`` quando a campanha
-    já migrou para outbox. Substitui ``campaign_stage_sends`` em ``schedule_next_initial_chunk``.
+    Ponto único de enfileiramento do lote ``initial`` em ``campaign_message_outbox``.
+    Substitui ``campaign_stage_sends`` em ``schedule_next_initial_chunk``.
+
+    Gates: outbox habilitado, campanha Uazapi, status running/pending, leads step-1
+    pendentes (e demais checagens de cota/janela/in-flight).
 
     ``force=True`` (admin / Forçar chunk): enfileira imediatamente, como antes.
     Automático: fora da janela BRT agenda ``next_run_at`` no próximo slot válido em vez de
@@ -280,8 +520,13 @@ def schedule_next_initial_outbox_batch(
 
     cid = int(campaign["id"])
     uid = int(campaign.get("user_id") or 0)
-    if not uid or not _campaign_uses_message_outbox(conn, cid):
-        return 0, "no_outbox_rows"
+    if not uid:
+        return 0, "no_user_id"
+    if not campaign.get("use_uazapi_sender"):
+        return 0, "not_uazapi_sender"
+    camp_status = (campaign.get("status") or "").strip().lower()
+    if camp_status not in ("running", "pending"):
+        return 0, "campaign_not_active"
 
     camp_win = {
         "send_hour_start": campaign.get("send_hour_start"),
@@ -292,36 +537,27 @@ def schedule_next_initial_outbox_batch(
     quota = initial_chunk_quota_snapshot(cid)
     if not quota.get("allows_more"):
         _log_outbox_schedule_skip(cid, "daily_quota_exceeded")
+        _log_outbox_daily_quota_reached(cid, quota)
+        _defer_pending_initial_rows_to_next_window(conn, cid, camp_win, reason="daily_quota")
+        conn.commit()
         return 0, "daily_quota_exceeded"
 
     remaining_slots = int(quota.get("remaining_slots") or 0)
     if remaining_slots <= 0:
         _log_outbox_schedule_skip(cid, "daily_quota_exceeded")
+        _log_outbox_daily_quota_reached(cid, quota)
+        _defer_pending_initial_rows_to_next_window(conn, cid, camp_win, reason="daily_quota")
+        conn.commit()
         return 0, "daily_quota_exceeded"
 
-    in_flight_sql = (
-        """
-        SELECT 1 FROM campaign_message_outbox
-        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
-          AND status = 'sending'
-        LIMIT 1
-        """
-        if force
-        else """
-        SELECT 1 FROM campaign_message_outbox
-        WHERE campaign_id = %s AND LOWER(TRIM(stage)) = 'initial'
-          AND status IN ('pending', 'sending')
-        LIMIT 1
-        """
+    ok_in_flight, in_flight_reason = _reconcile_initial_outbox_in_flight(
+        conn, cid, camp_win, quota, force=force
     )
+    if not ok_in_flight:
+        conn.commit()
+        return 0, in_flight_reason
 
     with conn.cursor() as cur:
-        cur.execute(in_flight_sql, (cid,))
-        if cur.fetchone():
-            reason = "initial_outbox_sending" if force else "initial_outbox_in_flight"
-            _log_outbox_schedule_skip(cid, reason)
-            return 0, reason
-
         cur.execute(
             """
             SELECT COUNT(*) AS cnt FROM campaign_leads
@@ -408,8 +644,9 @@ def schedule_next_initial_outbox_batch(
         logger.info(
             json.dumps(
                 {
-                    "event": "schedule_next_initial_outbox_deferred",
+                    "event": "outbox_next_day_deferred",
                     "campaign_id": cid,
+                    "reason": "outside_send_window",
                     "next_run_at": next_run_at_val.isoformat(),
                 },
                 ensure_ascii=False,
@@ -607,23 +844,29 @@ def _try_schedule_next_initial_outbox_after_batch(conn, campaign_id: int) -> Non
 
 def maybe_schedule_outbox_initial_batches(conn) -> None:
     """
-    Varre campanhas ``running``/``pending`` com fila outbox e tenta enfileirar o próximo lote
-    initial. Chamado a cada tick do cadence (não depende só do loop de cadência legado).
+    Varre campanhas Uazapi ``running``/``pending`` com leads initial pendentes e tenta
+    enfileirar o próximo lote. Chamado a cada tick do cadence (day-2+ e campanhas sem
+    linhas prévias na outbox).
     """
     if not USE_MESSAGE_OUTBOX:
         return
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT c.id, c.name, c.user_id, c.enable_cadence,
+            SELECT c.id, c.name, c.user_id, c.status, c.enable_cadence,
                    c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                    c.use_uazapi_sender, c.scheduled_start, c.rotation_mode, c.daily_limit
             FROM campaigns c
             WHERE c.status IN ('running', 'pending')
               AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
               AND EXISTS (
-                  SELECT 1 FROM campaign_message_outbox o
-                  WHERE o.campaign_id = c.id LIMIT 1
+                  SELECT 1 FROM campaign_leads cl
+                  WHERE cl.campaign_id = c.id
+                    AND cl.status = 'pending'
+                    AND cl.current_step = 1
+                    AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+                    AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
+                  LIMIT 1
               )
             ORDER BY c.id ASC
             """
@@ -782,9 +1025,288 @@ def enqueue_missing_cadence_outbox_rows(conn) -> None:
                 )
 
 
-def _defer_row_next_window(conn, outbox_id: int, campaign_dict: dict) -> None:
+_STAGE_STEP_PRIORITY = {"initial": 0, "follow1": 1, "follow2": 2, "breakup": 3}
+
+
+def enqueue_outbox_rows_for_leads(
+    conn,
+    *,
+    campaign_id: int,
+    stage: str,
+    lead_ids: list[int],
+    instance_id: int,
+    enqueue_source: str,
+    next_run_at: Optional[datetime] = None,
+    supersede_send_id: Optional[int] = None,
+) -> int:
+    """
+    Enfileira leads na outbox com idempotency_key estável (legado → outbox / materialize).
+    Retorna número de linhas inseridas (ON CONFLICT ignorado).
+    """
+    if not USE_MESSAGE_OUTBOX or not lead_ids:
+        return 0
+    cid = int(campaign_id)
+    st = (stage or "initial").strip().lower()
+    step_priority = _STAGE_STEP_PRIORITY.get(st, 0)
+    iid = int(instance_id)
+    now_utc = datetime.utcnow()
+    nr = next_run_at if next_run_at is not None else now_utc
+    enqueued = 0
+    with conn.cursor() as cur:
+        for i, lead_id in enumerate(lead_ids):
+            lid = int(lead_id)
+            idempotency_key = f"campaign-{cid}-lead-{lid}-{st}"
+            payload_summary = json.dumps(
+                {"stage": st, "enqueue": enqueue_source},
+                ensure_ascii=False,
+            )
+            queued_at_val = now_utc + timedelta(
+                seconds=i // 1_000_000, microseconds=i % 1_000_000
+            )
+            cur.execute(
+                """
+                INSERT INTO campaign_message_outbox (
+                    campaign_id, campaign_lead_id, instance_id,
+                    stage, step_priority, status, queued_at,
+                    next_run_at, idempotency_key, payload_summary
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, 'pending',
+                    %s, %s, %s, %s::jsonb
+                )
+                ON CONFLICT (campaign_lead_id, stage) DO NOTHING
+                """,
+                (
+                    cid,
+                    lid,
+                    iid,
+                    st,
+                    step_priority,
+                    queued_at_val,
+                    nr,
+                    idempotency_key,
+                    payload_summary,
+                ),
+            )
+            if cur.rowcount:
+                enqueued += 1
+        if supersede_send_id is not None:
+            cur.execute(
+                """
+                UPDATE campaign_stage_sends
+                SET status = 'failed',
+                    last_materialize_error = COALESCE(
+                        NULLIF(TRIM(last_materialize_error), ''),
+                        'outbox: legacy materialize migrated'
+                    ),
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND uazapi_folder_id IS NULL
+                """,
+                (int(supersede_send_id),),
+            )
+    return enqueued
+
+
+def supersede_legacy_follow_stage_sends(
+    conn, campaign_id: int, stage: str, scheduled_for
+) -> int:
+    """Marca sends follow agendados (sem pasta) como superseded — cadência via outbox."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE campaign_stage_sends
+            SET status = 'failed',
+                last_materialize_error = COALESCE(
+                    NULLIF(TRIM(last_materialize_error), ''),
+                    'outbox: follow-up via enqueue_missing_cadence_outbox_rows'
+                ),
+                updated_at = NOW()
+            WHERE campaign_id = %s
+              AND stage = %s
+              AND scheduled_for = %s
+              AND status IN ('scheduled', 'waiting_reconnect')
+              AND uazapi_folder_id IS NULL
+            """,
+            (int(campaign_id), stage, scheduled_for),
+        )
+        return cur.rowcount or 0
+
+
+def _chunk_size_from_stage_send_row(row: dict) -> int:
+    lj = row.get("lead_ids")
+    if isinstance(lj, list):
+        return len(lj)
+    if isinstance(lj, str):
+        try:
+            parsed = json.loads(lj)
+            if isinstance(parsed, list):
+                return len(parsed)
+        except Exception:
+            pass
     try:
-        nv = next_valid_send_utc_naive(campaign_dict, datetime.utcnow())
+        return max(0, int(row.get("planned_count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _legacy_initial_outbox_offset(conn, campaign_id: int) -> int:
+    """Posições consumidas por chunks initial legados (mesma regra do script de migração)."""
+    from psycopg2.extras import RealDictCursor
+
+    offset = 0
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT status, planned_count, success_count, failed_count, lead_ids
+            FROM campaign_stage_sends
+            WHERE campaign_id = %s AND stage = 'initial'
+            ORDER BY id ASC
+            """,
+            (int(campaign_id),),
+        )
+        rows = cur.fetchall() or []
+    for row in rows:
+        st = (row.get("status") or "").lower()
+        n = _chunk_size_from_stage_send_row(row)
+        sc = int(row.get("success_count") or 0)
+        fc = int(row.get("failed_count") or 0)
+        if st in ("scheduled", "failed", "queued"):
+            offset += n
+        elif st == "done":
+            offset += sc if sc > 0 else n
+        elif st in ("running", "partial"):
+            touched = sc + fc
+            offset += touched if touched > 0 else n
+    return offset
+
+
+def reconcile_in_flight_legacy_initial_to_outbox(
+    conn, *, max_campaigns: int = 10
+) -> int:
+    """
+    Campanhas com chunks initial legados em voo: após sync, enfileira leads pendentes
+  restantes na outbox (idempotency_key por lead+stage).
+    """
+    if not USE_MESSAGE_OUTBOX or max_campaigns <= 0:
+        return 0
+    from psycopg2.extras import RealDictCursor
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT css.campaign_id
+            FROM campaign_stage_sends css
+            JOIN campaigns c ON c.id = css.campaign_id
+            WHERE css.stage = 'initial'
+              AND css.status IN ('running', 'partial', 'scheduled', 'queued')
+              AND c.status IN ('running', 'pending')
+              AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+            ORDER BY css.campaign_id ASC
+            LIMIT %s
+            """,
+            (max_campaigns,),
+        )
+        campaign_ids = [int(r["campaign_id"]) for r in (cur.fetchall() or [])]
+
+    total = 0
+    for cid in campaign_ids:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT cl.id
+                FROM campaign_leads cl
+                WHERE cl.campaign_id = %s
+                  AND cl.status = 'pending'
+                  AND cl.current_step = 1
+                  AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+                  AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM campaign_message_outbox o
+                      WHERE o.campaign_lead_id = cl.id
+                        AND LOWER(TRIM(o.stage)) = 'initial'
+                        AND o.status IN ('pending', 'sending', 'sent')
+                  )
+                ORDER BY COALESCE(cl.send_batch, 999) ASC,
+                         COALESCE(cl.csv_row_order, cl.id) ASC,
+                         cl.id ASC
+                """,
+                (cid,),
+            )
+            pending = [int(r["id"]) for r in (cur.fetchall() or [])]
+        if not pending:
+            continue
+
+        offset = _legacy_initial_outbox_offset(conn, cid)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM campaign_leads
+                WHERE campaign_id = %s
+                  AND COALESCE(removed_from_funnel, FALSE) = FALSE
+                ORDER BY COALESCE(send_batch, 999) ASC,
+                         COALESCE(csv_row_order, id) ASC,
+                         id ASC
+                """,
+                (cid,),
+            )
+            ordered = [int(r["id"]) for r in (cur.fetchall() or [])]
+        to_enqueue = [lid for lid in ordered[offset:] if lid in set(pending)]
+        if not to_enqueue:
+            continue
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT i.id AS instance_id
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                  AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                  AND i.apikey IS NOT NULL
+                  AND TRIM(i.apikey) <> ''
+                ORDER BY i.id ASC
+                LIMIT 1
+                """,
+                (cid,),
+            )
+            inst = cur.fetchone()
+        if not inst:
+            continue
+        n = enqueue_outbox_rows_for_leads(
+            conn,
+            campaign_id=cid,
+            stage="initial",
+            lead_ids=to_enqueue,
+            instance_id=int(inst["instance_id"]),
+            enqueue_source="reconcile_in_flight_legacy_initial",
+        )
+        if n:
+            total += n
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "reconcile_in_flight_legacy_initial",
+                        "campaign_id": cid,
+                        "rows_enqueued": n,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    return total
+
+
+def _defer_row_next_window(
+    conn,
+    outbox_id: int,
+    campaign_dict: dict,
+    *,
+    campaign_id: Optional[int] = None,
+    reason: str = "outside_send_window",
+) -> None:
+    try:
+        nv = next_valid_send_utc_naive(campaign_dict, datetime.utcnow(), margin_minutes=0)
     except Exception:
         nv = datetime.utcnow() + timedelta(minutes=30)
     with conn.cursor() as cur:
@@ -796,6 +1318,54 @@ def _defer_row_next_window(conn, outbox_id: int, campaign_dict: dict) -> None:
             """,
             (nv, outbox_id),
         )
+    logger.info(
+        json.dumps(
+            {
+                "event": "outbox_next_day_deferred",
+                "campaign_id": campaign_id,
+                "outbox_id": outbox_id,
+                "reason": reason,
+                "next_run_at": nv.isoformat(),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _defer_initial_row_daily_quota(conn, row: dict) -> None:
+    """Adia envio initial para a próxima janela BRT quando a cota diária esgotou."""
+    row = dict(row)
+    cd = _campaign_dict_from_row(row)
+    cid = int(row["campaign_id"])
+    oid = int(row["id"])
+    try:
+        nv = next_valid_send_utc_naive(cd, datetime.utcnow(), margin_minutes=0)
+    except ValueError:
+        _defer_row_retry_later(conn, oid, minutes=60)
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE campaign_message_outbox
+            SET next_run_at = %s, updated_at = NOW()
+            WHERE id = %s AND status = 'pending'
+            """,
+            (nv, oid),
+        )
+    quota = initial_chunk_quota_snapshot(cid)
+    _log_outbox_daily_quota_reached(cid, quota)
+    logger.info(
+        json.dumps(
+            {
+                "event": "outbox_next_day_deferred",
+                "campaign_id": cid,
+                "outbox_id": oid,
+                "reason": "daily_quota",
+                "next_run_at": nv.isoformat(),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def _defer_row_retry_later(conn, outbox_id: int, minutes: int = 45) -> None:
@@ -939,9 +1509,11 @@ def process_message_outbox_tick(conn) -> None:
         return
 
     _reaper_stale_sending(conn)
+    _recover_stale_pending_initial_outbox(conn)
     conn.commit()
 
     enqueue_missing_cadence_outbox_rows(conn)
+    reconcile_in_flight_legacy_initial_to_outbox(conn)
     conn.commit()
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -986,7 +1558,13 @@ def process_message_outbox_tick(conn) -> None:
 
     if not in_window:
         first = dict(rows[0])
-        _defer_row_next_window(conn, int(first["id"]), _campaign_dict_from_row(first))
+        _defer_row_next_window(
+            conn,
+            int(first["id"]),
+            _campaign_dict_from_row(first),
+            campaign_id=int(first["campaign_id"]),
+            reason="outside_send_window",
+        )
         conn.commit()
         return
 
@@ -995,7 +1573,7 @@ def process_message_outbox_tick(conn) -> None:
         if r.get("api_provider") != "uazapi" or not (r.get("apikey") or "").strip():
             continue
         if not _passes_throttle_initial(r):
-            _defer_row_retry_later(conn, int(r["id"]), minutes=60)
+            _defer_initial_row_daily_quota(conn, r)
             conn.commit()
             return
         candidates.append(r)
@@ -1394,18 +1972,7 @@ def _persist_outcome(
 
 
 if __name__ == "__main__":
-    import psycopg2 as _pg
-
-    def _conn():
-        return _pg.connect(
-            host=os.environ.get("DB_HOST", "localhost"),
-            database=os.environ.get("DB_NAME", "leads_infinitos"),
-            user=os.environ.get("DB_USER", "postgres"),
-            password=os.environ.get("DB_PASSWORD"),
-            port=os.environ.get("DB_PORT", "5432"),
-        )
-
-    c = _conn()
+    c = get_db_connection()
     try:
         process_message_outbox_tick(c)
     finally:

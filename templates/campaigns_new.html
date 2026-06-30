@@ -367,13 +367,13 @@
                         <button type="button" id="dailyLimitDec"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(-1)">−</button>
-                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-ink w-10 text-center">{{ plan_daily_limit }}</span>
+                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-ink w-10 text-center">5</span>
                         <button type="button" id="dailyLimitInc"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(1)">+</button>
                         <span class="text-xs text-faint">msgs/dia</span>
                     </div>
-                    <input type="hidden" id="daily_limit_value" value="{{ plan_daily_limit }}">
+                    <input type="hidden" id="daily_limit_value" value="5">
                 </div>
 
                 <!-- ============================================ -->
@@ -1541,7 +1541,7 @@
         const max = parseInt(counter.dataset.max, 10);
         const step = parseInt(counter.dataset.step, 10);
         let current = parseInt(hidden.value, 10);
-        if (isNaN(current)) current = max;
+        if (isNaN(current)) current = min;
         current = Math.min(max, Math.max(min, current + direction * step));
         hidden.value = current;
         display.textContent = current;

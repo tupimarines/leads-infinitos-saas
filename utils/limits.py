@@ -82,9 +82,19 @@ LEGACY_LICENSE_TYPE_FALLBACK = {
 
 PLAN_PRIORITY = {"starter": 1, "starter_trial": 1, "pro": 2, "scale": 3, "infinite": 4}
 
+_BRT_TZ = "America/Sao_Paulo"
+
+
+def brt_date_equals_today_sql(column: str) -> str:
+    """SQL fragment: calendar date of ``column`` (timestamptz stored as UTC) equals today in BRT."""
+    return (
+        f"date({column} AT TIME ZONE 'UTC' AT TIME ZONE '{_BRT_TZ}')"
+        f" = date(NOW() AT TIME ZONE '{_BRT_TZ}')"
+    )
+
 
 def get_db_connection():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=os.environ.get('DB_HOST', 'localhost'),
         database=os.environ.get('DB_NAME', 'leads_infinitos'),
         user=os.environ.get('DB_USER', 'postgres'),
@@ -92,6 +102,9 @@ def get_db_connection():
         port=os.environ.get('DB_PORT', '5432'),
         cursor_factory=RealDictCursor,
     )
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE 'UTC'")
+    return conn
 
 
 def resolve_license_type(license_type: str, allow_legacy_fallback: bool = True):
@@ -190,9 +203,8 @@ def get_sent_today_count(user_id: int) -> int:
           COALESCE(cl.current_step, 1) = 1
           OR COALESCE(cl.last_sent_stage, '') = 'initial'
       )
-      AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
-          = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
-    """
+      AND {brt_today}
+    """.format(brt_today=brt_date_equals_today_sql("cl.sent_at"))
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -252,9 +264,8 @@ def get_sent_today_campaign_initial_count(campaign_id: int) -> int:
           COALESCE(cl.current_step, 1) = 1
           OR COALESCE(cl.last_sent_stage, '') = 'initial'
       )
-      AND date(cl.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
-          = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
-    """
+      AND {brt_today}
+    """.format(brt_today=brt_date_equals_today_sql("cl.sent_at"))
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -268,15 +279,15 @@ def get_sent_today_campaign_initial_count(campaign_id: int) -> int:
             )
             if not cur.fetchone():
                 return lead_count
+            outbox_brt_today = brt_date_equals_today_sql("updated_at")
             cur.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS count
                 FROM campaign_message_outbox
                 WHERE campaign_id = %s
                   AND LOWER(TRIM(stage)) = 'initial'
                   AND status = 'sent'
-                  AND date(updated_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')
-                      = date(NOW() AT TIME ZONE 'America/Sao_Paulo')
+                  AND {outbox_brt_today}
                 """,
                 (campaign_id,),
             )
@@ -348,7 +359,7 @@ def check_initial_chunk_daily_quota_for_campaign(
     policy: Optional[str] = None,
 ) -> bool:
     """
-    True se a política TD-12 (default G2) permite mais envios iniciais hoje para a campanha.
+    True se a política TD-12 (default G3) permite mais envios iniciais hoje para a campanha.
 
     Usa sempre `campaigns.user_id` como dono da cota (AC14 / campanhas criadas por admin).
     """

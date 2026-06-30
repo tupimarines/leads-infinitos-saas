@@ -225,18 +225,18 @@
                     <label class="block text-sm font-semibold text-gray-300 mb-1">
                         📨 Mensagens por dia
                     </label>
-                    <p class="text-xs text-gray-500 mb-3">Quantas mensagens serão enviadas por dia. Limite máximo: <strong class="text-blue-400">{{ plan_daily_limit }}</strong> (validado pelo plano do usuário).</p>
+                    <p class="text-xs text-gray-500 mb-3">Quantas mensagens serão enviadas por dia. Limite máximo: <strong id="planDailyLimitLabel" class="text-blue-400">{{ plan_daily_limit }}</strong> (validado pelo plano do usuário).</p>
                     <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ plan_daily_limit }}" data-step="5">
                         <button type="button" id="dailyLimitDec"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(-1)">−</button>
-                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-white w-10 text-center">{{ plan_daily_limit }}</span>
+                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-white w-10 text-center">5</span>
                         <button type="button" id="dailyLimitInc"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(1)">+</button>
                         <span class="text-xs text-gray-500">msgs/dia</span>
                     </div>
-                    <input type="hidden" id="daily_limit_value" value="{{ plan_daily_limit }}">
+                    <input type="hidden" id="daily_limit_value" value="5">
                 </div>
 
                 <!-- [3] Seleção de Job OU Upload CSV -->
@@ -736,6 +736,7 @@
                 const opt = document.createElement('option');
                 opt.value = u.id;
                 opt.textContent = `${u.email} (ID: ${u.id})`;
+                if (u.daily_limit != null) opt.dataset.dailyLimit = u.daily_limit;
                 select.appendChild(opt);
             });
         } catch (err) {
@@ -755,6 +756,11 @@
     document.getElementById('user_id').addEventListener('change', async function() {
         const userId = this.value;
         if (!userId) return;
+
+        const selectedOpt = this.selectedOptions[0];
+        if (selectedOpt?.dataset?.dailyLimit) {
+            setPlanDailyLimit(selectedOpt.dataset.dailyLimit);
+        }
 
         const instancesContainer = document.getElementById('instances-container');
         const jobSelect = document.getElementById('job_id');
@@ -970,6 +976,27 @@
     // DAILY LIMIT COUNTER
     // ============================================================
 
+    function setPlanDailyLimit(planLimit) {
+        const counter = document.getElementById('dailyLimitCounter');
+        const display = document.getElementById('dailyLimitDisplay');
+        const hidden = document.getElementById('daily_limit_value');
+        const min = parseInt(counter.dataset.min, 10);
+        const step = parseInt(counter.dataset.step, 10);
+        const max = Math.max(min, parseInt(planLimit, 10) || min);
+        counter.dataset.max = max;
+        const label = document.getElementById('planDailyLimitLabel');
+        if (label) label.textContent = max;
+        let current = parseInt(hidden.value, 10);
+        if (isNaN(current)) current = min;
+        current = Math.min(max, Math.max(min, current));
+        current = Math.round((current - min) / step) * step + min;
+        current = Math.min(max, Math.max(min, current));
+        hidden.value = current;
+        display.textContent = current;
+        document.getElementById('dailyLimitDec').disabled = current <= min;
+        document.getElementById('dailyLimitInc').disabled = current >= max;
+    }
+
     function adjustDailyLimit(direction) {
         const counter = document.getElementById('dailyLimitCounter');
         const display = document.getElementById('dailyLimitDisplay');
@@ -978,7 +1005,7 @@
         const max = parseInt(counter.dataset.max, 10);
         const step = parseInt(counter.dataset.step, 10);
         let current = parseInt(hidden.value, 10);
-        if (isNaN(current)) current = max;
+        if (isNaN(current)) current = min;
         current = Math.min(max, Math.max(min, current + direction * step));
         hidden.value = current;
         display.textContent = current;
